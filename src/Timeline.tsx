@@ -89,7 +89,7 @@ function previewLine(output: string): string {
 }
 
 export default function Timeline({ events }: TimelineProps) {
-  const bottomRef = useRef<HTMLDivElement>(null);
+  const topRef = useRef<HTMLDivElement>(null);
   const prevLenRef = useRef(0);
   const [expanded, setExpanded] = useState<Set<string>>(new Set());
   // Ids we've already auto-expanded (errors), so re-collapsing sticks.
@@ -117,20 +117,20 @@ export default function Timeline({ events }: TimelineProps) {
   useEffect(() => {
     const prev = prevLenRef.current;
     prevLenRef.current = events.length;
-    const el = bottomRef.current;
+    const el = topRef.current;
     if (!el) return;
 
-    // Only auto-scroll the timeline's OWN scroll container (never ancestors
-    // like the launcher's session list). Scroll on first fill, or when a new
-    // card is appended while the user is already near the bottom — so reviewing
-    // older cards or a reconnect snapshot doesn't yank the view.
+    // Newest card renders at the TOP, so "follow latest" means scrolling to the
+    // top. Only scroll the timeline's OWN container (never ancestors like the
+    // launcher's session list), and only on first fill or a new card while the
+    // user is near the top — so reviewing older cards below isn't yanked.
     const sc = getScrollParent(el);
     if (!sc) return;
     const firstFill = prev === 0 && events.length > 0;
     const appended = events.length > prev;
-    const nearBottom = sc.scrollHeight - sc.scrollTop - sc.clientHeight < 80;
-    if (firstFill || (appended && nearBottom)) {
-      sc.scrollTop = sc.scrollHeight;
+    const nearTop = sc.scrollTop < 80;
+    if (firstFill || (appended && nearTop)) {
+      sc.scrollTop = 0;
     }
   }, [events]);
 
@@ -159,9 +159,14 @@ export default function Timeline({ events }: TimelineProps) {
     );
   }
 
+  // Newest first (by start time), so the latest command is at the top and
+  // older ones sink to the bottom.
+  const ordered = [...events].sort((a, b) => b.ts - a.ts);
+
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 6, padding: "8px 10px" }}>
-      {events.map((ev) => {
+      <div ref={topRef} />
+      {ordered.map((ev) => {
         const isOpen = expanded.has(ev.id);
         const cmdLong = (ev.command?.length ?? 0) > 44;
         // Something extra to reveal on expand: full command and/or output.
@@ -278,7 +283,6 @@ export default function Timeline({ events }: TimelineProps) {
           </div>
         );
       })}
-      <div ref={bottomRef} />
     </div>
   );
 }
