@@ -81,10 +81,38 @@ function getScrollParent(el: HTMLElement | null): HTMLElement | null {
   return null;
 }
 
+/** Last non-empty line of output — a compact at-a-glance result. */
+function previewLine(output: string): string {
+  const lines = output.split("\n").filter((l) => l.trim().length > 0);
+  const last = lines[lines.length - 1] ?? "";
+  return last.length > 80 ? last.slice(0, 80) + "…" : last;
+}
+
 export default function Timeline({ events }: TimelineProps) {
   const bottomRef = useRef<HTMLDivElement>(null);
   const prevLenRef = useRef(0);
   const [expanded, setExpanded] = useState<Set<string>>(new Set());
+  // Ids we've already auto-expanded (errors), so re-collapsing sticks.
+  const autoHandled = useRef<Set<string>>(new Set());
+
+  // Auto-expand a card the first time it resolves to an error, so failures show
+  // their output immediately without a click.
+  useEffect(() => {
+    const toOpen: string[] = [];
+    for (const ev of events) {
+      if (ev.status === "error" && ev.output && !autoHandled.current.has(ev.id)) {
+        autoHandled.current.add(ev.id);
+        toOpen.push(ev.id);
+      }
+    }
+    if (toOpen.length) {
+      setExpanded((prev) => {
+        const next = new Set(prev);
+        toOpen.forEach((id) => next.add(id));
+        return next;
+      });
+    }
+  }, [events]);
 
   useEffect(() => {
     const prev = prevLenRef.current;
@@ -175,6 +203,22 @@ export default function Timeline({ events }: TimelineProps) {
                 }}
               >
                 {ev.command}
+              </div>
+            )}
+
+            {/* Collapsed: one-line output preview (the final line) */}
+            {!isOpen && ev.output && (
+              <div
+                style={{
+                  fontFamily: "Menlo, Monaco, 'Courier New', monospace",
+                  fontSize: 10,
+                  color: ev.status === "error" ? "#e0918a" : "#7f8b7f",
+                  whiteSpace: "nowrap",
+                  overflow: "hidden",
+                  textOverflow: "ellipsis",
+                }}
+              >
+                {previewLine(ev.output)}
               </div>
             )}
 
