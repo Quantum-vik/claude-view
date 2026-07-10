@@ -163,10 +163,13 @@ export default function Timeline({ events }: TimelineProps) {
     <div style={{ display: "flex", flexDirection: "column", gap: 6, padding: "8px 10px" }}>
       {events.map((ev) => {
         const isOpen = expanded.has(ev.id);
+        const cmdLong = (ev.command?.length ?? 0) > 44;
+        // Something extra to reveal on expand: full command and/or output.
+        const hasMore = !!ev.output || cmdLong;
         return (
           <div
             key={ev.id}
-            onClick={() => ev.output && toggle(ev.id)}
+            onClick={() => hasMore && toggle(ev.id)}
             style={{
               background: "#252526",
               border: "1px solid #333",
@@ -175,7 +178,7 @@ export default function Timeline({ events }: TimelineProps) {
               display: "flex",
               flexDirection: "column",
               gap: 4,
-              cursor: ev.output ? "pointer" : "default",
+              cursor: hasMore ? "pointer" : "default",
             }}
           >
             {/* Top row: tool badge + status pill */}
@@ -189,17 +192,28 @@ export default function Timeline({ events }: TimelineProps) {
               )}
             </div>
 
-            {/* Command text */}
+            {/* Command text — truncated when collapsed, full (wrapped,
+                selectable) when expanded so long commands are fully readable. */}
             {ev.command && (
               <div
                 title={ev.command}
+                onClick={isOpen ? (e) => e.stopPropagation() : undefined}
                 style={{
                   fontFamily: "Menlo, Monaco, 'Courier New', monospace",
                   fontSize: 11,
-                  color: "#c8c8c8",
-                  whiteSpace: "nowrap",
-                  overflow: "hidden",
-                  textOverflow: "ellipsis",
+                  color: "#d4d4d4",
+                  ...(isOpen
+                    ? {
+                        whiteSpace: "pre-wrap",
+                        wordBreak: "break-word",
+                        userSelect: "text",
+                        cursor: "text",
+                      }
+                    : {
+                        whiteSpace: "nowrap",
+                        overflow: "hidden",
+                        textOverflow: "ellipsis",
+                      }),
                 }}
               >
                 {ev.command}
@@ -251,9 +265,13 @@ export default function Timeline({ events }: TimelineProps) {
             {/* Bottom row: timestamp + expand hint */}
             <div style={{ display: "flex", alignItems: "center", fontSize: 10, color: "#555" }}>
               <span>{formatTimestamp(ev.ts)}</span>
-              {ev.output && (
+              {hasMore && (
                 <span style={{ marginLeft: "auto", color: "#666" }}>
-                  {isOpen ? "▾ hide output" : "▸ show output"}
+                  {isOpen
+                    ? "▾ collapse"
+                    : ev.output
+                    ? "▸ show output"
+                    : "▸ full command"}
                 </span>
               )}
             </div>
