@@ -1,0 +1,29 @@
+[package]
+name = "claude-view"
+version = "1.0.0"
+description = "Live per-session terminal mirror for Claude Code"
+edition = "2021"
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = [] }
+tauri-plugin-dialog = "2"
+axum = { version = "0.7", features = ["ws"] }
+tokio = { version = "1", features = ["full"] }
+portable-pty = "0.8"
+uuid = { version = "1", features = ["v4"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+dirs = "5"
+parking_lot = "0.12"
+urlencoding = "2"
+futures-util = "0.3"
+# Safe cross-platform default-app opener (uses ShellExecuteW on Windows — no
+# shell-string parsing, avoids cmd injection).
+open = "5"
+
+[profile.release]
+strip = true
+lto = true
