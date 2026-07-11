@@ -146,6 +146,20 @@ async fn handle_ws(socket: WebSocket, session: Arc<Session>) {
         let msg = json!({ "type": "bound", "session_id": sid, "cwd": session.cwd });
         let _ = tx.send(Message::Text(msg.to_string())).await;
     }
+    let current_model = session.model.read().clone();
+    if let Some(model) = current_model {
+        let _ = tx
+            .send(Message::Text(json!({ "type": "model", "model": model }).to_string()))
+            .await;
+    }
+    let current_usage = *session.usage.read();
+    if let Some(u) = current_usage {
+        let _ = tx
+            .send(Message::Text(
+                json!({ "type": "usage", "input": u.input, "output": u.output }).to_string(),
+            ))
+            .await;
+    }
     if session.is_ended() {
         let code = session.exit_code.read().unwrap_or(0);
         let _ = tx

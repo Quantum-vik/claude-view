@@ -20,6 +20,29 @@ pub enum Record {
         output: Option<String>,
         ts: u64,
     },
+    /// The model an assistant turn ran on (`message.model`). Used to show the
+    /// session's *actual* current model — the ground truth the CLI records —
+    /// rather than optimistically trusting a switch that may be declined.
+    Model { model: String },
+    /// Token usage from an assistant turn (`message.usage`). `input` is the
+    /// context sent (prompt + cache), i.e. the context-window occupancy;
+    /// `output` is tokens generated that turn. Powers the context meter.
+    Usage { input: u64, output: u64 },
+}
+
+/// Context tokens for one assistant turn: input side = context-window fill.
+pub fn usage_from(v: &Value) -> Option<(u64, u64)> {
+    let u = &v["message"]["usage"];
+    if !u.is_object() {
+        return None;
+    }
+    let n = |k: &str| u[k].as_u64().unwrap_or(0);
+    let input = n("input_tokens") + n("cache_read_input_tokens") + n("cache_creation_input_tokens");
+    let output = n("output_tokens");
+    if input == 0 && output == 0 {
+        return None;
+    }
+    Some((input, output))
 }
 
 /// Tails a session transcript JSONL, emitting tool Start/End records as new
@@ -111,6 +134,15 @@ impl Tailer {
 
 fn parse_record(v: &Value, out: &mut Vec<Record>) {
     let ts = v["timestamp"].as_str().and_then(parse_iso_ms).unwrap_or(0);
+    // Assistant turns record the model they ran on — the CLI's ground truth.
+    if v["type"].as_str() == Some("assistant") {
+        if let Some(model) = v["message"]["model"].as_str() {
+            out.push(Record::Model { model: model.to_string() });
+        }
+        if let Some((input, output)) = usage_from(v) {
+            out.push(Record::Usage { input, output });
+        }
+    }
     let content = &v["message"]["content"];
     let Some(blocks) = content.as_array() else {
         return;
@@ -363,6 +395,8 @@ mod tests {
                     match r {
                         Record::Start { .. } => starts += 1,
                         Record::End { .. } => ends += 1,
+                        Record::Model { .. } => {}
+                        Record::Usage { .. } => {}
                     }
                 }
             }

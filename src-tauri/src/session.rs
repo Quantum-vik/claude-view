@@ -49,8 +49,21 @@ pub struct Session {
     pub control_tx: broadcast::Sender<String>,
     pub scrollback: Mutex<Vec<u8>>,
     pub timeline: Mutex<Vec<TimelineEvent>>,
+    /// Actual current model (full id, e.g. "claude-opus-4-8"), read from the
+    /// transcript. None until the first assistant turn is observed.
+    pub model: RwLock<Option<String>>,
+    /// Latest context-window usage (input/output tokens) from the transcript.
+    pub usage: RwLock<Option<ContextUsage>>,
     pub ended: AtomicBool,
     pub exit_code: RwLock<Option<i64>>,
+}
+
+/// Token usage for the context meter. `input` = context-window occupancy
+/// (prompt + cache), `output` = tokens generated on the latest turn.
+#[derive(Serialize, Clone, Copy)]
+pub struct ContextUsage {
+    pub input: u64,
+    pub output: u64,
 }
 
 impl Session {
@@ -90,6 +103,9 @@ impl Session {
                 entry.output = output;
                 Some(entry.clone())
             }
+            // Model and Usage records are handled by the tailer thread, not
+            // the timeline.
+            Record::Model { .. } | Record::Usage { .. } => None,
         }
     }
 

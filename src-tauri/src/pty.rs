@@ -149,6 +149,8 @@ pub fn spawn_session(
         control_tx,
         scrollback: Mutex::new(Vec::new()),
         timeline: Mutex::new(Vec::new()),
+        model: RwLock::new(None),
+        usage: RwLock::new(None),
         ended: Default::default(),
         exit_code: RwLock::new(None),
     });
@@ -207,8 +209,33 @@ pub fn spawn_session(
                 tailer.set_session_id(&sid);
             }
             for rec in tailer.poll() {
-                if let Some(event) = session.apply_transcript(rec) {
-                    session.send_control(serde_json::json!({ "type": "timeline", "event": event }));
+                match rec {
+                    // Model changes push a control frame (deduped) so viewers
+                    // reflect the session's real model, self-correcting if a
+                    // switch was declined at the CLI confirmation prompt.
+                    crate::transcript::Record::Model { model } => {
+                        let changed = session.model.read().as_deref() != Some(&model);
+                        if changed {
+                            *session.model.write() = Some(model.clone());
+                            session.send_control(
+                                serde_json::json!({ "type": "model", "model": model }),
+                            );
+                        }
+                    }
+                    crate::transcript::Record::Usage { input, output } => {
+                        let usage = crate::session::ContextUsage { input, output };
+                        *session.usage.write() = Some(usage);
+                        session.send_control(serde_json::json!({
+                            "type": "usage", "input": input, "output": output
+                        }));
+                    }
+                    rec => {
+                        if let Some(event) = session.apply_transcript(rec) {
+                            session.send_control(
+                                serde_json::json!({ "type": "timeline", "event": event }),
+                            );
+                        }
+                    }
                 }
             }
             // Poll a few more times after exit to catch the final flush, then stop.
