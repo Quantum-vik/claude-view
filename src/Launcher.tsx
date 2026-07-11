@@ -3,6 +3,8 @@ import { open } from "@tauri-apps/plugin-dialog";
 import { invoke } from "@tauri-apps/api/core";
 import SessionWindow from "./SessionWindow";
 import { DragHandle, clamp } from "./Resizer";
+import { T, tint } from "./tokens";
+import ContextMeter from "./ContextMeter";
 
 const PAGE_SIZE = 10;
 /** Launcher width at/above which sessions embed in a right-hand pane. */
@@ -23,6 +25,7 @@ interface PastSession {
   modifiedMs: number;
   preview: string | null;
   model: string | null;
+  contextTokens: number | null;
 }
 
 interface ConnInfo {
@@ -47,6 +50,78 @@ function relativeTime(ms: number): string {
 /** "claude-opus-4-8" / "claude-haiku-4-5-20251001" -> "opus-4-8" / "haiku-4-5" */
 function prettyModel(model: string): string {
   return model.replace(/^claude-/, "").replace(/-\d{8}$/, "");
+}
+
+/** Last path segment — the repo/dir name used as a card title. */
+function repoName(cwd: string): string {
+  return cwd.split("/").filter(Boolean).pop() ?? cwd;
+}
+
+/** Parent path with a leading /Users/<name>/ or /home/<name>/ compressed to ~/. */
+function prettyParent(cwd: string): string {
+  const home = cwd.replace(/^\/(?:Users|home)\/[^/]+\//, "~/");
+  const name = repoName(home);
+  const parent = home.slice(0, home.length - name.length).replace(/\/$/, "");
+  return parent || "~";
+}
+
+/** Opus reads violet; everything else uses the calm path-blue chip. */
+function modelChipColor(model: string): string {
+  return /opus/i.test(model) ? T.modelViolet : T.path;
+}
+
+/** Sentence-case section label with a thin divider rule and optional chevron
+ *  collapse, a status pill, and a right-aligned control slot. */
+function SectionRow({
+  label,
+  open,
+  onToggle,
+  pill,
+  right,
+}: {
+  label: string;
+  open?: boolean;
+  onToggle?: () => void;
+  pill?: React.ReactNode;
+  right?: React.ReactNode;
+}) {
+  const collapsible = onToggle !== undefined;
+  return (
+    <div
+      style={{
+        display: "flex",
+        alignItems: "center",
+        gap: 8,
+        marginBottom: open === false ? 0 : 12,
+      }}
+    >
+      {collapsible && (
+        <span
+          onClick={onToggle}
+          style={{ color: T.textFaint, fontSize: 9, cursor: "pointer", userSelect: "none" }}
+        >
+          {open ? "▼" : "▶"}
+        </span>
+      )}
+      <h2
+        onClick={onToggle}
+        style={{
+          fontSize: 12,
+          fontWeight: 600,
+          color: T.textDim,
+          letterSpacing: 0.3,
+          margin: 0,
+          cursor: collapsible ? "pointer" : "default",
+          userSelect: "none",
+        }}
+      >
+        {label}
+      </h2>
+      {pill}
+      <div style={{ flex: 1, height: 1, background: T.divider }} />
+      {right}
+    </div>
+  );
 }
 
 export default function Launcher() {
@@ -78,17 +153,39 @@ export default function Launcher() {
   // session pane takes the full width.
   const [listWidth, setListWidth] = useState(LIST_WIDTH);
   const [listCollapsed, setListCollapsed] = useState(false);
+  // Collapsible launcher sections (by key).
+  const [collapsedSections, setCollapsedSections] = useState<Set<string>>(new Set());
+  const toggleSection = (k: string) =>
+    setCollapsedSections((prev) => {
+      const next = new Set(prev);
+      if (next.has(k)) next.delete(k);
+      else next.add(k);
+      return next;
+    });
   // Mirror of activeVid readable synchronously (avoids stale-closure in
   // closeTab, which decides the next active tab).
   const activeVidRef = useRef<string | null>(null);
   useEffect(() => {
     activeVidRef.current = activeVid;
   }, [activeVid]);
+  const searchRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
     const onResize = () => setWide(window.innerWidth >= SPLIT_MIN_WIDTH);
     window.addEventListener("resize", onResize);
     return () => window.removeEventListener("resize", onResize);
+  }, []);
+
+  // ⌘K / Ctrl+K focuses the search input.
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "k") {
+        e.preventDefault();
+        searchRef.current?.focus();
+      }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
   }, []);
 
   const refreshHooks = useCallback(async () => {
@@ -254,6 +351,10 @@ export default function Launcher() {
     return entries;
   }, [past, filter, sortBy]);
 
+  const activeLive = sessions.filter((s) => !s.ended).length;
+  // Busiest repo's session count — used to scale each group's usage bar.
+  const maxGroupCount = Math.max(1, ...grouped.map(([, l]) => l.length));
+
   function handleGroupScroll(dir: string, total: number, el: HTMLDivElement) {
     if (el.scrollTop + el.clientHeight >= el.scrollHeight - 40) {
       setPageCounts((prev) => {
@@ -264,6 +365,9 @@ export default function Launcher() {
     }
   }
 
+  const activeOpen = !collapsedSections.has("active");
+  const pastOpen = !collapsedSections.has("past");
+
   const listColumn = (
     <div
       style={{
@@ -273,298 +377,426 @@ export default function Launcher() {
         overflowY: "auto",
         display: "flex",
         justifyContent: "center",
+        background: T.surface,
       }}
     >
-      <div style={{ width: "100%", maxWidth: 620, padding: "40px 24px 0" }}>
-        <h1 style={{ fontSize: 22, fontWeight: 700, margin: 0, color: "#e8e8e8", letterSpacing: -0.5 }}>
-          Claude View
-        </h1>
-        <p style={{ fontSize: 13, color: "#777", marginTop: 4, marginBottom: 16 }}>
-          Live mirror for Claude Code CLI sessions
-        </p>
-
-        {/* Hooks toggle bar */}
+      <div style={{ width: "100%", maxWidth: 660, padding: "28px 28px 40px" }}>
+        {/* Header + primary action */}
         <div
           style={{
             display: "flex",
-            alignItems: "center",
-            gap: 12,
-            background: "#202021",
-            border: "1px solid #2e2e2e",
-            borderRadius: 8,
-            padding: "10px 14px",
-            marginBottom: 24,
+            alignItems: "flex-start",
+            justifyContent: "space-between",
+            gap: 16,
+            marginBottom: 22,
           }}
         >
-          <div style={{ flex: 1, minWidth: 0 }}>
-            <div style={{ fontSize: 13, fontWeight: 600, color: "#d4d4d4" }}>
-              Timeline hooks{" "}
-              {hooksInstalled === null ? (
-                <span style={{ color: "#666", fontWeight: 400 }}>· checking…</span>
-              ) : hooksInstalled ? (
-                <span style={{ color: "#2ea043", fontWeight: 400 }}>· on</span>
+          <div>
+            <h1 style={{ fontSize: 21, fontWeight: 700, margin: 0, letterSpacing: -0.4, color: T.text }}>
+              Sessions
+            </h1>
+            <p style={{ fontSize: 13, color: T.textDim, margin: "5px 0 0" }}>
+              Live mirror for Claude Code CLI
+            </p>
+          </div>
+          <button onClick={handleNewSession} style={primaryBtnStyle}>
+            <span style={{ fontSize: 16, lineHeight: 1 }}>+</span> New Session
+          </button>
+        </div>
+        {newSessionError && (
+          <div style={{ marginTop: -12, marginBottom: 16, color: T.error, fontSize: 12 }}>
+            {newSessionError}
+          </div>
+        )}
+
+        {/* Search-first */}
+        <div style={searchWrapStyle}>
+          <span style={{ color: T.textFaint, fontSize: 15 }}>⌕</span>
+          <input
+            ref={searchRef}
+            value={filter}
+            onChange={(e) => setFilter(e.target.value)}
+            placeholder="Search a directory or prompt to resume…"
+            style={{
+              flex: 1,
+              background: "transparent",
+              border: "none",
+              color: T.text,
+              fontSize: 13.5,
+              outline: "none",
+              fontFamily: "inherit",
+            }}
+          />
+          <span
+            onClick={() => searchRef.current?.focus()}
+            style={{
+              fontFamily: T.mono,
+              fontSize: 11,
+              color: T.textFaint,
+              background: T.surface2,
+              border: `1px solid ${T.border}`,
+              borderRadius: 5,
+              padding: "2px 6px",
+              cursor: "pointer",
+            }}
+          >
+            ⌘K
+          </span>
+        </div>
+
+        {/* Active now */}
+        <div style={{ marginBottom: 26 }}>
+          <SectionRow
+            label="Active now"
+            open={activeOpen}
+            onToggle={() => toggleSection("active")}
+            pill={
+              activeLive > 0 ? (
+                <span
+                  style={{
+                    fontFamily: T.mono,
+                    fontSize: 11,
+                    color: T.success,
+                    background: tint(T.success, 0.12),
+                    borderRadius: 999,
+                    padding: "2px 8px",
+                  }}
+                >
+                  {activeLive} live
+                </span>
+              ) : undefined
+            }
+          />
+          {activeOpen &&
+            (sessions.length === 0 ? (
+              <p style={{ color: T.textFaint, fontSize: 13, margin: 0 }}>
+                No mirrored sessions yet — start one above or resume a recent one below.
+              </p>
+            ) : (
+              <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+                {sessions.map((s) => {
+                  const selected = activeVid === s.viewer_id;
+                  return (
+                    <div
+                      key={s.viewer_id}
+                      style={{
+                        ...cardStyle,
+                        border: `1px solid ${selected ? T.borderAccent : T.border}`,
+                        padding: "13px 15px",
+                      }}
+                    >
+                      <span
+                        style={{
+                          width: 9,
+                          height: 9,
+                          borderRadius: "50%",
+                          background: s.ended ? T.idle : T.success,
+                          flexShrink: 0,
+                          animation: !s.ended && selected ? "ring 2s ease-out infinite" : undefined,
+                        }}
+                      />
+                      <div style={{ flex: 1, overflow: "hidden" }}>
+                        <div style={{ fontSize: 14, fontWeight: 600, color: T.text }}>
+                          {repoName(s.cwd)}
+                        </div>
+                        <div style={{ ...pathStyle, marginTop: 2 }} title={s.cwd}>
+                          {prettyParent(s.cwd)}/{repoName(s.cwd)}
+                          {s.session_id ? (
+                            <span style={{ color: T.textFaint }}> · #{s.session_id.slice(0, 8)}</span>
+                          ) : (
+                            <span style={{ color: T.textFaint }}> · id pending</span>
+                          )}
+                          {s.ended && <span style={{ color: T.error }}> · ended</span>}
+                        </div>
+                      </div>
+                      {!s.ended && (
+                        <button
+                          onClick={() => handleFocus(s)}
+                          style={selected ? accentBtnStyle : secondaryBtnStyle}
+                        >
+                          {embedMode ? "Open" : "Focus"}
+                        </button>
+                      )}
+                    </div>
+                  );
+                })}
+              </div>
+            ))}
+        </div>
+
+        {/* Recent (past sessions) */}
+        <div style={{ marginBottom: 24 }}>
+          <SectionRow
+            label="Recent"
+            open={pastOpen}
+            onToggle={() => toggleSection("past")}
+            right={
+              pastOpen ? (
+                <div style={{ display: "flex", gap: 2, alignItems: "center" }}>
+                  <div style={segToggleStyle}>
+                    {(
+                      [
+                        ["recent", "Recent"],
+                        ["count", "Busiest"],
+                      ] as const
+                    ).map(([key, label]) => (
+                      <button
+                        key={key}
+                        onClick={() => setSortBy(key)}
+                        style={{
+                          background: sortBy === key ? T.borderAccent : "transparent",
+                          border: "none",
+                          borderRadius: 6,
+                          color: sortBy === key ? "#cfe2ff" : T.textDim,
+                          fontSize: 11.5,
+                          padding: "3px 10px",
+                          cursor: "pointer",
+                        }}
+                      >
+                        {label}
+                      </button>
+                    ))}
+                  </div>
+                  <button
+                    onClick={refreshPast}
+                    style={iconBtnStyle}
+                    title="Rescan ~/.claude/projects"
+                  >
+                    ↻
+                  </button>
+                </div>
+              ) : undefined
+            }
+          />
+
+          {pastOpen && (
+            <>
+              {pastLoading && past.length === 0 ? (
+                <p style={{ color: T.textFaint, fontSize: 13 }}>Scanning…</p>
+              ) : grouped.length === 0 ? (
+                <p style={{ color: T.textFaint, fontSize: 13 }}>
+                  {filter ? "No sessions match your search." : "No past sessions found."}
+                </p>
               ) : (
-                <span style={{ color: "#888", fontWeight: 400 }}>· off</span>
+                <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
+                  {grouped.map(([dir, list], rank) => {
+                    const shown = Math.min(pageCounts[dir] ?? PAGE_SIZE, list.length);
+                    const visible = list.slice(0, shown);
+                    const dirOpen = !collapsedSections.has("dir:" + dir);
+                    return (
+                      <div key={dir}>
+                        {/* Workspace group header */}
+                        <div
+                          onClick={() => toggleSection("dir:" + dir)}
+                          style={{
+                            display: "flex",
+                            alignItems: "center",
+                            gap: 8,
+                            marginBottom: dirOpen ? 8 : 0,
+                            cursor: "pointer",
+                            userSelect: "none",
+                          }}
+                          title={dir}
+                        >
+                          <span style={{ color: T.textFaint, fontSize: 9, flexShrink: 0 }}>
+                            {dirOpen ? "▼" : "▶"}
+                          </span>
+                          {sortBy === "count" && (
+                            <span style={{ color: T.running, fontWeight: 700, fontSize: 12, flexShrink: 0 }}>
+                              #{rank + 1}
+                            </span>
+                          )}
+                          <span
+                            style={{
+                              fontFamily: T.mono,
+                              fontSize: 12,
+                              color: T.path,
+                              fontWeight: 500,
+                              flexShrink: 0,
+                            }}
+                          >
+                            {repoName(dir)}
+                          </span>
+                          <span
+                            style={{
+                              fontSize: 11,
+                              color: T.textFaint,
+                              overflow: "hidden",
+                              textOverflow: "ellipsis",
+                              whiteSpace: "nowrap",
+                            }}
+                          >
+                            {prettyParent(dir)} · {list.length} session{list.length === 1 ? "" : "s"}
+                          </span>
+                        </div>
+
+                        {/* Usage bar — this repo's session count vs the busiest repo. */}
+                        {(() => {
+                          const frac = list.length / maxGroupCount;
+                          // Heavier usage skews violet; lighter stays blue.
+                          const fill = frac >= 0.66 ? T.modelViolet : T.accent;
+                          return (
+                            <div
+                              title={`${list.length} of ${maxGroupCount} (busiest) sessions`}
+                              style={{
+                                height: 4,
+                                background: T.surface2,
+                                borderRadius: 999,
+                                overflow: "hidden",
+                                marginBottom: dirOpen ? 8 : 0,
+                              }}
+                            >
+                              <div
+                                style={{
+                                  height: "100%",
+                                  width: `${Math.max(6, frac * 100)}%`,
+                                  background: fill,
+                                  borderRadius: 999,
+                                }}
+                              />
+                            </div>
+                          );
+                        })()}
+
+                        {dirOpen && (
+                          <>
+                            <div
+                              onScroll={(e) => handleGroupScroll(dir, list.length, e.currentTarget)}
+                              style={{
+                                display: "flex",
+                                flexDirection: "column",
+                                gap: 7,
+                                maxHeight: 320,
+                                overflowY: "auto",
+                                paddingRight: 4,
+                              }}
+                            >
+                              {visible.map((s) => (
+                                <div key={s.session_id} style={pastCardStyle}>
+                                  <div style={{ flex: 1, overflow: "hidden" }}>
+                                    <div
+                                      style={{
+                                        fontSize: 13,
+                                        color: T.text,
+                                        overflow: "hidden",
+                                        textOverflow: "ellipsis",
+                                        whiteSpace: "nowrap",
+                                      }}
+                                      title={s.preview ?? s.session_id}
+                                    >
+                                      {s.preview}
+                                    </div>
+                                    <div
+                                      style={{
+                                        display: "flex",
+                                        alignItems: "center",
+                                        gap: 8,
+                                        marginTop: 5,
+                                      }}
+                                    >
+                                      <span style={{ fontFamily: T.mono, fontSize: 11, color: T.textFaint }}>
+                                        {relativeTime(s.modifiedMs)}
+                                      </span>
+                                      {/* "<synthetic>" marks injected stub messages, not a model */}
+                                      {s.model && !s.model.startsWith("<") && (
+                                        <span
+                                          style={{
+                                            fontSize: 10.5,
+                                            color: modelChipColor(s.model),
+                                            background: tint(modelChipColor(s.model), 0.13),
+                                            borderRadius: 6,
+                                            padding: "1px 7px",
+                                          }}
+                                          title={s.model}
+                                        >
+                                          {prettyModel(s.model)}
+                                        </span>
+                                      )}
+                                      {s.contextTokens != null && s.contextTokens > 0 && (
+                                        <ContextMeter
+                                          tokens={s.contextTokens}
+                                          modelId={s.model}
+                                          width={40}
+                                          compact
+                                        />
+                                      )}
+                                    </div>
+                                  </div>
+                                  <button onClick={() => handleResume(s)} style={secondaryBtnStyle}>
+                                    Resume
+                                  </button>
+                                </div>
+                              ))}
+                            </div>
+                            {list.length > shown ? (
+                              <div style={{ fontSize: 11, color: T.textFaint, marginTop: 6 }}>
+                                showing {shown} of {list.length} — scroll the list for more
+                              </div>
+                            ) : (
+                              list.length > PAGE_SIZE && (
+                                <div style={{ fontSize: 11, color: T.textFaint, marginTop: 6 }}>
+                                  all {list.length} shown
+                                </div>
+                              )
+                            )}
+                          </>
+                        )}
+                      </div>
+                    );
+                  })}
+                </div>
               )}
+            </>
+          )}
+        </div>
+
+        {/* Hooks onboarding — demoted to a reassuring footer status row */}
+        <div style={hooksCardStyle}>
+          <span
+            style={{
+              width: 34,
+              height: 34,
+              borderRadius: 9,
+              background: tint(hooksInstalled ? T.success : T.idle, 0.12),
+              display: "flex",
+              alignItems: "center",
+              justifyContent: "center",
+              color: hooksInstalled ? T.success : T.textDim,
+              fontSize: 16,
+              flexShrink: 0,
+            }}
+          >
+            {hooksInstalled === null ? "…" : hooksInstalled ? "✓" : "○"}
+          </span>
+          <div style={{ flex: 1, minWidth: 0 }}>
+            <div style={{ fontSize: 13, fontWeight: 600, color: T.text }}>
+              {hooksInstalled === null
+                ? "Checking timeline hooks…"
+                : hooksInstalled
+                ? "Timeline hooks are on"
+                : "Timeline hooks are off"}
             </div>
-            <div style={{ fontSize: 11, color: "#666", marginTop: 2 }}>
+            <div style={{ fontSize: 11.5, color: T.textDim, marginTop: 2 }}>
               {hooksMessage && !hooksBusy
                 ? hooksMessage
-                : "On: cards appear live. Off: the timeline still fills in from the session transcript, a little delayed."}
+                : hooksInstalled
+                ? "Command cards appear live. Reversible — a backup of settings.json is kept."
+                : "The timeline still fills in from the transcript, a little delayed. Turn on for live cards."}
             </div>
           </div>
-          {/* Toggle switch */}
           <button
             onClick={toggleHooks}
             disabled={hooksBusy || hooksInstalled === null}
-            title={hooksInstalled ? "Uninstall hooks" : "Install hooks"}
             style={{
-              position: "relative",
-              width: 44,
-              height: 24,
-              borderRadius: 12,
-              border: "none",
-              flexShrink: 0,
+              ...secondaryBtnStyle,
+              opacity: hooksBusy || hooksInstalled === null ? 0.6 : 1,
               cursor: hooksBusy || hooksInstalled === null ? "default" : "pointer",
-              background: hooksInstalled ? "#2ea043" : "#3a3a3a",
-              opacity: hooksBusy ? 0.6 : 1,
-              transition: "background 0.15s",
-              padding: 0,
             }}
+            title={hooksInstalled ? "Uninstall hooks" : "Install hooks"}
           >
-            <span
-              style={{
-                position: "absolute",
-                top: 3,
-                left: hooksInstalled ? 23 : 3,
-                width: 18,
-                height: 18,
-                borderRadius: "50%",
-                background: "#fff",
-                transition: "left 0.15s",
-              }}
-            />
+            {hooksInstalled ? "Manage" : "Turn on"}
           </button>
         </div>
-
-        {/* New Session */}
-        <section style={sectionStyle}>
-          <button onClick={handleNewSession} style={primaryBtnStyle}>
-            + New Session
-          </button>
-          {newSessionError && (
-            <div style={{ marginTop: 8, color: "#f85149", fontSize: 12 }}>{newSessionError}</div>
-          )}
-        </section>
-
-        {/* Active (mirrored) sessions */}
-        <section style={sectionStyle}>
-          <h2 style={sectionTitleStyle}>Active in viewer</h2>
-          {sessions.length === 0 ? (
-            <p style={{ color: "#555", fontSize: 13, margin: 0 }}>No mirrored sessions yet.</p>
-          ) : (
-            <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
-              {sessions.map((s) => (
-                <div
-                  key={s.viewer_id}
-                  style={{
-                    ...cardStyle,
-                    border:
-                      activeVid === s.viewer_id ? "1px solid #1a6cc4" : cardStyle.border,
-                  }}
-                >
-                  <span
-                    style={{
-                      width: 8,
-                      height: 8,
-                      borderRadius: "50%",
-                      background: s.ended ? "#555" : "#2ea043",
-                      flexShrink: 0,
-                    }}
-                  />
-                  <div style={{ flex: 1, overflow: "hidden" }}>
-                    <div style={pathStyle} title={s.cwd}>
-                      {s.cwd}
-                    </div>
-                    <div style={{ fontSize: 11, color: "#666", marginTop: 2 }}>
-                      {s.session_id ? `#${s.session_id.slice(0, 8)}` : "live · id pending (needs hooks)"}
-                      {s.ended && <span style={{ marginLeft: 8, color: "#f85149" }}>ended</span>}
-                    </div>
-                  </div>
-                  {!s.ended && (
-                    <button onClick={() => handleFocus(s)} style={secondaryBtnStyle}>
-                      {embedMode ? "View" : "Focus"}
-                    </button>
-                  )}
-                </div>
-              ))}
-            </div>
-          )}
-        </section>
-
-        {/* Past sessions browser */}
-        <section style={sectionStyle}>
-          <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 10 }}>
-            <h2 style={{ ...sectionTitleStyle, margin: 0, flex: "none" }}>Past sessions</h2>
-            <input
-              value={filter}
-              onChange={(e) => setFilter(e.target.value)}
-              placeholder="filter by directory or prompt…"
-              style={{
-                flex: 1,
-                background: "#252526",
-                border: "1px solid #333",
-                borderRadius: 5,
-                color: "#d4d4d4",
-                fontSize: 12,
-                padding: "4px 8px",
-                outline: "none",
-              }}
-            />
-            <button onClick={refreshPast} style={secondaryBtnStyle} title="Rescan ~/.claude/projects">
-              ↻
-            </button>
-          </div>
-          <div style={{ display: "flex", gap: 4, marginBottom: 10 }}>
-            {(
-              [
-                ["recent", "Recent"],
-                ["count", "Most sessions"],
-              ] as const
-            ).map(([key, label]) => (
-              <button
-                key={key}
-                onClick={() => setSortBy(key)}
-                style={{
-                  ...secondaryBtnStyle,
-                  background: sortBy === key ? "#0e4d92" : "transparent",
-                  borderColor: sortBy === key ? "#1a6cc4" : "#444",
-                  color: sortBy === key ? "#e0e8f8" : "#c8c8c8",
-                }}
-              >
-                {label}
-              </button>
-            ))}
-          </div>
-          <p style={{ fontSize: 11, color: "#666", margin: "0 0 10px" }}>
-            Every Claude Code session found on this machine. <b>Open</b> resumes it{" "}
-            {embedMode ? "in the pane on the right" : "in a mirrored window"} — exit it in its
-            original terminal first if it's still running there.
-          </p>
-
-          {pastLoading && past.length === 0 ? (
-            <p style={{ color: "#555", fontSize: 13 }}>Scanning…</p>
-          ) : grouped.length === 0 ? (
-            <p style={{ color: "#555", fontSize: 13 }}>
-              {filter ? "No sessions match the filter." : "No past sessions found."}
-            </p>
-          ) : (
-            <div style={{ display: "flex", flexDirection: "column", gap: 14, marginBottom: 8 }}>
-              {grouped.map(([dir, list], rank) => {
-                const shown = Math.min(pageCounts[dir] ?? PAGE_SIZE, list.length);
-                const visible = list.slice(0, shown);
-                return (
-                  <div key={dir}>
-                    <div
-                      style={{
-                        ...pathStyle,
-                        fontSize: 12,
-                        color: "#79b8ff",
-                        marginBottom: 6,
-                        maxWidth: "100%",
-                      }}
-                      title={dir}
-                    >
-                      {sortBy === "count" && (
-                        <span style={{ color: "#d29922", fontWeight: 700 }}>#{rank + 1} </span>
-                      )}
-                      {dir}{" "}
-                      <span style={{ color: "#555", fontFamily: "system-ui" }}>
-                        ({list.length} session{list.length === 1 ? "" : "s"})
-                      </span>
-                    </div>
-                    <div
-                      onScroll={(e) => handleGroupScroll(dir, list.length, e.currentTarget)}
-                      style={{
-                        display: "flex",
-                        flexDirection: "column",
-                        gap: 6,
-                        maxHeight: 290,
-                        overflowY: "auto",
-                        paddingRight: 4,
-                      }}
-                    >
-                      {visible.map((s) => (
-                        <div key={s.session_id} style={{ ...cardStyle, padding: "8px 12px" }}>
-                          <div style={{ flex: 1, overflow: "hidden" }}>
-                            <div
-                              style={{
-                                fontSize: 12,
-                                color: "#c8c8c8",
-                                overflow: "hidden",
-                                textOverflow: "ellipsis",
-                                whiteSpace: "nowrap",
-                              }}
-                              title={s.preview ?? s.session_id}
-                            >
-                              {s.preview}
-                            </div>
-                            <div
-                              style={{
-                                fontSize: 11,
-                                color: "#666",
-                                marginTop: 2,
-                                fontFamily: "Menlo, monospace",
-                                display: "flex",
-                                alignItems: "center",
-                                gap: 6,
-                              }}
-                            >
-                              <span>
-                                #{s.session_id.slice(0, 8)} · {relativeTime(s.modifiedMs)}
-                              </span>
-                              {/* "<synthetic>" marks injected stub messages, not a model */}
-                              {s.model && !s.model.startsWith("<") && (
-                                <span
-                                  style={{
-                                    background: "#1f2a3a",
-                                    color: "#79b8ff",
-                                    borderRadius: 8,
-                                    padding: "0 7px",
-                                    fontSize: 10,
-                                    lineHeight: "16px",
-                                  }}
-                                  title={s.model}
-                                >
-                                  {prettyModel(s.model)}
-                                </span>
-                              )}
-                            </div>
-                          </div>
-                          <button onClick={() => handleResume(s)} style={secondaryBtnStyle}>
-                            Open
-                          </button>
-                        </div>
-                      ))}
-                    </div>
-                    {list.length > shown ? (
-                      <div style={{ fontSize: 11, color: "#666", marginTop: 5 }}>
-                        showing {shown} of {list.length} — scroll the list for more
-                      </div>
-                    ) : (
-                      list.length > PAGE_SIZE && (
-                        <div style={{ fontSize: 11, color: "#666", marginTop: 5 }}>
-                          all {list.length} shown
-                        </div>
-                      )
-                    )}
-                  </div>
-                );
-              })}
-            </div>
-          )}
-        </section>
-
       </div>
     </div>
   );
@@ -574,9 +806,9 @@ export default function Launcher() {
       style={{
         height: "100vh",
         display: "flex",
-        background: "#1e1e1e",
-        color: "#d4d4d4",
-        fontFamily: "system-ui, -apple-system, sans-serif",
+        background: T.surface,
+        color: T.text,
+        fontFamily: T.ui,
         overflow: "hidden",
       }}
     >
@@ -600,8 +832,8 @@ export default function Launcher() {
               alignItems: "center",
               gap: 2,
               padding: "4px 8px 0",
-              background: "#161617",
-              borderBottom: "1px solid #2a2a2a",
+              background: T.titlebar,
+              borderBottom: `1px solid ${T.border}`,
               flexShrink: 0,
               overflowX: "auto",
             }}
@@ -612,9 +844,9 @@ export default function Launcher() {
               title={listCollapsed ? "Show sessions list" : "Hide sessions list"}
               style={{
                 background: "transparent",
-                border: "1px solid #333",
+                border: `1px solid ${T.border}`,
                 borderRadius: 5,
-                color: "#c8c8c8",
+                color: T.textDim,
                 cursor: "pointer",
                 fontSize: 13,
                 lineHeight: 1,
@@ -629,7 +861,7 @@ export default function Launcher() {
             {tabs.map((t) => {
               const active = t.vid === activeVid;
               const ended = sessions.find((s) => s.viewer_id === t.vid)?.ended ?? false;
-              const name = t.cwd.split("/").filter(Boolean).pop() ?? t.cwd;
+              const name = repoName(t.cwd);
               return (
                 <div
                   key={t.vid}
@@ -641,9 +873,9 @@ export default function Launcher() {
                     gap: 6,
                     padding: "5px 10px",
                     borderRadius: "7px 7px 0 0",
-                    background: active ? "#1e1e1e" : "#232324",
-                    border: "1px solid #2a2a2a",
-                    borderBottom: active ? "1px solid #1e1e1e" : "1px solid #2a2a2a",
+                    background: active ? T.surface : T.surface1,
+                    border: `1px solid ${T.border}`,
+                    borderBottom: active ? `1px solid ${T.surface}` : `1px solid ${T.border}`,
                     marginBottom: -1,
                     cursor: "pointer",
                     maxWidth: 200,
@@ -655,14 +887,14 @@ export default function Launcher() {
                       width: 7,
                       height: 7,
                       borderRadius: "50%",
-                      background: ended ? "#555" : "#2ea043",
+                      background: ended ? T.idle : T.success,
                       flexShrink: 0,
                     }}
                   />
                   <span
                     style={{
                       fontSize: 12,
-                      color: active ? "#e0e0e0" : "#999",
+                      color: active ? T.text : T.textDim,
                       overflow: "hidden",
                       textOverflow: "ellipsis",
                       whiteSpace: "nowrap",
@@ -676,7 +908,7 @@ export default function Launcher() {
                       closeTab(t.vid);
                     }}
                     title="Close tab (session keeps running)"
-                    style={{ color: "#777", fontSize: 12, padding: "0 2px", cursor: "pointer" }}
+                    style={{ color: T.textFaint, fontSize: 12, padding: "0 2px", cursor: "pointer" }}
                   >
                     ✕
                   </span>
@@ -725,7 +957,7 @@ export default function Launcher() {
                   display: "flex",
                   alignItems: "center",
                   justifyContent: "center",
-                  color: "#555",
+                  color: T.textFaint,
                   fontSize: 14,
                   textAlign: "center",
                   padding: 24,
@@ -733,7 +965,7 @@ export default function Launcher() {
               >
                 Select a session — it opens as a tab here.
                 <br />
-                New Session, Open, and View all add tabs.
+                New Session, Open, and Focus all add tabs.
               </div>
             )}
           </div>
@@ -743,66 +975,123 @@ export default function Launcher() {
   );
 }
 
-const sectionStyle: React.CSSProperties = {
-  marginBottom: 28,
-};
-
-const sectionTitleStyle: React.CSSProperties = {
-  fontSize: 13,
-  fontWeight: 700,
-  color: "#888",
-  letterSpacing: 0.8,
-  textTransform: "uppercase",
-  margin: "0 0 12px",
-};
-
 const cardStyle: React.CSSProperties = {
-  background: "#252526",
-  border: "1px solid #333",
-  borderRadius: 8,
-  padding: "10px 14px",
+  background: T.surface1,
+  border: `1px solid ${T.border}`,
+  borderRadius: 12,
+  padding: "13px 15px",
   display: "flex",
   alignItems: "center",
-  gap: 10,
+  gap: 13,
+};
+
+const pastCardStyle: React.CSSProperties = {
+  background: T.surface1,
+  border: `1px solid ${T.border}`,
+  borderRadius: 11,
+  padding: "11px 14px",
+  display: "flex",
+  alignItems: "center",
+  gap: 12,
 };
 
 const pathStyle: React.CSSProperties = {
-  fontFamily: "Menlo, Monaco, monospace",
-  fontSize: 12,
-  color: "#9cdcfe",
+  fontFamily: T.mono,
+  fontSize: 11.5,
+  color: T.path,
   overflow: "hidden",
   textOverflow: "ellipsis",
   whiteSpace: "nowrap",
 };
 
+const searchWrapStyle: React.CSSProperties = {
+  display: "flex",
+  alignItems: "center",
+  gap: 10,
+  background: T.surface1,
+  border: `1px solid ${T.border}`,
+  borderRadius: 10,
+  padding: "0 12px",
+  height: 42,
+  marginBottom: 22,
+};
+
 const primaryBtnStyle: React.CSSProperties = {
-  background: "#0e4d92",
-  border: "1px solid #1a6cc4",
-  borderRadius: 6,
-  color: "#e0e8f8",
+  background: T.accent,
+  border: "none",
+  borderRadius: 9,
+  color: T.accentInk,
   cursor: "pointer",
-  fontSize: 13,
+  fontSize: 14,
   fontWeight: 600,
-  padding: "7px 18px",
+  padding: "10px 18px",
+  display: "flex",
+  alignItems: "center",
+  gap: 7,
+  boxShadow: "0 4px 14px rgba(91,157,255,0.28)",
+  flexShrink: 0,
+};
+
+const accentBtnStyle: React.CSSProperties = {
+  background: T.accent,
+  border: "none",
+  borderRadius: 8,
+  color: T.accentInk,
+  cursor: "pointer",
+  fontSize: 12.5,
+  fontWeight: 600,
+  padding: "7px 15px",
+  flexShrink: 0,
 };
 
 const secondaryBtnStyle: React.CSSProperties = {
-  background: "transparent",
-  border: "1px solid #444",
-  borderRadius: 5,
-  color: "#c8c8c8",
+  background: T.surface2,
+  border: `1px solid ${T.borderStrong}`,
+  borderRadius: 8,
+  color: T.text,
   cursor: "pointer",
   fontSize: 12,
-  padding: "4px 12px",
+  fontWeight: 600,
+  padding: "6px 13px",
   flexShrink: 0,
+};
+
+const iconBtnStyle: React.CSSProperties = {
+  background: "transparent",
+  border: `1px solid ${T.borderStrong}`,
+  borderRadius: 8,
+  color: T.textDim,
+  cursor: "pointer",
+  fontSize: 12,
+  padding: "3px 9px",
+  flexShrink: 0,
+};
+
+const segToggleStyle: React.CSSProperties = {
+  display: "flex",
+  gap: 2,
+  background: T.surface1,
+  border: `1px solid ${T.border}`,
+  borderRadius: 8,
+  padding: 2,
 };
 
 const slimBtnStyle: React.CSSProperties = {
   background: "transparent",
-  border: "1px solid #3a3a3a",
+  border: `1px solid ${T.borderStrong}`,
   borderRadius: 4,
-  color: "#aaa",
+  color: T.textDim,
   cursor: "pointer",
   fontSize: 11,
   padding: "2px 8px",
+};
+
+const hooksCardStyle: React.CSSProperties = {
+  background: "linear-gradient(180deg,#1a1d22,#1c1f24)",
+  border: `1px solid ${T.border}`,
+  borderRadius: 12,
+  padding: "14px 16px",
+  display: "flex",
+  alignItems: "center",
+  gap: 14,
 };

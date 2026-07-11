@@ -1,9 +1,11 @@
 use std::fs;
-use std::io::{BufRead, BufReader, Read};
+use std::io::{BufRead, BufReader, Read, Seek, SeekFrom};
 use std::path::Path;
 
 use serde::Serialize;
 use serde_json::Value;
+
+use crate::transcript::usage_from;
 
 /// A session found on disk in ~/.claude/projects, resumable via
 /// `claude --resume <session_id>`.
@@ -16,6 +18,10 @@ pub struct PastSession {
     pub preview: Option<String>,
     /// Model id from the first assistant message (e.g. "claude-fable-5").
     pub model: Option<String>,
+    /// Context-window occupancy at the session's end (input tokens of the last
+    /// assistant turn). None if no usage found in the tail.
+    #[serde(rename = "contextTokens")]
+    pub context_tokens: Option<u64>,
 }
 
 /// Scan every project transcript and return sessions newest-first. Only the
@@ -59,16 +65,21 @@ pub fn list() -> Result<Vec<PastSession>, String> {
                 .map(|d| d.as_millis() as u64)
                 .unwrap_or(0);
 
-            let (cwd, preview, model) = scan_head(&path);
+            let (cwd, preview, head_model) = scan_head(&path);
             let Some(cwd) = cwd else {
                 continue; // unreadable/empty transcript — not resumable, skip
             };
+            // The tail gives the session's CURRENT model + context size. Prefer
+            // the tail model for both the chip and the meter's window, since a
+            // session may have switched models (e.g. fable → opus).
+            let (context_tokens, tail_model) = scan_tail(&path);
             out.push(PastSession {
                 session_id: stem.to_string(),
                 cwd,
                 modified_ms,
                 preview,
-                model,
+                model: tail_model.or(head_model),
+                context_tokens,
             });
         }
     }
@@ -117,6 +128,49 @@ fn scan_head(path: &Path) -> (Option<String>, Option<String>, Option<String>) {
         }
     }
     (cwd, preview.or(summary), model)
+}
+
+/// Read the tail of a transcript and return the context-window occupancy
+/// (input tokens) AND the model of the LAST assistant turn — i.e. how full the
+/// context was and what model the session ended on. The model drives the
+/// meter's window, so a session that switched models is scaled correctly. Only
+/// the final chunk is read, so it stays cheap.
+fn scan_tail(path: &Path) -> (Option<u64>, Option<String>) {
+    const TAIL: u64 = 256 * 1024;
+    let none = (None, None);
+    let Ok(mut file) = fs::File::open(path) else {
+        return none;
+    };
+    let Ok(len) = file.metadata().map(|m| m.len()) else {
+        return none;
+    };
+    let start = len.saturating_sub(TAIL);
+    if file.seek(SeekFrom::Start(start)).is_err() {
+        return none;
+    }
+    // Read raw bytes (an arbitrary offset can split a UTF-8 codepoint) and
+    // decode lossily; the partial first line is skipped below regardless.
+    let mut bytes = Vec::new();
+    if file.take(TAIL).read_to_end(&mut bytes).is_err() {
+        return none;
+    }
+    let buf = String::from_utf8_lossy(&bytes);
+    let mut context = None;
+    let mut model = None;
+    // The first line is likely partial when we didn't start at 0 — skip it.
+    for line in buf.lines().skip(if start > 0 { 1 } else { 0 }) {
+        if let Ok(v) = serde_json::from_str::<Value>(line) {
+            if v["type"] == "assistant" {
+                if let Some((input, _)) = usage_from(&v) {
+                    context = Some(input);
+                }
+                if let Some(m) = v["message"]["model"].as_str() {
+                    model = Some(m.to_string());
+                }
+            }
+        }
+    }
+    (context, model)
 }
 
 fn extract_user_text(v: &Value) -> Option<String> {

@@ -15,6 +15,9 @@ interface TerminalProps {
   cwd?: string;
   onControl: (msg: unknown) => void;
   onStatusChange?: (status: ConnectionStatus) => void;
+  /** Populated with a function that injects raw input into this session's PTY
+   *  (used by header controls like the model switcher). Cleared on unmount. */
+  sendRef?: React.MutableRefObject<((data: string) => void) | null>;
 }
 
 // path-ish tokens: optional ~/ ./ ../ prefix, segments, an extension, and an
@@ -22,7 +25,7 @@ interface TerminalProps {
 const PATH_REGEX = /(?:~\/|\.{1,2}\/)?[\w.@-]+(?:\/[\w.@-]+)*\.[A-Za-z][A-Za-z0-9]{0,7}(?::\d+)?/g;
 const URL_REGEX = /https?:\/\/[^\s"'<>()\]]+/g;
 
-export default function Terminal({ vid, port, token, cwd, onControl, onStatusChange }: TerminalProps) {
+export default function Terminal({ vid, port, token, cwd, onControl, onStatusChange, sendRef }: TerminalProps) {
   const containerRef = useRef<HTMLDivElement>(null);
   const searchInputRef = useRef<HTMLInputElement>(null);
   const [searchOpen, setSearchOpen] = useState(false);
@@ -56,7 +59,7 @@ export default function Terminal({ vid, port, token, cwd, onControl, onStatusCha
       fontFamily: "Menlo, Monaco, 'Courier New', monospace",
       fontSize: 13,
       theme: {
-        background: "#1e1e1e",
+        background: "#141519",
         foreground: "#d4d4d4",
         cursor: "#d4d4d4",
         selectionBackground: "#264f78",
@@ -179,6 +182,11 @@ export default function Terminal({ vid, port, token, cwd, onControl, onStatusCha
       client.sendBinary(new TextEncoder().encode(d));
     });
 
+    // Expose an imperative input sender for header controls (e.g. model switch).
+    if (sendRef) {
+      sendRef.current = (d: string) => client.sendBinary(new TextEncoder().encode(d));
+    }
+
     // ResizeObserver → fit and send resize (only when visible/non-zero, so a
     // hidden tab never pushes a 0×0 resize to the shared PTY).
     const ro = new ResizeObserver(() => {
@@ -213,6 +221,7 @@ export default function Terminal({ vid, port, token, cwd, onControl, onStatusCha
       searchAddon.dispose();
       term.dispose();
       searchAddonRef.current = null;
+      if (sendRef) sendRef.current = null;
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [vid, port, token, cwd]);

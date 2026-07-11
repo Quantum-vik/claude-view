@@ -3,3 +3,8 @@ dist/
 src-tauri/target/
 src-tauri/gen/schemas/
 .DS_Store
+
+# Design assets / imports (not code)
+.design-import/
+*.dc.html
+UI improvement and documentation.zip
