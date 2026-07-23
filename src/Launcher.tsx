@@ -261,6 +261,20 @@ export default function Launcher() {
     }
   }
 
+  /** Close every open tab at once (VS Code "Close All"). Live sessions keep
+   *  running; ended ones get their backend resources reclaimed, same as a
+   *  single close. */
+  function closeAllTabs() {
+    for (const t of tabs) {
+      const ended = sessions.find((s) => s.viewer_id === t.vid)?.ended ?? false;
+      if (ended) invoke("close_session", { viewerId: t.vid }).catch(() => {});
+    }
+    activeVidRef.current = null;
+    setActiveVid(null);
+    setTabs([]);
+    refreshSessions();
+  }
+
   async function launch(cwd: string, resume: string | null) {
     setNewSessionError(null);
     try {
@@ -992,6 +1006,15 @@ export default function Launcher() {
               );
             })}
             <div style={{ flex: 1 }} />
+            {tabs.length > 0 && (
+              <button
+                onClick={closeAllTabs}
+                style={{ ...slimBtnStyle, marginBottom: 4, marginRight: 4 }}
+                title="Close all open tabs (sessions keep running)"
+              >
+                ✕ Close all
+              </button>
+            )}
             {activeVid && (
               <button
                 onClick={handlePopOut}
