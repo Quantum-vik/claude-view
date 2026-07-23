@@ -80,7 +80,8 @@ export default function SessionWindow(props: SessionWindowProps = {}) {
   const [ended, setEnded] = useState(false);
   const [connStatus, setConnStatus] = useState<ConnectionStatus>("connecting");
   const [sidebarOpen, setSidebarOpen] = useState(true);
-  const [sidebarWidth, setSidebarWidth] = useState(320);
+  // Wider default: the terminal-style tool-log reads best around 440–470px.
+  const [sidebarWidth, setSidebarWidth] = useState(460);
   const [hooksOn, setHooksOn] = useState<boolean | null>(null);
   // Model switcher: inject `/model <alias>` into this session's PTY. Affects
   // only the current session; the highlight is optimistic (the CLI owns the
@@ -364,32 +365,20 @@ export default function SessionWindow(props: SessionWindowProps = {}) {
 
       {/* Main content — timeline on the LEFT, terminal on the RIGHT */}
       <div style={{ display: "flex", flex: 1, overflow: "hidden" }}>
-        {/* Sidebar (timeline) */}
+        {/* Sidebar (timeline) — Timeline owns its own header, toolbar, and
+            internal scroll, so the wrapper just sizes and frames it. */}
         {sidebarOpen && (
           <div
             style={{
               width: sidebarWidth,
               flexShrink: 0,
-              background: T.surface,
+              background: T.bg,
               borderRight: `1px solid ${T.border}`,
-              overflowY: "auto",
+              overflow: "hidden",
               display: "flex",
               flexDirection: "column",
             }}
           >
-            <div
-              style={{
-                display: "flex",
-                alignItems: "center",
-                justifyContent: "space-between",
-                padding: "12px 14px 0",
-              }}
-            >
-              <span style={{ fontSize: 12, fontWeight: 600, color: T.text }}>Timeline</span>
-              <span style={{ fontSize: 11, color: T.textFaint }}>
-                {events.length} command{events.length === 1 ? "" : "s"}
-              </span>
-            </div>
             <Timeline events={events} />
           </div>
         )}

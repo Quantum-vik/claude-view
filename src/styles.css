@@ -121,6 +121,26 @@ textarea {
   }
 }
 
+/* Terminal-style command log (Timeline.tsx) */
+.cv-line {
+  transition: background 0.1s;
+}
+.cv-line:hover {
+  background: rgba(124, 197, 255, 0.045);
+}
+/* Copy button reveals on row hover (stays visible while showing "copied"
+   via an inline opacity override in the component). */
+.cv-copy {
+  opacity: 0;
+  transition: opacity 0.1s;
+}
+.cv-line:hover .cv-copy {
+  opacity: 1;
+}
+.cv-timeline-input::placeholder {
+  color: var(--text-faint);
+}
+
 /* Button resets */
 button {
   cursor: pointer;

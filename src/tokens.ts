@@ -71,3 +71,22 @@ export function statusColor(status: StatusKind): string {
       return T.running;
   }
 }
+
+/** A tool's "family": a stable accent color + terminal prompt glyph, so each
+ *  tool reads with its own identity in the command log (like a shell prompt).
+ *  Colors that already exist as tokens are reused; the rest are family-only. */
+export interface ToolFamily {
+  color: string;
+  glyph: string;
+}
+
+export function toolFamily(tool: string): ToolFamily {
+  const t = (tool || "").toLowerCase();
+  if (t === "bash" || t === "shell") return { color: T.path, glyph: "$" };
+  if (t === "edit" || t === "write" || t === "multiedit") return { color: "#d2a8ff", glyph: "✎" };
+  if (t === "read") return { color: "#4ec9b0", glyph: "▤" };
+  if (t === "grep" || t === "glob") return { color: "#56d4dd", glyph: "⌕" };
+  if (t === "webfetch" || t === "websearch") return { color: "#f0883e", glyph: "⇅" };
+  if (t === "task") return { color: T.modelViolet, glyph: "»" };
+  return { color: T.textDim, glyph: "›" };
+}
