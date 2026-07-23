@@ -385,3 +385,101 @@ pub fn resize(session: &Session, cols: u16, rows: u16) {
         pixel_height: 0,
     });
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Poll `cond` until true or `timeout_ms` elapses. Returns the final value.
+    fn wait_for<F: Fn() -> bool>(cond: F, timeout_ms: u64) -> bool {
+        let start = std::time::Instant::now();
+        while (start.elapsed().as_millis() as u64) < timeout_ms {
+            if cond() {
+                return true;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+        cond()
+    }
+
+    fn scrollback_string(s: &Session) -> String {
+        String::from_utf8_lossy(&s.scrollback.lock()).into_owned()
+    }
+
+    fn temp_cwd() -> String {
+        std::env::temp_dir().to_string_lossy().into_owned()
+    }
+
+    /// The shared spawn path must mirror a child's stdout into scrollback and
+    /// mark the session ended when the child exits. Uses a one-shot command so
+    /// it's deterministic (no interactive shell timing).
+    #[test]
+    fn spawn_in_pty_mirrors_output_and_marks_ended() {
+        let registry = Arc::new(Registry::default());
+        let marker = "cv_marker_7391";
+
+        #[cfg(not(windows))]
+        let cmd = {
+            let mut c = CommandBuilder::new("/bin/sh");
+            c.arg("-c");
+            c.arg(format!("printf '{marker}\\n'"));
+            c
+        };
+        #[cfg(windows)]
+        let cmd = {
+            let mut c = CommandBuilder::new("cmd.exe");
+            c.arg("/C");
+            c.arg(format!("echo {marker}"));
+            c
+        };
+
+        let session = spawn_in_pty(&registry, "vid-test".into(), temp_cwd(), cmd, None, true)
+            .expect("spawn_in_pty should succeed");
+
+        assert!(session.is_terminal, "flagged as a terminal");
+        assert!(wait_for(|| session.is_ended(), 5000), "child should exit");
+        assert!(
+            wait_for(|| scrollback_string(&session).contains(marker), 5000),
+            "scrollback should mirror the child's stdout; got {:?}",
+            scrollback_string(&session)
+        );
+        session.kill();
+    }
+
+    /// spawn_terminal must launch a real (interactive) login shell that we can
+    /// drive: input written to the PTY comes back through the mirror. It carries
+    /// no session_id (no claude/transcript) and is flagged as a terminal.
+    #[test]
+    fn spawn_terminal_shell_round_trips_io() {
+        let registry = Arc::new(Registry::default());
+        let session =
+            spawn_terminal(&registry, temp_cwd(), TerminalKind::Shell).expect("spawn_terminal");
+
+        assert!(session.is_terminal);
+        assert!(session.session_id.read().is_none(), "no claude session id");
+
+        let marker = "cv_shell_5521";
+        session.write_input(format!("printf '{marker}\\n'\n").into_bytes());
+        let seen = wait_for(|| scrollback_string(&session).contains(marker), 8000);
+
+        // Clean up the interactive shell regardless of the assertion outcome.
+        session.write_input(b"exit\n".to_vec());
+        session.kill();
+
+        assert!(
+            seen,
+            "driving the shell should surface the marker in the mirror; got {:?}",
+            scrollback_string(&session)
+        );
+    }
+
+    /// TerminalKind::parse maps "tmux" precisely and treats everything else
+    /// (including "shell" and junk) as a plain login shell.
+    #[test]
+    fn terminal_kind_parse_defaults_to_shell() {
+        assert!(matches!(TerminalKind::parse("tmux"), TerminalKind::Tmux));
+        assert!(matches!(TerminalKind::parse("shell"), TerminalKind::Shell));
+        assert!(matches!(TerminalKind::parse("nonsense"), TerminalKind::Shell));
+        assert!(matches!(TerminalKind::parse(""), TerminalKind::Shell));
+    }
+}
