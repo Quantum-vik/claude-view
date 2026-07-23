@@ -57,6 +57,47 @@ pub fn open_session(
         session_id: None,
         cwd,
         ended: false,
+        is_terminal: false,
+    })
+}
+
+/// Spawn a plain terminal (login shell or tmux attach-or-create) inside a PTY
+/// and open its viewer window. The mirror machinery is shared with claude
+/// sessions; only the spawned command and the `kind=terminal` window flag (which
+/// tells the viewer to drop the claude-only chrome) differ.
+pub fn open_terminal(
+    app: &AppHandle,
+    registry: &Arc<Registry>,
+    port: u16,
+    token: &str,
+    cwd: String,
+    kind: pty::TerminalKind,
+    open_window: bool,
+) -> Result<SessionInfo, String> {
+    let session = pty::spawn_terminal(registry, cwd.clone(), kind)?;
+    let vid = session.viewer_id.clone();
+
+    if open_window {
+        let url = format!(
+            "index.html?vid={}&port={}&token={}&cwd={}&kind=terminal",
+            vid,
+            port,
+            token,
+            urlencoding::encode(&cwd)
+        );
+        WebviewWindowBuilder::new(app, format!("session-{vid}"), WebviewUrl::App(url.into()))
+            .title(format!("Terminal — {cwd}"))
+            .inner_size(1000.0, 680.0)
+            .build()
+            .map_err(|e| format!("failed to open terminal window: {e}"))?;
+    }
+
+    Ok(SessionInfo {
+        viewer_id: vid,
+        session_id: None,
+        cwd,
+        ended: false,
+        is_terminal: true,
     })
 }
 
@@ -77,6 +118,29 @@ fn new_session(
         cwd,
         resume,
         continue_last.unwrap_or(false),
+        open_window.unwrap_or(true),
+    )
+}
+
+/// Launch a plain terminal window (login shell or tmux). `kind` is "tmux" or
+/// "shell" (anything else falls back to a login shell). `open_window=false`
+/// embeds the viewer in the launcher's split pane instead of a native window.
+#[tauri::command]
+fn new_terminal(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    cwd: String,
+    kind: Option<String>,
+    open_window: Option<bool>,
+) -> Result<SessionInfo, String> {
+    let kind = pty::TerminalKind::parse(kind.as_deref().unwrap_or("shell"));
+    open_terminal(
+        &app,
+        &state.registry,
+        state.port,
+        &state.token,
+        cwd,
+        kind,
         open_window.unwrap_or(true),
     )
 }
@@ -231,18 +295,27 @@ fn focus_session(app: AppHandle, state: State<'_, AppState>, viewer_id: String) 
         return window.set_focus().map_err(|e| e.to_string());
     }
     // Window was closed but the session (and its PTY) is still running —
-    // reopen a viewer; scrollback replays on connect.
+    // reopen a viewer; scrollback replays on connect. A terminal reopens with
+    // the same `kind=terminal` flag and title it was created with.
     let session = state.registry.get(&viewer_id).ok_or("session not found")?;
+    let kind_suffix = if session.is_terminal { "&kind=terminal" } else { "" };
     let url = format!(
-        "index.html?vid={}&port={}&token={}&cwd={}",
+        "index.html?vid={}&port={}&token={}&cwd={}{}",
         viewer_id,
         state.port,
         state.token,
-        urlencoding::encode(&session.cwd)
+        urlencoding::encode(&session.cwd),
+        kind_suffix
     );
+    let title = if session.is_terminal {
+        format!("Terminal — {}", session.cwd)
+    } else {
+        format!("Claude — {}", session.cwd)
+    };
+    let size = if session.is_terminal { (1000.0, 680.0) } else { (1160.0, 740.0) };
     WebviewWindowBuilder::new(&app, label, WebviewUrl::App(url.into()))
-        .title(format!("Claude — {}", session.cwd))
-        .inner_size(1160.0, 740.0)
+        .title(title)
+        .inner_size(size.0, size.1)
         .build()
         .map_err(|e| format!("failed to reopen session window: {e}"))?;
     Ok(())
@@ -354,6 +427,7 @@ fn main() {
         })
         .invoke_handler(tauri::generate_handler![
             new_session,
+            new_terminal,
             list_sessions,
             list_past_sessions,
             focus_session,

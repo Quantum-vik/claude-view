@@ -57,23 +57,112 @@ pub fn resolve_claude_bin() -> Result<PathBuf, String> {
     Err("could not find the `claude` executable on PATH (set CLAUDE_BIN to its full path)".into())
 }
 
-/// Spawn `claude` inside a fresh PTY, register the session, and start the
-/// reader + waiter threads. Raw master bytes are forwarded chunk-by-chunk
-/// (never line-buffered) to every connected WebSocket — this is the live mirror.
-pub fn spawn_session(
+/// What a non-claude terminal window should run.
+#[derive(Clone, Copy)]
+pub enum TerminalKind {
+    /// The user's login shell — full environment, full permissions.
+    Shell,
+    /// Attach to (or create) a persistent tmux session, falling back to a plain
+    /// login shell when tmux isn't installed.
+    Tmux,
+}
+
+impl TerminalKind {
+    /// Parse the `kind` string passed from the frontend. Anything unrecognized
+    /// (including "shell") maps to a plain login shell.
+    pub fn parse(s: &str) -> Self {
+        match s {
+            "tmux" => TerminalKind::Tmux,
+            _ => TerminalKind::Shell,
+        }
+    }
+}
+
+/// tmux session name for the attach-or-create terminal. A fixed name means every
+/// tmux terminal window (re)attaches to the same persistent session.
+const TMUX_SESSION: &str = "claude-view";
+
+/// Probe PATH (+ common GUI-launch locations) for an executable by name.
+#[cfg(not(windows))]
+fn find_bin(name: &str) -> Option<PathBuf> {
+    let mut dirs: Vec<PathBuf> = std::env::var_os("PATH")
+        .map(|p| std::env::split_paths(&p).collect())
+        .unwrap_or_default();
+    dirs.push("/opt/homebrew/bin".into());
+    dirs.push("/usr/local/bin".into());
+    dirs.into_iter().map(|d| d.join(name)).find(|c| c.is_file())
+}
+
+/// The user's login shell. GUI apps inherit a minimal env, so fall back to a
+/// sane per-platform default when `$SHELL` is unset.
+#[cfg(not(windows))]
+fn login_shell() -> PathBuf {
+    std::env::var_os("SHELL")
+        .map(PathBuf::from)
+        .filter(|p| p.is_file())
+        .unwrap_or_else(|| PathBuf::from("/bin/sh"))
+}
+
+/// Build the command a terminal window runs. A *login* shell is used so the
+/// user's full environment (PATH, etc.) loads — a plain PTY child of a GUI app
+/// otherwise gets a bare env, which is what "all the permissions" comes down to
+/// in practice. Tmux mode execs `tmux new-session -A` *through* that login shell
+/// so the session persists across window closes and reattaches next time.
+#[cfg(not(windows))]
+fn terminal_command(kind: TerminalKind) -> CommandBuilder {
+    let shell = login_shell();
+    let mut cmd = CommandBuilder::new(&shell);
+    match kind {
+        TerminalKind::Tmux if find_bin("tmux").is_some() => {
+            // Login shell sets up env, then hands the tty to tmux (attach or create).
+            cmd.arg("-l");
+            cmd.arg("-c");
+            cmd.arg(format!("exec tmux new-session -A -s {TMUX_SESSION}"));
+        }
+        _ => {
+            // Interactive login shell — a PTY tty makes it interactive.
+            cmd.arg("-l");
+        }
+    }
+    cmd
+}
+
+/// Windows has no tmux; a terminal window is always the shell. Prefer PowerShell,
+/// then COMSPEC (usually cmd.exe).
+#[cfg(windows)]
+fn terminal_command(_kind: TerminalKind) -> CommandBuilder {
+    let shell = std::env::var_os("COMSPEC")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("cmd.exe"));
+    // powershell if present on PATH, else the COMSPEC shell.
+    if let Some(paths) = std::env::var_os("PATH") {
+        for dir in std::env::split_paths(&paths) {
+            let ps = dir.join("powershell.exe");
+            if ps.is_file() {
+                return CommandBuilder::new(ps);
+            }
+        }
+    }
+    CommandBuilder::new(shell)
+}
+
+/// Open a PTY, spawn `cmd` inside it, register a `Session`, and start the
+/// reader + writer + waiter threads. Shared by [`spawn_session`] (claude) and
+/// [`spawn_terminal`] (shell/tmux). The caller supplies a fully-built command
+/// (args + any process-specific env already set) and the `viewer_id` so
+/// claude can inject it as `CLAUDE_VIEW_ID` before the child is spawned. Only
+/// `TERM`/`COLORTERM`, cwd, and the size are applied here.
+fn spawn_in_pty(
     registry: &Arc<Registry>,
-    port: u16,
-    token: &str,
+    viewer_id: String,
     cwd: String,
-    resume: Option<String>,
-    continue_last: bool,
+    mut cmd: CommandBuilder,
+    seed_session_id: Option<String>,
+    is_terminal: bool,
 ) -> Result<Arc<Session>, String> {
-    let claude_bin = resolve_claude_bin()?;
     if !std::path::Path::new(&cwd).is_dir() {
         return Err(format!("working directory does not exist: {cwd}"));
     }
-
-    let viewer_id = Uuid::new_v4().to_string();
 
     let pty_system = native_pty_system();
     let pair = pty_system
@@ -85,37 +174,14 @@ pub fn spawn_session(
         })
         .map_err(|e| format!("openpty failed: {e}"))?;
 
-    let mut cmd = CommandBuilder::new(claude_bin);
-    // Reopen an existing conversation instead of starting fresh:
-    // --resume <id> targets a specific session, --continue the most recent
-    // one in this cwd.
-    let resume_id = resume
-        .as_deref()
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-        .map(str::to_string);
-    if let Some(id) = &resume_id {
-        cmd.arg("--resume");
-        cmd.arg(id);
-    } else if continue_last {
-        cmd.arg("--continue");
-    }
     cmd.cwd(&cwd);
-    cmd.env("CLAUDE_VIEW_ID", &viewer_id);
-    cmd.env("CLAUDE_VIEW_PORT", port.to_string());
-    // NOTE: the auth token is deliberately NOT injected into the child env —
-    // every process Claude spawns would inherit it (readable via `env`,
-    // /proc/<pid>/environ, etc.). The bridge script reads the token from the
-    // 0600 instance.json instead. `token` is kept in the signature for the
-    // /bind + port wiring but not exported here.
-    let _ = token;
     cmd.env("TERM", "xterm-256color");
     cmd.env("COLORTERM", "truecolor");
 
     let mut child = pair
         .slave
         .spawn_command(cmd)
-        .map_err(|e| format!("failed to spawn claude: {e}"))?;
+        .map_err(|e| format!("failed to spawn child process: {e}"))?;
     // Close our copy of the slave so reads hit EOF when the child exits.
     drop(pair.slave);
 
@@ -136,12 +202,10 @@ pub fn spawn_session(
 
     let spawned_at = crate::session::now_ms();
     let session = Arc::new(Session {
-        viewer_id: viewer_id.clone(),
-        cwd: cwd.clone(),
+        viewer_id,
+        cwd,
         spawned_at,
-        // For a --resume, we already know the exact session id, so the
-        // transcript tailer binds to that file directly (no cwd guessing).
-        session_id: RwLock::new(resume_id.clone()),
+        session_id: RwLock::new(seed_session_id),
         writer_tx,
         master: Mutex::new(pair.master),
         killer: Mutex::new(Some(killer)),
@@ -151,6 +215,7 @@ pub fn spawn_session(
         timeline: Mutex::new(Vec::new()),
         model: RwLock::new(None),
         usage: RwLock::new(None),
+        is_terminal,
         ended: Default::default(),
         exit_code: RwLock::new(None),
     });
@@ -179,7 +244,7 @@ pub fn spawn_session(
         }
     });
 
-    // Waiter thread: mark the session ended when claude exits.
+    // Waiter thread: mark the session ended when the child exits.
     let wait_session = session.clone();
     std::thread::spawn(move || {
         let code = child
@@ -191,6 +256,50 @@ pub fn spawn_session(
         wait_session.mark_ended(code);
     });
 
+    Ok(session)
+}
+
+/// Spawn `claude` inside a fresh PTY, register the session, and start the
+/// reader + waiter threads plus a transcript tailer. Raw master bytes are
+/// forwarded chunk-by-chunk (never line-buffered) to every connected
+/// WebSocket — this is the live mirror.
+pub fn spawn_session(
+    registry: &Arc<Registry>,
+    port: u16,
+    token: &str,
+    cwd: String,
+    resume: Option<String>,
+    continue_last: bool,
+) -> Result<Arc<Session>, String> {
+    let claude_bin = resolve_claude_bin()?;
+    let viewer_id = Uuid::new_v4().to_string();
+
+    let mut cmd = CommandBuilder::new(claude_bin);
+    // Reopen an existing conversation instead of starting fresh:
+    // --resume <id> targets a specific session, --continue the most recent
+    // one in this cwd.
+    let resume_id = resume
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string);
+    if let Some(id) = &resume_id {
+        cmd.arg("--resume");
+        cmd.arg(id);
+    } else if continue_last {
+        cmd.arg("--continue");
+    }
+    cmd.env("CLAUDE_VIEW_ID", &viewer_id);
+    cmd.env("CLAUDE_VIEW_PORT", port.to_string());
+    // NOTE: the auth token is deliberately NOT injected into the child env —
+    // every process Claude spawns would inherit it (readable via `env`,
+    // /proc/<pid>/environ, etc.). The bridge script reads the token from the
+    // 0600 instance.json instead. `token` is kept in the signature for the
+    // /bind + port wiring but not exported here.
+    let _ = token;
+
+    let session = spawn_in_pty(registry, viewer_id, cwd.clone(), cmd, resume_id, false)?;
+
     // Transcript tailer thread: reads Claude Code's session JSONL and merges
     // tool calls into the timeline. Works with hooks OFF and provides persistent
     // history; deduped against hook events by tool-use id. Holds only a Weak ref
@@ -199,7 +308,7 @@ pub fn spawn_session(
     let mut tailer = crate::transcript::Tailer::new(
         cwd,
         session.session_id.read().clone(),
-        spawned_at,
+        session.spawned_at,
     );
     std::thread::spawn(move || {
         let mut post_end_polls = 0;
@@ -251,6 +360,21 @@ pub fn spawn_session(
     });
 
     Ok(session)
+}
+
+/// Spawn a plain terminal (login shell, or tmux attach-or-create) inside a fresh
+/// PTY and register it. Unlike [`spawn_session`] this runs no claude, injects no
+/// `CLAUDE_VIEW_*` env (so a `claude` launched *inside* it starts its own,
+/// independent viewer), and starts no transcript tailer — it's a straight live
+/// mirror of a real terminal with the user's full permissions.
+pub fn spawn_terminal(
+    registry: &Arc<Registry>,
+    cwd: String,
+    kind: TerminalKind,
+) -> Result<Arc<Session>, String> {
+    let viewer_id = Uuid::new_v4().to_string();
+    let cmd = terminal_command(kind);
+    spawn_in_pty(registry, viewer_id, cwd, cmd, None, true)
 }
 
 pub fn resize(session: &Session, cols: u16, rows: u16) {

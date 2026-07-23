@@ -54,6 +54,10 @@ pub struct Session {
     pub model: RwLock<Option<String>>,
     /// Latest context-window usage (input/output tokens) from the transcript.
     pub usage: RwLock<Option<ContextUsage>>,
+    /// True for a plain shell/tmux terminal (no claude, no transcript). Lets the
+    /// viewer drop the claude-only chrome (timeline, model switcher, context
+    /// meter) and lets the backend rebuild the right window URL on reopen.
+    pub is_terminal: bool,
     pub ended: AtomicBool,
     pub exit_code: RwLock<Option<i64>>,
 }
@@ -159,6 +163,7 @@ pub struct SessionInfo {
     pub session_id: Option<String>,
     pub cwd: String,
     pub ended: bool,
+    pub is_terminal: bool,
 }
 
 #[derive(Default)]
@@ -220,6 +225,7 @@ impl Registry {
                 session_id: s.session_id.read().clone(),
                 cwd: s.cwd.clone(),
                 ended: s.is_ended(),
+                is_terminal: s.is_terminal,
             })
             .collect()
     }
