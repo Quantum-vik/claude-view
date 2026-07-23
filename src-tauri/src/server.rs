@@ -33,6 +33,7 @@ pub fn router(registry: Arc<Registry>, token: String, app: tauri::AppHandle, por
         .route("/hooks", post(hooks_handler))
         .route("/bind", post(bind_handler))
         .route("/sessions", post(sessions_handler).get(list_sessions_handler))
+        .route("/terminals", post(terminals_handler))
         .route("/past_sessions", get(past_sessions_handler))
         .with_state(state)
 }
@@ -94,6 +95,41 @@ async fn sessions_handler(
         req.cwd,
         req.resume,
         req.continue_last,
+        true,
+    )
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
+    Ok(axum::Json(info))
+}
+
+#[derive(Deserialize)]
+struct NewTerminalReq {
+    cwd: String,
+    /// "tmux" or "shell" (default). Anything else falls back to a login shell.
+    #[serde(default)]
+    kind: Option<String>,
+}
+
+/// Token-authed local endpoint to launch a terminal window (login shell or
+/// tmux) from scripts, mirroring /sessions for claude:
+/// curl -X POST /terminals -H 'X-Claude-View-Token: …' -d '{"cwd":"…","kind":"tmux"}'
+async fn terminals_handler(
+    State(state): State<ServerState>,
+    headers: HeaderMap,
+    body: String,
+) -> Result<axum::Json<crate::session::SessionInfo>, (StatusCode, String)> {
+    if !check_token(&state, &headers) {
+        return Err((StatusCode::UNAUTHORIZED, "bad token".into()));
+    }
+    let req: NewTerminalReq = serde_json::from_str(&body)
+        .map_err(|e| (StatusCode::BAD_REQUEST, format!("bad request: {e}")))?;
+    let kind = crate::pty::TerminalKind::parse(req.kind.as_deref().unwrap_or("shell"));
+    let info = crate::open_terminal(
+        &state.app,
+        &state.registry,
+        state.port,
+        &state.token,
+        req.cwd,
+        kind,
         true,
     )
     .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
