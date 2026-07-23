@@ -2,6 +2,7 @@ import { useEffect, useMemo, useRef, useState, useCallback } from "react";
 import { open } from "@tauri-apps/plugin-dialog";
 import { invoke } from "@tauri-apps/api/core";
 import SessionWindow from "./SessionWindow";
+import TerminalWindow from "./TerminalWindow";
 import { DragHandle, clamp } from "./Resizer";
 import { T, tint } from "./tokens";
 import ContextMeter from "./ContextMeter";
@@ -17,6 +18,7 @@ interface SessionInfo {
   session_id: string | null;
   cwd: string;
   ended: boolean;
+  is_terminal: boolean;
 }
 
 interface PastSession {
@@ -147,8 +149,10 @@ export default function Launcher() {
   // Chrome-style tabs in the right pane. Every tab's terminal stays mounted
   // (hidden, not unmounted) so all sessions keep rendering live output and
   // switching is instant with no reconnect.
-  const [tabs, setTabs] = useState<{ vid: string; cwd: string }[]>([]);
+  const [tabs, setTabs] = useState<{ vid: string; cwd: string; isTerminal: boolean }[]>([]);
   const [activeVid, setActiveVid] = useState<string | null>(null);
+  // "New Terminal" split-button dropdown (tmux | shell).
+  const [newTermMenu, setNewTermMenu] = useState(false);
   // Split-pane sizing: the repos list is resizable and can be collapsed so the
   // session pane takes the full width.
   const [listWidth, setListWidth] = useState(LIST_WIDTH);
@@ -230,8 +234,10 @@ export default function Launcher() {
   const embedMode = wide && conn !== null;
 
   /** Add a session as a tab (or focus its existing tab). */
-  function openInPane(vid: string, cwd: string) {
-    setTabs((prev) => (prev.some((t) => t.vid === vid) ? prev : [...prev, { vid, cwd }]));
+  function openInPane(vid: string, cwd: string, isTerminal = false) {
+    setTabs((prev) =>
+      prev.some((t) => t.vid === vid) ? prev : [...prev, { vid, cwd, isTerminal }]
+    );
     setActiveVid(vid);
   }
 
@@ -279,13 +285,34 @@ export default function Launcher() {
     await launch(Array.isArray(selected) ? selected[0] : selected, null);
   }
 
+  /** Launch a plain terminal (login shell or tmux). Picks a working directory,
+   *  then embeds it as a tab (wide launcher) or opens a native window. */
+  async function handleNewTerminal(kind: "tmux" | "shell") {
+    setNewTermMenu(false);
+    setNewSessionError(null);
+    const selected = await open({ directory: true, multiple: false });
+    if (!selected) return;
+    const cwd = Array.isArray(selected) ? selected[0] : selected;
+    try {
+      const info = await invoke<SessionInfo>("new_terminal", {
+        cwd,
+        kind,
+        openWindow: !embedMode,
+      });
+      if (embedMode) openInPane(info.viewer_id, info.cwd, true);
+      await refreshSessions();
+    } catch (err) {
+      setNewSessionError(String(err));
+    }
+  }
+
   async function handleResume(s: PastSession) {
     await launch(s.cwd, s.session_id);
   }
 
   async function handleFocus(s: SessionInfo) {
     if (embedMode) {
-      openInPane(s.viewer_id, s.cwd);
+      openInPane(s.viewer_id, s.cwd, s.is_terminal);
       return;
     }
     try {
@@ -399,9 +426,55 @@ export default function Launcher() {
               Live mirror for Claude Code CLI
             </p>
           </div>
-          <button onClick={handleNewSession} style={primaryBtnStyle}>
-            <span style={{ fontSize: 16, lineHeight: 1 }}>+</span> New Session
-          </button>
+          <div style={{ display: "flex", gap: 8, flexShrink: 0 }}>
+            <button onClick={handleNewSession} style={primaryBtnStyle}>
+              <span style={{ fontSize: 16, lineHeight: 1 }}>+</span> New Session
+            </button>
+            <div style={{ position: "relative", flexShrink: 0 }}>
+              <button
+                onClick={() => setNewTermMenu((v) => !v)}
+                style={terminalBtnStyle}
+                title="Open a shell or tmux terminal in this app"
+              >
+                <span style={{ fontFamily: T.mono, fontSize: 13, lineHeight: 1 }}>❯_</span> Terminal
+                <span style={{ color: T.textFaint, fontSize: 10 }}>▾</span>
+              </button>
+              {newTermMenu && (
+                <>
+                  <div
+                    onClick={() => setNewTermMenu(false)}
+                    style={{ position: "fixed", inset: 0, zIndex: 50 }}
+                  />
+                  <div
+                    style={{
+                      position: "absolute",
+                      top: "100%",
+                      right: 0,
+                      marginTop: 6,
+                      zIndex: 51,
+                      background: T.surface1,
+                      border: `1px solid ${T.borderStrong}`,
+                      borderRadius: 10,
+                      boxShadow: T.windowShadow,
+                      padding: 6,
+                      minWidth: 190,
+                    }}
+                  >
+                    <button onClick={() => handleNewTerminal("tmux")} style={termMenuItemStyle}>
+                      <span>tmux session</span>
+                      <span style={{ color: T.textFaint, fontSize: 10.5 }}>persistent</span>
+                    </button>
+                    <button onClick={() => handleNewTerminal("shell")} style={termMenuItemStyle}>
+                      <span>plain shell</span>
+                      <span style={{ color: T.textFaint, fontSize: 10.5, fontFamily: T.mono }}>
+                        $SHELL -l
+                      </span>
+                    </button>
+                  </div>
+                </>
+              )}
+            </div>
+          </div>
         </div>
         {newSessionError && (
           <div style={{ marginTop: -12, marginBottom: 16, color: T.error, fontSize: 12 }}>
@@ -900,6 +973,9 @@ export default function Launcher() {
                       whiteSpace: "nowrap",
                     }}
                   >
+                    {t.isTerminal && (
+                      <span style={{ fontFamily: T.mono, color: T.path }}>❯ </span>
+                    )}
                     {name}
                   </span>
                   <span
@@ -940,13 +1016,23 @@ export default function Launcher() {
                   flexDirection: "column",
                 }}
               >
-                <SessionWindow
-                  vid={t.vid}
-                  port={String(conn.port)}
-                  token={conn.token}
-                  cwd={t.cwd}
-                  embedded
-                />
+                {t.isTerminal ? (
+                  <TerminalWindow
+                    vid={t.vid}
+                    port={String(conn.port)}
+                    token={conn.token}
+                    cwd={t.cwd}
+                    embedded
+                  />
+                ) : (
+                  <SessionWindow
+                    vid={t.vid}
+                    port={String(conn.port)}
+                    token={conn.token}
+                    cwd={t.cwd}
+                    embedded
+                  />
+                )}
               </div>
             ))}
             {tabs.length === 0 && (
@@ -965,7 +1051,7 @@ export default function Launcher() {
               >
                 Select a session — it opens as a tab here.
                 <br />
-                New Session, Open, and Focus all add tabs.
+                New Session, Terminal, Open, and Focus all add tabs.
               </div>
             )}
           </div>
@@ -1030,6 +1116,38 @@ const primaryBtnStyle: React.CSSProperties = {
   gap: 7,
   boxShadow: "0 4px 14px rgba(91,157,255,0.28)",
   flexShrink: 0,
+};
+
+const terminalBtnStyle: React.CSSProperties = {
+  background: T.surface2,
+  border: `1px solid ${T.borderStrong}`,
+  borderRadius: 9,
+  color: T.text,
+  cursor: "pointer",
+  fontSize: 14,
+  fontWeight: 600,
+  padding: "10px 16px",
+  display: "flex",
+  alignItems: "center",
+  gap: 7,
+  flexShrink: 0,
+};
+
+const termMenuItemStyle: React.CSSProperties = {
+  display: "flex",
+  alignItems: "center",
+  justifyContent: "space-between",
+  gap: 12,
+  width: "100%",
+  background: "transparent",
+  border: "none",
+  borderRadius: 7,
+  color: T.text,
+  cursor: "pointer",
+  fontSize: 12.5,
+  fontWeight: 600,
+  padding: "8px 10px",
+  textAlign: "left",
 };
 
 const accentBtnStyle: React.CSSProperties = {
