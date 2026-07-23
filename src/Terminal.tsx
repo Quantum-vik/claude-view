@@ -36,6 +36,16 @@ export default function Terminal({ vid, port, token, cwd, onControl, onStatusCha
     if (!containerRef.current) return;
 
     // --- Terminal setup ---
+    // Persisted font size (a global default shared by every terminal). Cmd/Ctrl
+    // +/-/0 and Ctrl/pinch-to-zoom adjust it live.
+    const DEFAULT_FONT_SIZE = 13;
+    const MIN_FONT_SIZE = 6;
+    const MAX_FONT_SIZE = 40;
+    const savedFont = Number(localStorage.getItem("cv.term.fontSize"));
+    const initialFont =
+      Number.isFinite(savedFont) && savedFont >= MIN_FONT_SIZE && savedFont <= MAX_FONT_SIZE
+        ? savedFont
+        : DEFAULT_FONT_SIZE;
     const term = new XTerm({
       scrollback: 20000,
       allowProposedApi: true,
@@ -57,7 +67,7 @@ export default function Terminal({ vid, port, token, cwd, onControl, onStatusCha
         },
       },
       fontFamily: "Menlo, Monaco, 'Courier New', monospace",
-      fontSize: 13,
+      fontSize: initialFont,
       theme: {
         background: "#141519",
         foreground: "#d4d4d4",
@@ -187,6 +197,51 @@ export default function Terminal({ vid, port, token, cwd, onControl, onStatusCha
       sendRef.current = (d: string) => client.sendBinary(new TextEncoder().encode(d));
     }
 
+    // --- Real-terminal keybindings ---
+    // Font zoom persists to a global default, then refits and tells the PTY the
+    // new size. Copy/clear/select-all are bound to Cmd (⌘) only — never Ctrl —
+    // so Ctrl+A (start of line), Ctrl+C (interrupt), etc. keep working. Paste is
+    // xterm's built-in Cmd+V.
+    const applyFontSize = (size: number) => {
+      const clamped = Math.max(MIN_FONT_SIZE, Math.min(MAX_FONT_SIZE, size));
+      if (clamped === term.options.fontSize) return;
+      term.options.fontSize = clamped;
+      localStorage.setItem("cv.term.fontSize", String(clamped));
+      if (doFit()) {
+        client.sendControl({ type: "resize", cols: term.cols, rows: term.rows });
+      }
+    };
+
+    term.attachCustomKeyEventHandler((e) => {
+      if (e.type !== "keydown") return true;
+      const cur = term.options.fontSize ?? DEFAULT_FONT_SIZE;
+      // Zoom accepts Cmd or Ctrl (neither combo is meaningful terminal input).
+      if (e.metaKey || e.ctrlKey) {
+        if (e.key === "=" || e.key === "+") return applyFontSize(cur + 1), false;
+        if (e.key === "-") return applyFontSize(cur - 1), false;
+        if (e.key === "0") return applyFontSize(DEFAULT_FONT_SIZE), false;
+      }
+      // Editing keys: Cmd only, so Ctrl-versions stay as shell/readline controls.
+      if (e.metaKey && !e.ctrlKey) {
+        if (e.key === "c" && term.hasSelection()) {
+          navigator.clipboard?.writeText(term.getSelection()).catch(() => {});
+          return false;
+        }
+        if (e.key === "k") return term.clear(), false;
+        if (e.key === "a") return term.selectAll(), false;
+      }
+      return true;
+    });
+
+    // Ctrl+wheel (and trackpad pinch, which the OS reports as ctrl+wheel) zooms.
+    const wheelEl = containerRef.current;
+    const onWheelZoom = (e: WheelEvent) => {
+      if (!e.ctrlKey) return;
+      e.preventDefault();
+      applyFontSize((term.options.fontSize ?? DEFAULT_FONT_SIZE) + (e.deltaY < 0 ? 1 : -1));
+    };
+    wheelEl.addEventListener("wheel", onWheelZoom, { passive: false });
+
     // ResizeObserver → fit and send resize (only when visible/non-zero, so a
     // hidden tab never pushes a 0×0 resize to the shared PTY).
     const ro = new ResizeObserver(() => {
@@ -215,6 +270,7 @@ export default function Terminal({ vid, port, token, cwd, onControl, onStatusCha
       keyDisposable.dispose();
       linkProvider.dispose();
       ro.disconnect();
+      wheelEl.removeEventListener("wheel", onWheelZoom);
       client.destroy();
       // webglAddon is null if context loss already disposed it.
       webglAddon?.dispose();
