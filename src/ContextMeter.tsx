@@ -7,6 +7,7 @@ import { T } from "./tokens";
 const WINDOWS: Array<[RegExp, number]> = [
   [/opus/i, 1_000_000],
   [/sonnet/i, 1_000_000],
+  [/fable|mythos/i, 1_000_000],
   [/haiku/i, 200_000],
 ];
 const DEFAULT_WINDOW = 200_000;

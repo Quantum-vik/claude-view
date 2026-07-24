@@ -1,31 +1,94 @@
 /* claude-view global styles */
 
-/* Design tokens — mirror of src/tokens.ts for the few global CSS rules.
-   Keep these in sync with that file. */
+/* Vendored fonts (offline) — Lora is a variable font, one file per style
+   covers weights 400–600; IBM Plex Mono ships as static weights. Files live
+   in public/fonts/ (SIL Open Font License). */
+@font-face {
+  font-family: "Lora";
+  font-style: normal;
+  font-weight: 400 600;
+  font-display: swap;
+  src: url("/fonts/lora.woff2") format("woff2");
+}
+@font-face {
+  font-family: "Lora";
+  font-style: italic;
+  font-weight: 400 600;
+  font-display: swap;
+  src: url("/fonts/lora-italic.woff2") format("woff2");
+}
+@font-face {
+  font-family: "IBM Plex Mono";
+  font-style: normal;
+  font-weight: 400;
+  font-display: swap;
+  src: url("/fonts/ibm-plex-mono-400.woff2") format("woff2");
+}
+@font-face {
+  font-family: "IBM Plex Mono";
+  font-style: normal;
+  font-weight: 500;
+  font-display: swap;
+  src: url("/fonts/ibm-plex-mono-500.woff2") format("woff2");
+}
+@font-face {
+  font-family: "IBM Plex Mono";
+  font-style: normal;
+  font-weight: 600;
+  font-display: swap;
+  src: url("/fonts/ibm-plex-mono-600.woff2") format("woff2");
+}
+
+/* Fallback tokens (Ink & Parchment). The live values are written onto :root by
+   src/themes.ts before first render — these only prevent a flash of unstyled
+   color if a rule resolves before initTheme() runs. */
 :root {
-  --bg: #0d0e11;
-  --surface: #15171b;
-  --surface-1: #1c1f24;
-  --surface-2: #23272e;
-  --titlebar: #101216;
+  --cv-bg: #14110d;
+  --cv-surface: #14110d;
+  --cv-surface1: #1a1712;
+  --cv-surface2: #211c15;
+  --cv-titlebar: #181510;
+  --cv-sidebar: #12100c;
 
-  --border: #2b2f37;
-  --border-strong: #3a3f49;
-  --border-accent: #2f4a6b;
-  --divider: #22262c;
+  --cv-border: #2e2820;
+  --cv-border-strong: #3a332a;
+  --cv-divider: #241f18;
+  --cv-accent-border: #4a3d28;
 
-  --text: #e7e9ec;
-  --text-dim: #98a0ab;
-  --text-faint: #626a75;
+  --cv-text: #e8e2d5;
+  --cv-text-dim: #a89f8d;
+  --cv-text-faint: #6f675a;
+  --cv-timestamp: #5c554a;
+  --cv-cmd: #cfc8b8;
+  --cv-cmd-fold: #bdb5a5;
 
-  --accent: #5b9dff;
-  --accent-soft: rgba(91, 157, 255, 0.14);
-  --path: #7cc5ff;
+  --cv-accent: #d4a55e;
+  --cv-accent-ink: #14110d;
+  --cv-accent-soft: rgba(212, 165, 94, 0.1);
+  --cv-accent-soft2: rgba(212, 165, 94, 0.15);
+  --cv-accent-hover: rgba(212, 165, 94, 0.05);
+  --cv-search-glyph: #a08a5f;
 
-  --success: #3fb950;
-  --running: #e3b341;
-  --error: #f0616d;
-  --idle: #6b7280;
+  --cv-success: #8aab7a;
+  --cv-success-soft: rgba(138, 171, 122, 0.1);
+  --cv-success-border: #35402e;
+  --cv-running: #d4b36a;
+  --cv-error: #c97b6f;
+  --cv-error-tint: rgba(201, 123, 111, 0.07);
+  --cv-error-text: #d3aca6;
+  --cv-error-preview: #c99a92;
+  --cv-error-border: #4a2f2a;
+  --cv-idle: #5c554a;
+  --cv-model-violet: #c9a2c0;
+
+  --cv-tool-bash: #b8905a;
+  --cv-tool-edit: #c9a2c0;
+  --cv-tool-read: #7a9a8a;
+  --cv-tool-grep: #8fb0a0;
+  --cv-tool-web: #b0a37e;
+  --cv-tool-task: #b9a2c9;
+
+  --cv-shadow: 0 20px 50px rgba(0, 0, 0, 0.5);
 }
 
 *,
@@ -44,9 +107,13 @@ body,
   overflow: hidden;
 }
 
+html {
+  background: var(--cv-bg);
+}
+
 body {
-  background: var(--surface);
-  color: var(--text);
+  background: var(--cv-surface);
+  color: var(--cv-text);
   font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
   font-size: 14px;
   line-height: 1.5;
@@ -74,18 +141,39 @@ textarea {
 }
 
 ::-webkit-scrollbar-thumb {
-  background: var(--border-strong);
+  background: var(--cv-border-strong);
   border-radius: 4px;
 }
 
 ::-webkit-scrollbar-thumb:hover {
-  background: #4a505b;
+  background: var(--cv-accent-border);
 }
 
-/* Status pill colors */
-/* .pill-running  { background: #7a5900; color: #d29922; }  amber */
-/* .pill-success  { background: #0f3320; color: #2ea043; }  green */
-/* .pill-error    { background: #3a0a0a; color: #f85149; }  red   */
+/* Terminal (xterm) scrollbar — the Claude Code chat scrolls through xterm's
+   .xterm-viewport. Give it a clearly visible, theme-adaptive thumb: a share
+   of the foreground color reads on ANY terminal background, unlike the
+   border-tone used for app scrollbars. */
+.xterm-viewport {
+  scrollbar-width: thin; /* non-webkit fallback */
+}
+.xterm-viewport::-webkit-scrollbar {
+  width: 11px;
+}
+.xterm-viewport::-webkit-scrollbar-track {
+  background: transparent;
+}
+.xterm-viewport::-webkit-scrollbar-thumb {
+  background: color-mix(in srgb, var(--cv-text) 30%, transparent);
+  border-radius: 6px;
+  border: 3px solid transparent;
+  background-clip: padding-box;
+  min-height: 40px;
+}
+.xterm-viewport::-webkit-scrollbar-thumb:hover {
+  background: color-mix(in srgb, var(--cv-text) 50%, transparent);
+  border: 3px solid transparent;
+  background-clip: padding-box;
+}
 
 /* Pulse animation for running state */
 @keyframes pulse {
@@ -98,7 +186,8 @@ textarea {
   }
 }
 
-/* Pulsing status dot — scales + fades (running indicators, live dots). */
+/* Pulsing status dot — scales + fades (running indicators, live dots).
+   Opacity/transform only, so it composites on the GPU. */
 @keyframes pulseDot {
   0%,
   100% {
@@ -106,18 +195,8 @@ textarea {
     transform: scale(1);
   }
   50% {
-    opacity: 0.45;
-    transform: scale(0.85);
-  }
-}
-
-/* Expanding ring — halo around the active live session dot. */
-@keyframes ring {
-  0% {
-    box-shadow: 0 0 0 0 rgba(63, 185, 80, 0.5);
-  }
-  100% {
-    box-shadow: 0 0 0 6px rgba(63, 185, 80, 0);
+    opacity: 0.35;
+    transform: scale(0.8);
   }
 }
 
@@ -126,7 +205,7 @@ textarea {
   transition: background 0.1s;
 }
 .cv-line:hover {
-  background: rgba(124, 197, 255, 0.045);
+  background: var(--cv-accent-hover);
 }
 /* Copy button reveals on row hover (stays visible while showing "copied"
    via an inline opacity override in the component). */
@@ -138,7 +217,18 @@ textarea {
   opacity: 1;
 }
 .cv-timeline-input::placeholder {
-  color: var(--text-faint);
+  color: var(--cv-text-faint);
+}
+input::placeholder {
+  color: var(--cv-text-faint);
+}
+
+/* Cards brighten their border on hover (launcher active card, etc.) */
+.cv-card {
+  transition: border-color 0.12s;
+}
+.cv-card:hover {
+  border-color: var(--cv-accent-border);
 }
 
 /* Button resets */
@@ -148,6 +238,6 @@ button {
 }
 
 button:focus-visible {
-  outline: 2px solid var(--accent);
+  outline: 2px solid var(--cv-accent);
   outline-offset: 2px;
 }

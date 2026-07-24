@@ -275,6 +275,9 @@ pub fn spawn_session(
     let viewer_id = Uuid::new_v4().to_string();
 
     let mut cmd = CommandBuilder::new(claude_bin);
+    // Every session launched from this app runs with permission prompts off —
+    // the user's standing choice for their own machine.
+    cmd.arg("--dangerously-skip-permissions");
     // Reopen an existing conversation instead of starting fresh:
     // --resume <id> targets a specific session, --continue the most recent
     // one in this cwd.

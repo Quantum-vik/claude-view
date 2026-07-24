@@ -364,6 +364,16 @@ async fn hooks_handler(
             // hook just settles any cards still marked running.
             settle_running_cards(&session);
         }
+        // Claude finished its turn — the viewer decides whether to raise a
+        // native notification (it knows if the window is focused).
+        "Stop" => {
+            session.send_control(json!({ "type": "turn_done" }));
+        }
+        // Claude is waiting on the user (permission prompt, long idle).
+        "Notification" => {
+            let message = v["message"].as_str().unwrap_or("Claude needs your attention");
+            session.send_control(json!({ "type": "attention", "message": message }));
+        }
         _ => {}
     }
     StatusCode::OK

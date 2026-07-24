@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import Terminal from "./Terminal";
 import Timeline, { TimelineEvent } from "./Timeline";
@@ -6,6 +6,7 @@ import { ConnectionStatus } from "./ws";
 import { DragHandle, clamp } from "./Resizer";
 import { T } from "./tokens";
 import ContextMeter from "./ContextMeter";
+import ThemeMenu from "./ThemeMenu";
 import {
   MODELS,
   EFFORT_LABEL,
@@ -57,6 +58,17 @@ function breadcrumb(cwd: string): { parent: string; name: string } {
   return { parent, name };
 }
 
+// Sidebar width: the terminal-style command log reads best around 470px.
+const SIDEBAR_DEFAULT = 470;
+const SIDEBAR_MIN = 320;
+const SIDEBAR_MAX = 640;
+const SIDEBAR_KEY = "cv.sidebarWidth";
+
+function savedSidebarWidth(): number {
+  const v = Number(localStorage.getItem(SIDEBAR_KEY));
+  return Number.isFinite(v) && v > 0 ? clamp(v, SIDEBAR_MIN, SIDEBAR_MAX) : SIDEBAR_DEFAULT;
+}
+
 interface SessionWindowProps {
   /** When set, connection details come from props (embedded in the launcher's
    *  split pane) instead of the window URL. */
@@ -80,8 +92,11 @@ export default function SessionWindow(props: SessionWindowProps = {}) {
   const [ended, setEnded] = useState(false);
   const [connStatus, setConnStatus] = useState<ConnectionStatus>("connecting");
   const [sidebarOpen, setSidebarOpen] = useState(true);
-  // Wider default: the terminal-style tool-log reads best around 440–470px.
-  const [sidebarWidth, setSidebarWidth] = useState(460);
+  // Committed width (used at mount); live width mutates the DOM directly
+  // during drags so a resize never re-renders the tree per mousemove.
+  const [sidebarWidth, setSidebarWidth] = useState(savedSidebarWidth);
+  const sidebarRef = useRef<HTMLDivElement>(null);
+  const widthRef = useRef(sidebarWidth);
   const [hooksOn, setHooksOn] = useState<boolean | null>(null);
   // Model switcher: inject `/model <alias>` into this session's PTY. Affects
   // only the current session; the highlight is optimistic (the CLI owns the
@@ -123,6 +138,15 @@ export default function SessionWindow(props: SessionWindowProps = {}) {
     invoke<boolean>("hooks_status").then(setHooksOn).catch(() => setHooksOn(null));
   }, []);
 
+  // The popover is fixed-positioned from a rect captured at open time — a
+  // window resize would leave it floating at a stale spot, so just close it.
+  useEffect(() => {
+    if (!menu) return;
+    const onResize = () => setMenu(null);
+    window.addEventListener("resize", onResize);
+    return () => window.removeEventListener("resize", onResize);
+  }, [menu]);
+
   /** Stage a model; clamp pending effort into the new model's supported range. */
   function selectPendingModel(alias: string) {
     setPendingModel(alias);
@@ -147,8 +171,26 @@ export default function SessionWindow(props: SessionWindowProps = {}) {
     setMenu(null);
   }
 
-  function handleControl(raw: unknown) {
+  // "Claude is done" notifications: raised only when this window isn't
+  // focused (you're elsewhere — that's when a ping is useful), throttled so a
+  // burst of hook events can't stack dings.
+  const lastNotifyRef = useRef(0);
+  const notifyUser = useCallback(
+    (title: string, body: string, sound = "Glass") => {
+      if (document.hasFocus()) return;
+      const now = Date.now();
+      if (now - lastNotifyRef.current < 5000) return;
+      lastNotifyRef.current = now;
+      invoke("notify", { title, body, sound }).catch(() => {});
+    },
+    []
+  );
+
+  // Stable — Terminal keeps latest via a ref, but a stable identity avoids
+  // needless prop churn on every render.
+  const handleControl = useCallback((raw: unknown) => {
     const msg = raw as ControlMsg;
+    const repo = breadcrumb(cwd).name;
     switch (msg.type) {
       case "bound":
         setSessionId((msg as BoundMsg).session_id);
@@ -159,19 +201,38 @@ export default function SessionWindow(props: SessionWindowProps = {}) {
       case "timeline":
         setEvents((prev) => upsertEvent(prev, (msg as TimelineEventMsg).event));
         break;
-      case "model":
-        setLiveModel((msg as { model?: string }).model ?? null);
+      case "model": {
+        // "<synthetic>" marks injected stub messages in the transcript, not a
+        // real model — ignore those so the chip and context meter keep the
+        // last REAL model instead of showing "<synthetic>" at a bogus window.
+        const m = (msg as { model?: string }).model ?? null;
+        if (m === null || !m.startsWith("<")) setLiveModel(m);
         break;
+      }
       case "usage": {
         const u = msg as { input?: number; output?: number };
         setUsage({ input: u.input ?? 0, output: u.output ?? 0 });
         break;
       }
+      // Claude finished its turn — it's waiting on you now.
+      case "turn_done":
+        notifyUser("Claude is done", `${repo} — waiting for your input`);
+        break;
+      // Claude is blocked on a permission prompt / has been idle.
+      case "attention":
+        notifyUser(
+          "Claude needs attention",
+          `${repo} — ${(msg as { message?: string }).message ?? "waiting on you"}`,
+          "Ping"
+        );
+        break;
       case "exit":
         setEnded(true);
+        notifyUser("Session ended", repo, "Submarine");
         break;
     }
-  }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [cwd, notifyUser]);
 
   // One merged connection/liveness state (replaces the scattered dots + badge).
   const live = ended
@@ -203,19 +264,19 @@ export default function SessionWindow(props: SessionWindowProps = {}) {
           alignItems: "center",
           gap: 12,
           padding: "0 16px",
-          background: "#1a1d22",
-          borderBottom: `1px solid ${T.border}`,
+          background: T.titlebar,
+          borderBottom: `1px solid ${T.divider}`,
           flexShrink: 0,
           height: 46,
         }}
       >
-        {/* Breadcrumbed cwd: dim parent + bright repo name */}
+        {/* Breadcrumbed cwd: dim parent + repo name in accent */}
         <span
           style={{
             display: "flex",
             alignItems: "center",
-            fontFamily: T.mono,
-            fontSize: 12.5,
+            fontFamily: T.serif,
+            fontSize: 13.5,
             overflow: "hidden",
             whiteSpace: "nowrap",
             maxWidth: 340,
@@ -225,14 +286,14 @@ export default function SessionWindow(props: SessionWindowProps = {}) {
           <span style={{ color: T.textFaint, overflow: "hidden", textOverflow: "ellipsis" }}>
             {crumb.parent}
           </span>
-          <span style={{ color: T.path, fontWeight: 500, flexShrink: 0 }}>{crumb.name}</span>
+          <span style={{ color: T.accent, fontWeight: 600, flexShrink: 0 }}>{crumb.name}</span>
         </span>
 
         {/* Session ID chip */}
         {sessionId && (
           <span
             style={{
-              fontSize: 11,
+              fontSize: 10.5,
               color: T.textFaint,
               fontFamily: T.mono,
               background: T.surface2,
@@ -310,43 +371,48 @@ export default function SessionWindow(props: SessionWindowProps = {}) {
             const def = modelByAlias(aliasForModelId(liveModel));
             const chipLabel = liveModel ? displayModelId(liveModel) : "Model";
             return (
-              <div ref={anchorRef} style={{ flexShrink: 0 }}>
-                <button
-                  onClick={() => (menu ? setMenu(null) : openMenu())}
-                  title="Switch model & effort for this session"
-                  style={{
-                    display: "flex",
-                    alignItems: "center",
-                    gap: 6,
-                    background: menu ? T.surface2 : T.surface1,
-                    border: `1px solid ${menu ? T.borderAccent : T.border}`,
-                    borderRadius: 8,
-                    color: T.text,
-                    fontSize: 12,
-                    fontWeight: 600,
-                    padding: "5px 10px",
-                    cursor: "pointer",
-                  }}
-                >
-                  <span
+              <>
+                <span style={{ width: 1, height: 18, background: T.border, flexShrink: 0 }} />
+                <div ref={anchorRef} style={{ flexShrink: 0 }}>
+                  <button
+                    onClick={() => (menu ? setMenu(null) : openMenu())}
+                    title="Switch model & effort for this session"
                     style={{
-                      width: 6,
-                      height: 6,
-                      borderRadius: "50%",
-                      background: def?.ultracode ? T.modelViolet : T.path,
+                      display: "flex",
+                      alignItems: "center",
+                      gap: 6,
+                      background: menu ? T.surface2 : T.surface1,
+                      border: `1px solid ${menu ? T.accentBorder : T.border}`,
+                      borderRadius: 8,
+                      color: T.text,
+                      fontFamily: T.serif,
+                      fontStyle: "italic",
+                      fontSize: 12.5,
+                      padding: "5px 11px",
+                      cursor: "pointer",
+                      whiteSpace: "nowrap",
                     }}
-                  />
-                  {chipLabel}
-                  <span style={{ color: T.textFaint, fontSize: 10 }}>▾</span>
-                </button>
-              </div>
+                  >
+                    <span
+                      style={{
+                        width: 6,
+                        height: 6,
+                        borderRadius: "50%",
+                        background: def?.ultracode ? T.modelViolet : T.path,
+                      }}
+                    />
+                    {chipLabel}
+                    <span style={{ color: T.textFaint, fontSize: 10, fontStyle: "normal" }}>▾</span>
+                  </button>
+                </div>
+              </>
             );
           })()}
 
         {/* Sidebar toggle */}
         <button
           onClick={() => setSidebarOpen((v) => !v)}
-          title={sidebarOpen ? "Hide timeline" : "Show timeline"}
+          title={sidebarOpen ? "Hide the command log" : "Show the command log"}
           style={{
             background: sidebarOpen ? T.accent : T.surface2,
             border: sidebarOpen ? "none" : `1px solid ${T.borderStrong}`,
@@ -355,24 +421,51 @@ export default function SessionWindow(props: SessionWindowProps = {}) {
             cursor: "pointer",
             fontSize: 12,
             fontWeight: 600,
-            padding: "5px 11px",
+            padding: "5px 12px",
             flexShrink: 0,
+            whiteSpace: "nowrap",
           }}
         >
           Timeline
         </button>
+
+        {/* Popped-out window only: move this session back into the main app
+            as a tab (closes this window; the PTY keeps running). */}
+        {!props.embedded && vid && (
+          <button
+            onClick={() => invoke("dock_session", { viewerId: vid }).catch(() => {})}
+            title="Move this session back into the main app as a tab"
+            style={{
+              background: T.surface2,
+              border: `1px solid ${T.borderStrong}`,
+              borderRadius: 8,
+              color: T.text,
+              cursor: "pointer",
+              fontSize: 12,
+              fontWeight: 600,
+              padding: "5px 12px",
+              flexShrink: 0,
+              whiteSpace: "nowrap",
+            }}
+          >
+            ⧉ Dock
+          </button>
+        )}
+
+        <ThemeMenu compact />
       </div>
 
-      {/* Main content — timeline on the LEFT, terminal on the RIGHT */}
+      {/* Main content — command log on the LEFT, terminal on the RIGHT */}
       <div style={{ display: "flex", flex: 1, overflow: "hidden" }}>
-        {/* Sidebar (timeline) — Timeline owns its own header, toolbar, and
+        {/* Sidebar (command log) — Timeline owns its own header, toolbar, and
             internal scroll, so the wrapper just sizes and frames it. */}
         {sidebarOpen && (
           <div
+            ref={sidebarRef}
             style={{
               width: sidebarWidth,
               flexShrink: 0,
-              background: T.bg,
+              background: T.sidebar,
               borderRight: `1px solid ${T.border}`,
               overflow: "hidden",
               display: "flex",
@@ -383,17 +476,25 @@ export default function SessionWindow(props: SessionWindowProps = {}) {
           </div>
         )}
 
-        {/* Drag handle between timeline and terminal. The timeline is now to the
-            LEFT of the handle, so dragging right (dx>0) widens it. */}
+        {/* Drag handle between log and terminal. Widths apply straight to the
+            DOM during the drag (no per-mousemove React render); the final
+            width commits + persists on mouseup. */}
         {sidebarOpen && (
           <DragHandle
-            title="Drag to resize the timeline"
-            onResize={(dx) => setSidebarWidth((w) => clamp(w + dx, 220, 640))}
+            title="Drag to resize the command log"
+            onResize={(dx) => {
+              widthRef.current = clamp(widthRef.current + dx, SIDEBAR_MIN, SIDEBAR_MAX);
+              if (sidebarRef.current) sidebarRef.current.style.width = `${widthRef.current}px`;
+            }}
+            onResizeEnd={() => {
+              setSidebarWidth(widthRef.current);
+              localStorage.setItem(SIDEBAR_KEY, String(widthRef.current));
+            }}
           />
         )}
 
         {/* Terminal area */}
-        <div style={{ flex: 1, overflow: "hidden", background: "#141519" }}>
+        <div style={{ flex: 1, overflow: "hidden", background: T.bg }}>
           {vid && port && token ? (
             <Terminal
               vid={vid}
@@ -434,12 +535,12 @@ export default function SessionWindow(props: SessionWindowProps = {}) {
                   top: menu.top,
                   right: menu.right,
                   zIndex: 201,
-                  width: 300,
+                  width: 290,
                   background: T.surface1,
                   border: `1px solid ${T.borderStrong}`,
                   borderRadius: 12,
                   boxShadow: T.windowShadow,
-                  padding: 14,
+                  padding: 12,
                   display: "flex",
                   flexDirection: "column",
                   gap: 14,
@@ -459,14 +560,15 @@ export default function SessionWindow(props: SessionWindowProps = {}) {
                             display: "flex",
                             alignItems: "center",
                             gap: 5,
-                            background: on ? T.borderAccent : T.surface2,
-                            border: `1px solid ${on ? T.borderAccent : T.border}`,
+                            background: on ? T.accentSoft2 : T.surface2,
+                            border: `1px solid ${on ? T.accentBorder : T.border}`,
                             borderRadius: 8,
-                            color: on ? "#cfe2ff" : T.textDim,
+                            color: on ? T.accent : T.textDim,
                             fontSize: 12,
                             fontWeight: 600,
                             padding: "5px 10px",
                             cursor: "pointer",
+                            whiteSpace: "nowrap",
                           }}
                         >
                           {m.ultracode && (
@@ -476,6 +578,7 @@ export default function SessionWindow(props: SessionWindowProps = {}) {
                                 height: 5,
                                 borderRadius: "50%",
                                 background: T.modelViolet,
+                                flexShrink: 0,
                               }}
                             />
                           )}
@@ -484,7 +587,9 @@ export default function SessionWindow(props: SessionWindowProps = {}) {
                             <span
                               style={{
                                 fontWeight: 500,
-                                color: on ? "#a9cdff" : T.textFaint,
+                                color: on
+                                  ? `color-mix(in srgb, ${T.accent} 55%, ${T.text})`
+                                  : T.textFaint,
                               }}
                             >
                               {m.version}
@@ -504,7 +609,16 @@ export default function SessionWindow(props: SessionWindowProps = {}) {
                       {EFFORT_LABEL[supported[activeIdx]]}
                     </span>
                     {supported[activeIdx] === model.defaultEffort && (
-                      <span style={{ color: T.textFaint, fontWeight: 400 }}>· default</span>
+                      <span
+                        style={{
+                          color: T.textFaint,
+                          fontWeight: 400,
+                          fontFamily: T.ui,
+                          fontSize: 11,
+                        }}
+                      >
+                        · default
+                      </span>
                     )}
                   </div>
                   <input
@@ -528,6 +642,7 @@ export default function SessionWindow(props: SessionWindowProps = {}) {
                           color: i === activeIdx ? T.accent : T.textFaint,
                           cursor: "pointer",
                           userSelect: "none",
+                          whiteSpace: "nowrap",
                         }}
                       >
                         {EFFORT_LABEL[level]}
@@ -555,7 +670,7 @@ export default function SessionWindow(props: SessionWindowProps = {}) {
                 </div>
 
                 <div style={{ fontSize: 10.5, color: T.textFaint, lineHeight: 1.5 }}>
-                  Applies to this session only — <b>Done</b> sends{" "}
+                  Applies to this session only — <b style={{ color: T.textDim }}>Done</b> sends{" "}
                   <code style={codeStyle}>/model</code> and <code style={codeStyle}>/effort</code> to
                   the running CLI.
                 </div>
@@ -566,7 +681,7 @@ export default function SessionWindow(props: SessionWindowProps = {}) {
                     display: "flex",
                     justifyContent: "flex-end",
                     gap: 8,
-                    borderTop: `1px solid ${T.border}`,
+                    borderTop: `1px solid ${T.divider}`,
                     paddingTop: 12,
                   }}
                 >
@@ -577,10 +692,11 @@ export default function SessionWindow(props: SessionWindowProps = {}) {
                       border: `1px solid ${T.borderStrong}`,
                       borderRadius: 8,
                       color: T.textDim,
-                      fontSize: 12,
+                      fontSize: 11.5,
                       fontWeight: 600,
                       padding: "6px 14px",
                       cursor: "pointer",
+                      whiteSpace: "nowrap",
                     }}
                   >
                     Cancel
@@ -594,10 +710,11 @@ export default function SessionWindow(props: SessionWindowProps = {}) {
                       border: "none",
                       borderRadius: 8,
                       color: dirty ? T.accentInk : T.textFaint,
-                      fontSize: 12,
+                      fontSize: 11.5,
                       fontWeight: 600,
                       padding: "6px 16px",
                       cursor: dirty ? "pointer" : "default",
+                      whiteSpace: "nowrap",
                     }}
                   >
                     Done
@@ -613,17 +730,17 @@ export default function SessionWindow(props: SessionWindowProps = {}) {
 }
 
 const panelLabelStyle: React.CSSProperties = {
-  fontSize: 11,
+  fontFamily: T.serif,
+  fontSize: 12.5,
   fontWeight: 600,
-  color: T.textDim,
-  letterSpacing: 0.3,
+  color: T.text,
   marginBottom: 8,
 };
 
 const codeStyle: React.CSSProperties = {
   fontFamily: T.mono,
-  fontSize: 10,
-  color: T.path,
+  fontSize: 9.5,
+  color: T.accent,
   background: T.surface2,
   borderRadius: 4,
   padding: "1px 4px",

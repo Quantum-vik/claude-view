@@ -7,7 +7,15 @@ use serde_json::{json, Value};
 /// removes exactly what install added, and nothing else.
 const SCRIPT_MARKER: &str = "claude-view-hook";
 
-const HOOK_EVENTS: &[&str] = &["SessionStart", "PreToolUse", "PostToolUse", "SessionEnd"];
+const HOOK_EVENTS: &[&str] = &[
+    "SessionStart",
+    "PreToolUse",
+    "PostToolUse",
+    "SessionEnd",
+    // Turn-completion + attention events drive "Claude is done" notifications.
+    "Stop",
+    "Notification",
+];
 
 #[cfg(not(windows))]
 const BRIDGE_SCRIPT: &str = include_str!("../scripts/claude-view-hook.sh");
