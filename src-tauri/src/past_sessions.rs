@@ -88,6 +88,35 @@ pub fn list() -> Result<Vec<PastSession>, String> {
     Ok(out)
 }
 
+/// Delete a past session's transcript by id. The file is moved to the OS
+/// Trash (not permanently removed) so an accidental delete is recoverable.
+/// The id is validated against a strict charset — it becomes a filename, so
+/// nothing path-like may pass through.
+pub fn delete(session_id: &str) -> Result<(), String> {
+    if session_id.is_empty()
+        || !session_id
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+    {
+        return Err("invalid session id".into());
+    }
+    let projects = dirs::home_dir()
+        .ok_or("could not resolve home directory")?
+        .join(".claude")
+        .join("projects");
+    let file_name = format!("{session_id}.jsonl");
+    let Ok(project_dirs) = fs::read_dir(&projects) else {
+        return Err("no projects directory".into());
+    };
+    for project in project_dirs.flatten() {
+        let candidate = project.path().join(&file_name);
+        if candidate.is_file() {
+            return trash::delete(&candidate).map_err(|e| format!("failed to trash transcript: {e}"));
+        }
+    }
+    Err("session transcript not found".into())
+}
+
 /// Read the head of a transcript defensively (schema is undocumented and
 /// version-dependent): pull the session cwd and something human-recognizable
 /// to label it with — the first real user prompt, falling back to a summary.

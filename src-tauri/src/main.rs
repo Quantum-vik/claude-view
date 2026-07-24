@@ -11,7 +11,7 @@ mod transcript;
 use std::sync::Arc;
 
 use session::{Registry, SessionInfo};
-use tauri::{AppHandle, Manager, State, WebviewUrl, WebviewWindowBuilder};
+use tauri::{AppHandle, Emitter, Manager, State, WebviewUrl, WebviewWindowBuilder};
 use uuid::Uuid;
 
 struct AppState {
@@ -321,6 +321,32 @@ fn focus_session(app: AppHandle, state: State<'_, AppState>, viewer_id: String) 
     Ok(())
 }
 
+/// Move a popped-out session window back into the main app: tell the launcher
+/// to open the session as a tab, focus the launcher, then close the native
+/// session window. The session itself (PTY, scrollback) is untouched — the
+/// tab simply reconnects as another viewer.
+#[tauri::command]
+fn dock_session(app: AppHandle, state: State<'_, AppState>, viewer_id: String) -> Result<(), String> {
+    let session = state.registry.get(&viewer_id).ok_or("session not found")?;
+    let payload = serde_json::json!({
+        "vid": viewer_id,
+        "cwd": session.cwd,
+        "isTerminal": session.is_terminal,
+    });
+    // Only emit when the launcher webview already exists — a freshly created
+    // one wouldn't have its listener attached yet (the session stays visible
+    // under "Active now" there regardless).
+    let had_launcher = app.get_webview_window("main").is_some();
+    show_launcher(&app);
+    if had_launcher {
+        app.emit_to("main", "cv:dock", payload).map_err(|e| e.to_string())?;
+        if let Some(window) = app.get_webview_window(&format!("session-{viewer_id}")) {
+            let _ = window.close();
+        }
+    }
+    Ok(())
+}
+
 /// Refocus the launcher window, recreating it if it was closed.
 fn show_launcher(app: &AppHandle) {
     if let Some(window) = app.get_webview_window("main") {
@@ -338,6 +364,13 @@ fn show_launcher(app: &AppHandle) {
 #[tauri::command]
 fn list_past_sessions() -> Result<Vec<past_sessions::PastSession>, String> {
     past_sessions::list()
+}
+
+/// Move a past session's transcript to the OS Trash (recoverable). The row's
+/// UI confirms before calling this.
+#[tauri::command]
+fn delete_past_session(session_id: String) -> Result<(), String> {
+    past_sessions::delete(&session_id)
 }
 
 /// Remove a session from the registry and kill its child. Called when the user
@@ -359,6 +392,40 @@ fn hooks_status() -> bool {
     hooks_install::installed()
 }
 
+/// Show a native notification with a sound, posted under the app's own
+/// identity (tauri-plugin-notification) — so CLICKING the notification
+/// activates claude-view. The previous osascript implementation belonged to
+/// Script Editor, and clicks opened that instead. The sound name is
+/// restricted to a known set so nothing user-controlled leaks through.
+#[tauri::command]
+fn notify(app: AppHandle, title: String, body: String, sound: Option<String>) -> Result<(), String> {
+    use tauri_plugin_notification::{NotificationExt, PermissionState};
+    const SOUNDS: &[&str] = &[
+        "Glass", "Ping", "Pop", "Funk", "Hero", "Purr", "Submarine", "Tink",
+    ];
+    let sound = sound
+        .as_deref()
+        .filter(|s| SOUNDS.contains(s))
+        .unwrap_or("Glass");
+    // macOS drops notifications from apps that never asked for authorization —
+    // banners silently don't appear. Ask (once; the OS remembers) before
+    // posting.
+    let notifications = app.notification();
+    match notifications.permission_state() {
+        Ok(PermissionState::Granted) => {}
+        _ => {
+            let _ = notifications.request_permission();
+        }
+    }
+    notifications
+        .builder()
+        .title(&title)
+        .body(&body)
+        .sound(sound)
+        .show()
+        .map_err(|e| e.to_string())
+}
+
 #[tauri::command]
 fn install_hooks() -> Result<String, String> {
     hooks_install::install()
@@ -370,6 +437,13 @@ fn uninstall_hooks() -> Result<String, String> {
 }
 
 fn main() {
+    // Hook-set upgrade: users who installed hooks under an older build pick up
+    // newly-added events (Stop/Notification) automatically. install() is
+    // idempotent — it only appends entries that are missing.
+    if hooks_install::installed() {
+        let _ = hooks_install::install();
+    }
+
     let registry = Arc::new(Registry::default());
     // Random per run; CLAUDE_VIEW_TOKEN overrides for scripting/testing.
     let token =
@@ -413,6 +487,7 @@ fn main() {
 
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_notification::init())
         .manage(state)
         .setup(move |app| {
             let router = server::router(registry, token, app.handle().clone(), port);
@@ -430,14 +505,17 @@ fn main() {
             new_terminal,
             list_sessions,
             list_past_sessions,
+            delete_past_session,
             focus_session,
+            dock_session,
             close_session,
             get_conn_info,
             open_path,
             open_url,
             hooks_status,
             install_hooks,
-            uninstall_hooks
+            uninstall_hooks,
+            notify
         ])
         .build(tauri::generate_context!())
         .expect("error while building claude-view")

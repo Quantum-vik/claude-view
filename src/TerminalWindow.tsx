@@ -1,7 +1,9 @@
 import { useState } from "react";
+import { invoke } from "@tauri-apps/api/core";
 import Terminal from "./Terminal";
 import { ConnectionStatus } from "./ws";
 import { T } from "./tokens";
+import ThemeMenu from "./ThemeMenu";
 
 /** Split a cwd into a dim parent prefix and the bright leaf name, compressing a
  *  leading /Users/<name>/ or /home/<name>/ to ~/. (Mirrors SessionWindow.) */
@@ -72,8 +74,8 @@ export default function TerminalWindow(props: TerminalWindowProps = {}) {
           alignItems: "center",
           gap: 12,
           padding: "0 16px",
-          background: "#1a1d22",
-          borderBottom: `1px solid ${T.border}`,
+          background: T.titlebar,
+          borderBottom: `1px solid ${T.divider}`,
           flexShrink: 0,
           height: 46,
         }}
@@ -86,8 +88,8 @@ export default function TerminalWindow(props: TerminalWindowProps = {}) {
           style={{
             display: "flex",
             alignItems: "center",
-            fontFamily: T.mono,
-            fontSize: 12.5,
+            fontFamily: T.serif,
+            fontSize: 13.5,
             overflow: "hidden",
             whiteSpace: "nowrap",
             maxWidth: 460,
@@ -97,12 +99,12 @@ export default function TerminalWindow(props: TerminalWindowProps = {}) {
           <span style={{ color: T.textFaint, overflow: "hidden", textOverflow: "ellipsis" }}>
             {crumb.parent}
           </span>
-          <span style={{ color: T.path, fontWeight: 500, flexShrink: 0 }}>{crumb.name}</span>
+          <span style={{ color: T.accent, fontWeight: 600, flexShrink: 0 }}>{crumb.name}</span>
         </span>
 
         <span
           style={{
-            fontSize: 11,
+            fontSize: 10.5,
             color: T.textFaint,
             fontFamily: T.mono,
             background: T.surface2,
@@ -140,10 +142,35 @@ export default function TerminalWindow(props: TerminalWindowProps = {}) {
           />
           {live.label}
         </span>
+
+        {/* Popped-out window only: move this terminal back into the main app
+            as a tab (closes this window; the shell keeps running). */}
+        {!props.embedded && vid && (
+          <button
+            onClick={() => invoke("dock_session", { viewerId: vid }).catch(() => {})}
+            title="Move this terminal back into the main app as a tab"
+            style={{
+              background: T.surface2,
+              border: `1px solid ${T.borderStrong}`,
+              borderRadius: 8,
+              color: T.text,
+              cursor: "pointer",
+              fontSize: 12,
+              fontWeight: 600,
+              padding: "5px 12px",
+              flexShrink: 0,
+              whiteSpace: "nowrap",
+            }}
+          >
+            ⧉ Dock
+          </button>
+        )}
+
+        <ThemeMenu compact />
       </div>
 
       {/* Terminal area */}
-      <div style={{ flex: 1, overflow: "hidden", background: "#141519" }}>
+      <div style={{ flex: 1, overflow: "hidden", background: T.bg }}>
         {vid && port && token ? (
           <Terminal
             vid={vid}

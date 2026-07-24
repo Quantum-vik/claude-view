@@ -3,9 +3,12 @@ import { Terminal as XTerm, type ILink } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
 import { SearchAddon } from "@xterm/addon-search";
 import { WebglAddon } from "@xterm/addon-webgl";
+import { Unicode11Addon } from "@xterm/addon-unicode11";
 import { invoke } from "@tauri-apps/api/core";
 import "@xterm/xterm/css/xterm.css";
 import { createWsClient, ConnectionStatus } from "./ws";
+import { T } from "./tokens";
+import { currentTheme, onThemeChange } from "./themes";
 
 interface TerminalProps {
   vid: string;
@@ -25,6 +28,11 @@ interface TerminalProps {
 const PATH_REGEX = /(?:~\/|\.{1,2}\/)?[\w.@-]+(?:\/[\w.@-]+)*\.[A-Za-z][A-Za-z0-9]{0,7}(?::\d+)?/g;
 const URL_REGEX = /https?:\/\/[^\s"'<>()\]]+/g;
 
+// Terminal font: prefer the user's Nerd Font (powerline glyphs, p10k/tmux
+// icons — IBM Plex Mono has none of them, which renders prompts as □ boxes),
+// fall back to the app mono stack when it isn't installed.
+const TERM_FONT = `'MesloLGS NF', 'JetBrainsMono Nerd Font', 'Hack Nerd Font', ${T.mono}`;
+
 export default function Terminal({ vid, port, token, cwd, onControl, onStatusChange, sendRef }: TerminalProps) {
   const containerRef = useRef<HTMLDivElement>(null);
   const searchInputRef = useRef<HTMLInputElement>(null);
@@ -32,8 +40,25 @@ export default function Terminal({ vid, port, token, cwd, onControl, onStatusCha
   const [searchQuery, setSearchQuery] = useState("");
   const searchAddonRef = useRef<SearchAddon | null>(null);
 
+  // Scroll roller: our own always-visible scrollbar for the chat scrollback.
+  // macOS overlay scrollbars + the WebGL canvas leave xterm's native viewport
+  // bar invisible, so we draw a thumb from buffer state and drive
+  // term.scrollToLine() from drags.
+  const [sb, setSb] = useState({ thumbTop: 0, thumbH: 0, visible: false });
+  const termRef = useRef<XTerm | null>(null);
+  const sbDrag = useRef<{ startY: number; startLine: number } | null>(null);
+  const sbGeom = useRef({ total: 0, rows: 0, trackH: 0, thumbH: 0 });
+
+  // Latest-callback refs: the xterm effect below runs once per connection, so
+  // it must not capture the parent's (re-created every render) handlers.
+  const onControlRef = useRef(onControl);
+  const onStatusRef = useRef(onStatusChange);
+  onControlRef.current = onControl;
+  onStatusRef.current = onStatusChange;
+
   useEffect(() => {
-    if (!containerRef.current) return;
+    const container = containerRef.current;
+    if (!container) return;
 
     // --- Terminal setup ---
     // Persisted font size (a global default shared by every terminal). Cmd/Ctrl
@@ -66,30 +91,10 @@ export default function Terminal({ vid, port, token, cwd, onControl, onStatusCha
           }
         },
       },
-      fontFamily: "Menlo, Monaco, 'Courier New', monospace",
+      fontFamily: TERM_FONT,
       fontSize: initialFont,
-      theme: {
-        background: "#141519",
-        foreground: "#d4d4d4",
-        cursor: "#d4d4d4",
-        selectionBackground: "#264f78",
-        black: "#1e1e1e",
-        red: "#f44747",
-        green: "#6a9955",
-        yellow: "#d7ba7d",
-        blue: "#569cd6",
-        magenta: "#c586c0",
-        cyan: "#4ec9b0",
-        white: "#d4d4d4",
-        brightBlack: "#808080",
-        brightRed: "#f44747",
-        brightGreen: "#6a9955",
-        brightYellow: "#d7ba7d",
-        brightBlue: "#569cd6",
-        brightMagenta: "#c586c0",
-        brightCyan: "#4ec9b0",
-        brightWhite: "#ffffff",
-      },
+      // Live palette from the active theme; re-applied on theme switch below.
+      theme: currentTheme().terminal,
     });
 
     const fitAddon = new FitAddon();
@@ -98,7 +103,27 @@ export default function Terminal({ vid, port, token, cwd, onControl, onStatusCha
 
     term.loadAddon(fitAddon);
     term.loadAddon(searchAddon);
-    term.open(containerRef.current);
+    // Unicode 11 width tables: modern glyphs (nerd-font icons, emoji) get
+    // their true cell widths — without this, tmux's column math and the
+    // renderer disagree and pane borders shred.
+    term.loadAddon(new Unicode11Addon());
+    term.unicode.activeVersion = "11";
+    term.open(container);
+
+    // Follow theme switches without recreating the terminal.
+    const unsubscribeTheme = onThemeChange((theme) => {
+      term.options.theme = theme.terminal;
+    });
+
+    // If the mono webfont (IBM Plex Mono) finishes loading after xterm first
+    // measured glyphs, cell widths are stale — poke the renderer to re-measure.
+    let disposed = false;
+    document.fonts?.ready.then(() => {
+      if (disposed) return;
+      // Reassigning the font option invalidates xterm's char atlas.
+      term.options.fontFamily = TERM_FONT;
+      doFit();
+    });
 
     // WebGL with fallback
     let webglAddon: WebglAddon | null = null;
@@ -173,10 +198,10 @@ export default function Terminal({ vid, port, token, cwd, onControl, onStatusCha
           term.reset();
           return;
         }
-        onControl(msg);
+        onControlRef.current(msg);
       })
       .onStatus((status) => {
-        onStatusChange?.(status);
+        onStatusRef.current?.(status);
         if (status === "open") {
           if (hasOpened) term.reset();
           hasOpened = true;
@@ -220,6 +245,16 @@ export default function Terminal({ vid, port, token, cwd, onControl, onStatusCha
         if (e.key === "=" || e.key === "+") return applyFontSize(cur + 1), false;
         if (e.key === "-") return applyFontSize(cur - 1), false;
         if (e.key === "0") return applyFontSize(DEFAULT_FONT_SIZE), false;
+        // Find-in-terminal — handled here (single path) so xterm never also
+        // sees the keystroke.
+        if (e.key === "f") {
+          setSearchOpen((prev) => {
+            const next = !prev;
+            if (next) setTimeout(() => searchInputRef.current?.focus(), 50);
+            return next;
+          });
+          return false;
+        }
       }
       // Editing keys: Cmd only, so Ctrl-versions stay as shell/readline controls.
       if (e.metaKey && !e.ctrlKey) {
@@ -233,8 +268,65 @@ export default function Terminal({ vid, port, token, cwd, onControl, onStatusCha
       return true;
     });
 
+    // Cmd/Ctrl+click opens the file path or URL under the cursor (VS Code
+    // style). This intercepts in the CAPTURE phase, so it works even while
+    // the mirrored TUI (Claude Code enables mouse reporting) is swallowing
+    // plain clicks and xterm's own link activation never fires.
+    const openAt = (clientX: number, clientY: number): boolean => {
+      const screen = container.querySelector(".xterm-screen") as HTMLElement | null;
+      if (!screen) return false;
+      const rect = screen.getBoundingClientRect();
+      if (
+        rect.width === 0 ||
+        clientX < rect.left ||
+        clientX >= rect.right ||
+        clientY < rect.top ||
+        clientY >= rect.bottom
+      ) {
+        return false;
+      }
+      const col = Math.floor(((clientX - rect.left) / rect.width) * term.cols);
+      const row = Math.floor(((clientY - rect.top) / rect.height) * term.rows);
+      const line = term.buffer.active.getLine(term.buffer.active.viewportY + row);
+      if (!line) return false;
+      const text = line.translateToString(false);
+      for (const m of text.matchAll(URL_REGEX)) {
+        const url = m[0].replace(/[.,;:]+$/, "");
+        if (col >= m.index && col < m.index + url.length) {
+          invoke("open_url", { url }).catch(() => {});
+          return true;
+        }
+      }
+      for (const m of text.matchAll(PATH_REGEX)) {
+        if (text.slice(Math.max(0, m.index - 8), m.index).includes("://")) continue;
+        if (col >= m.index && col < m.index + m[0].length) {
+          invoke("open_path", { path: m[0], cwd: cwd ?? null }).catch(() => {});
+          return true;
+        }
+      }
+      return false;
+    };
+    const onModClick = (e: MouseEvent) => {
+      if (!(e.metaKey || e.ctrlKey)) return;
+      if (openAt(e.clientX, e.clientY)) {
+        e.preventDefault();
+        e.stopPropagation();
+      }
+    };
+    // macOS reports Ctrl+click as a context-menu gesture — catch that too so
+    // BOTH Cmd+click and Ctrl+click open the target.
+    const onCtxMenu = (e: MouseEvent) => {
+      if (!e.ctrlKey) return;
+      if (openAt(e.clientX, e.clientY)) {
+        e.preventDefault();
+        e.stopPropagation();
+      }
+    };
+    container.addEventListener("click", onModClick, true);
+    container.addEventListener("contextmenu", onCtxMenu, true);
+
     // Ctrl+wheel (and trackpad pinch, which the OS reports as ctrl+wheel) zooms.
-    const wheelEl = containerRef.current;
+    const wheelEl = container;
     const onWheelZoom = (e: WheelEvent) => {
       if (!e.ctrlKey) return;
       e.preventDefault();
@@ -242,34 +334,87 @@ export default function Terminal({ vid, port, token, cwd, onControl, onStatusCha
     };
     wheelEl.addEventListener("wheel", onWheelZoom, { passive: false });
 
-    // ResizeObserver → fit and send resize (only when visible/non-zero, so a
-    // hidden tab never pushes a 0×0 resize to the shared PTY).
-    const ro = new ResizeObserver(() => {
-      if (doFit()) {
-        client.sendControl({ type: "resize", cols: term.cols, rows: term.rows });
-      }
-    });
-    ro.observe(containerRef.current);
+    // ResizeObserver → fit + PTY resize. During a live drag this fires at
+    // display rate, so: refit at most once per animation frame (keeps the
+    // glyphs tracking the pane smoothly), and debounce the PTY resize message
+    // (SIGWINCH storms make full-screen apps like Claude Code redraw over and
+    // over — the visible "jitter" during resizes).
+    let fitRaf = 0;
+    let resizeTimer: ReturnType<typeof setTimeout> | null = null;
+    const scheduleFit = () => {
+      if (fitRaf) return;
+      fitRaf = requestAnimationFrame(() => {
+        fitRaf = 0;
+        const cols = term.cols;
+        const rows = term.rows;
+        if (doFit() && (term.cols !== cols || term.rows !== rows)) {
+          if (resizeTimer) clearTimeout(resizeTimer);
+          resizeTimer = setTimeout(() => {
+            resizeTimer = null;
+            client.sendControl({ type: "resize", cols: term.cols, rows: term.rows });
+          }, 140);
+        }
+      });
+    };
+    const ro = new ResizeObserver(scheduleFit);
+    ro.observe(container);
 
-    // Keyboard shortcut: Cmd/Ctrl+F → toggle search
-    const keyDisposable = term.onKey(({ domEvent }) => {
-      if (domEvent.key === "f" && (domEvent.metaKey || domEvent.ctrlKey)) {
-        domEvent.preventDefault();
-        setSearchOpen((prev) => {
-          const next = !prev;
-          if (next) {
-            setTimeout(() => searchInputRef.current?.focus(), 50);
-          }
-          return next;
-        });
-      }
-    });
+    // --- Scroll roller state feed ---
+    // rAF-throttled: onRender fires per output frame; the setState bails when
+    // the thumb hasn't visibly moved.
+    const SB_PAD = 8; // must match the overlay track's top/bottom inset
+    let sbRaf = 0;
+    const updateScrollbar = () => {
+      if (sbRaf) return;
+      sbRaf = requestAnimationFrame(() => {
+        sbRaf = 0;
+        const el = containerRef.current;
+        if (!el) return;
+        const buf = term.buffer.active;
+        const total = buf.length;
+        const rows = term.rows;
+        const trackH = el.clientHeight - SB_PAD * 2;
+        if (total <= rows || trackH <= 40) {
+          sbGeom.current = { total, rows, trackH, thumbH: 0 };
+          setSb((p) => (p.visible ? { thumbTop: 0, thumbH: 0, visible: false } : p));
+          return;
+        }
+        const thumbH = Math.max(28, (rows / total) * trackH);
+        const maxTop = trackH - thumbH;
+        const thumbTop = (buf.viewportY / (total - rows)) * maxTop;
+        sbGeom.current = { total, rows, trackH, thumbH };
+        setSb((p) =>
+          p.visible && Math.abs(p.thumbTop - thumbTop) < 0.5 && Math.abs(p.thumbH - thumbH) < 0.5
+            ? p
+            : { thumbTop, thumbH, visible: true }
+        );
+      });
+    };
+    const sbScrollDisp = term.onScroll(updateScrollbar);
+    const sbRenderDisp = term.onRender(updateScrollbar);
+    const sbResizeDisp = term.onResize(updateScrollbar);
+    const sbBufferDisp = term.buffer.onBufferChange(updateScrollbar);
+    updateScrollbar();
+    termRef.current = term;
 
     return () => {
+      disposed = true;
+      termRef.current = null;
+      if (sbRaf) cancelAnimationFrame(sbRaf);
+      sbScrollDisp.dispose();
+      sbRenderDisp.dispose();
+      sbResizeDisp.dispose();
+      sbBufferDisp.dispose();
+      // Cut off imperative senders FIRST so nothing writes to a dying client.
+      if (sendRef) sendRef.current = null;
+      if (fitRaf) cancelAnimationFrame(fitRaf);
+      if (resizeTimer) clearTimeout(resizeTimer);
+      unsubscribeTheme();
       dataDisposable.dispose();
-      keyDisposable.dispose();
       linkProvider.dispose();
       ro.disconnect();
+      container.removeEventListener("click", onModClick, true);
+      container.removeEventListener("contextmenu", onCtxMenu, true);
       wheelEl.removeEventListener("wheel", onWheelZoom);
       client.destroy();
       // webglAddon is null if context loss already disposed it.
@@ -277,10 +422,47 @@ export default function Terminal({ vid, port, token, cwd, onControl, onStatusCha
       searchAddon.dispose();
       term.dispose();
       searchAddonRef.current = null;
-      if (sendRef) sendRef.current = null;
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [vid, port, token, cwd]);
+
+  // --- Scroll roller interactions ---
+  function sbThumbDown(e: React.PointerEvent<HTMLDivElement>) {
+    const term = termRef.current;
+    if (!term) return;
+    e.preventDefault();
+    e.stopPropagation();
+    sbDrag.current = { startY: e.clientY, startLine: term.buffer.active.viewportY };
+    e.currentTarget.setPointerCapture(e.pointerId);
+  }
+
+  function sbThumbMove(e: React.PointerEvent<HTMLDivElement>) {
+    const term = termRef.current;
+    const drag = sbDrag.current;
+    if (!term || !drag) return;
+    const { total, rows, trackH, thumbH } = sbGeom.current;
+    const maxTop = trackH - thumbH;
+    if (maxTop <= 0) return;
+    const lines = ((e.clientY - drag.startY) / maxTop) * (total - rows);
+    const target = Math.max(0, Math.min(total - rows, Math.round(drag.startLine + lines)));
+    term.scrollToLine(target);
+  }
+
+  function sbThumbUp() {
+    sbDrag.current = null;
+  }
+
+  /** Click on the empty track: jump so the thumb centers on the click. */
+  function sbTrackDown(e: React.PointerEvent<HTMLDivElement>) {
+    if (e.target !== e.currentTarget) return;
+    const term = termRef.current;
+    if (!term) return;
+    const { total, rows, trackH, thumbH } = sbGeom.current;
+    const maxTop = Math.max(1, trackH - thumbH);
+    const rect = e.currentTarget.getBoundingClientRect();
+    const frac = Math.max(0, Math.min(1, (e.clientY - rect.top - thumbH / 2) / maxTop));
+    term.scrollToLine(Math.round(frac * (total - rows)));
+  }
 
   function handleSearchKeyDown(e: React.KeyboardEvent<HTMLInputElement>) {
     if (e.key === "Enter") {
@@ -301,6 +483,40 @@ export default function Terminal({ vid, port, token, cwd, onControl, onStatusCha
         ref={containerRef}
         style={{ width: "100%", height: "100%", overflow: "hidden" }}
       />
+      {/* Scroll roller — draggable thumb over the chat scrollback. */}
+      {sb.visible && (
+        <div
+          onPointerDown={sbTrackDown}
+          style={{
+            position: "absolute",
+            top: 8,
+            bottom: 8,
+            right: 3,
+            width: 11,
+            zIndex: 90,
+            borderRadius: 6,
+            background: "color-mix(in srgb, var(--cv-text) 7%, transparent)",
+          }}
+        >
+          <div
+            onPointerDown={sbThumbDown}
+            onPointerMove={sbThumbMove}
+            onPointerUp={sbThumbUp}
+            onPointerCancel={sbThumbUp}
+            title="Drag to scroll the session"
+            style={{
+              position: "absolute",
+              left: 1.5,
+              right: 1.5,
+              top: sb.thumbTop,
+              height: sb.thumbH,
+              borderRadius: 5,
+              background: "color-mix(in srgb, var(--cv-text) 32%, transparent)",
+              touchAction: "none",
+            }}
+          />
+        </div>
+      )}
       {searchOpen && (
         <div
           style={{
@@ -311,11 +527,11 @@ export default function Terminal({ vid, port, token, cwd, onControl, onStatusCha
             display: "flex",
             gap: 6,
             alignItems: "center",
-            background: "#2d2d2d",
-            border: "1px solid #444",
+            background: T.surface1,
+            border: `1px solid ${T.borderStrong}`,
             borderRadius: 6,
             padding: "4px 8px",
-            boxShadow: "0 2px 8px rgba(0,0,0,0.5)",
+            boxShadow: T.windowShadow,
           }}
         >
           <input
@@ -328,8 +544,8 @@ export default function Terminal({ vid, port, token, cwd, onControl, onStatusCha
               background: "transparent",
               border: "none",
               outline: "none",
-              color: "#d4d4d4",
-              fontFamily: "Menlo, Monaco, 'Courier New', monospace",
+              color: T.text,
+              fontFamily: T.mono,
               fontSize: 13,
               width: 200,
             }}
@@ -363,9 +579,9 @@ export default function Terminal({ vid, port, token, cwd, onControl, onStatusCha
 
 const searchBtnStyle: React.CSSProperties = {
   background: "transparent",
-  border: "1px solid #555",
+  border: `1px solid ${T.borderStrong}`,
   borderRadius: 4,
-  color: "#d4d4d4",
+  color: T.textDim,
   cursor: "pointer",
   fontSize: 13,
   padding: "1px 6px",

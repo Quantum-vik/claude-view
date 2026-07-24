@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { T, statusColor, toolFamily } from "./tokens";
 
 export interface TimelineEvent {
@@ -40,18 +40,6 @@ function gutterGlyph(status: TimelineEvent["status"]): string {
   return "•"; // interrupted — stopped, not failed
 }
 
-function getScrollParent(el: HTMLElement | null): HTMLElement | null {
-  let node = el?.parentElement ?? null;
-  while (node) {
-    const oy = getComputedStyle(node).overflowY;
-    if ((oy === "auto" || oy === "scroll") && node.scrollHeight > node.clientHeight) {
-      return node;
-    }
-    node = node.parentElement;
-  }
-  return null;
-}
-
 /** Last non-empty line of output — a compact at-a-glance result. */
 function previewLine(output: string): string {
   const lines = output.split("\n").filter((l) => l.trim().length > 0);
@@ -87,6 +75,10 @@ export type Row =
     };
 
 const CMD_LONG = 40; // a command past this length is worth expanding to read in full
+
+// Collapsed preview line color for non-error output — a muted sage between the
+// success hue and faint text, per the handoff prototype.
+const PREVIEW_OK = `color-mix(in srgb, ${T.success} 40%, ${T.textFaint})`;
 
 /** Filter by status tab + case-insensitive search over command+output+tool,
  *  then order newest-first. Applied BEFORE folding. Pure — exported for tests. */
@@ -150,7 +142,9 @@ export function buildRows(filtered: TimelineEvent[], grouping: boolean): Row[] {
 }
 
 export default function Timeline({ events }: TimelineProps) {
-  const topRef = useRef<HTMLDivElement>(null);
+  // The log body scrolls inside this component — a direct ref avoids walking
+  // the DOM for a scroll parent on every websocket message.
+  const scrollRef = useRef<HTMLDivElement>(null);
   const prevLenRef = useRef(0);
   const [expanded, setExpanded] = useState<Set<string>>(new Set());
   // Ids we've already auto-expanded (errors), so re-collapsing sticks.
@@ -188,16 +182,12 @@ export default function Timeline({ events }: TimelineProps) {
   useEffect(() => {
     const prev = prevLenRef.current;
     prevLenRef.current = events.length;
-    const el = topRef.current;
-    if (!el) return;
+    const sc = scrollRef.current;
+    if (!sc) return;
 
     // Newest line renders at the TOP, so "follow latest" means scrolling the
-    // log body to the top. Only scroll the timeline's OWN container (never
-    // ancestors like the launcher's session list), and only on first fill or a
-    // new line while the user is near the top — so reviewing older lines isn't
-    // yanked.
-    const sc = getScrollParent(el);
-    if (!sc) return;
+    // log body to the top — but only on first fill or a new line while the
+    // user is already near the top, so reviewing older lines isn't yanked.
     const firstFill = prev === 0 && events.length > 0;
     const appended = events.length > prev;
     const nearTop = sc.scrollTop < 80;
@@ -210,25 +200,27 @@ export default function Timeline({ events }: TimelineProps) {
     if (copyTimer.current) clearTimeout(copyTimer.current);
   }, []);
 
-  function toggle(id: string) {
+  // Stable handlers (functional setState only) so memoized rows don't re-render
+  // when unrelated rows change.
+  const toggle = useCallback((id: string) => {
     setExpanded((prev) => {
       const next = new Set(prev);
       if (next.has(id)) next.delete(id);
       else next.add(id);
       return next;
     });
-  }
+  }, []);
 
-  function toggleGroup(id: string) {
+  const toggleGroup = useCallback((id: string) => {
     setGroupOpen((prev) => {
       const next = new Set(prev);
       if (next.has(id)) next.delete(id);
       else next.add(id);
       return next;
     });
-  }
+  }, []);
 
-  function copyCommand(command: string | null, id: string, e: React.MouseEvent) {
+  const copyCommand = useCallback((command: string | null, id: string, e: React.MouseEvent) => {
     e.stopPropagation();
     try {
       navigator.clipboard?.writeText(command ?? "");
@@ -238,7 +230,7 @@ export default function Timeline({ events }: TimelineProps) {
     setCopiedId(id);
     if (copyTimer.current) clearTimeout(copyTimer.current);
     copyTimer.current = setTimeout(() => setCopiedId(null), 1400);
-  }
+  }, []);
 
   // Filter + search (newest-first), then fold consecutive same-tool runs.
   const filtered = useMemo(() => filterEvents(events, filter, query), [events, filter, query]);
@@ -259,29 +251,38 @@ export default function Timeline({ events }: TimelineProps) {
         flexDirection: "column",
         height: "100%",
         minHeight: 0,
-        background: T.bg,
+        background: T.sidebar,
         fontFamily: T.mono,
       }}
     >
-      {/* Header strip: tool-log label + shown/total + status tallies */}
+      {/* Header strip: Command log + shown/total + status tallies */}
       <div
         style={{
           display: "flex",
-          alignItems: "center",
+          alignItems: "baseline",
           justifyContent: "space-between",
-          padding: "12px 14px 9px",
+          padding: "12px 14px 10px",
           flexShrink: 0,
-          background: T.titlebar,
           borderBottom: `1px solid ${T.divider}`,
         }}
       >
         <span style={{ display: "flex", alignItems: "baseline", gap: 8 }}>
-          <span style={{ fontSize: 12, fontWeight: 700, color: T.text }}>tool-log</span>
-          <span style={{ fontSize: 10.5, color: T.textFaint }}>
-            — {shownCount} of {counts.total}
+          <span
+            style={{
+              fontFamily: T.serif,
+              fontSize: 13.5,
+              fontWeight: 600,
+              color: T.text,
+              whiteSpace: "nowrap",
+            }}
+          >
+            Command log
+          </span>
+          <span style={{ fontSize: 10.5, color: T.textFaint, whiteSpace: "nowrap" }}>
+            {shownCount} of {counts.total}
           </span>
         </span>
-        <span style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 11 }}>
+        <span style={{ display: "flex", alignItems: "baseline", gap: 6, fontSize: 11 }}>
           <span style={{ color: T.success }}>✓{counts.ok}</span>
           <span style={{ color: T.running }}>●{counts.running}</span>
           <span style={{ color: T.error }}>✗{counts.error}</span>
@@ -296,7 +297,6 @@ export default function Timeline({ events }: TimelineProps) {
           gap: 8,
           padding: "10px 12px",
           flexShrink: 0,
-          background: T.titlebar,
           borderBottom: `1px solid ${T.divider}`,
         }}
       >
@@ -311,12 +311,12 @@ export default function Timeline({ events }: TimelineProps) {
             padding: "6px 10px",
           }}
         >
-          <span style={{ color: "#56d4dd", fontSize: 12, flexShrink: 0 }}>⌕</span>
+          <span style={{ color: T.searchGlyph, fontSize: 12, flexShrink: 0 }}>⌕</span>
           <input
             className="cv-timeline-input"
             value={query}
             onChange={(e) => setQuery(e.target.value)}
-            placeholder="grep the log — command, output, tool…"
+            placeholder="search the log — command, output, tool…"
             style={{
               flex: 1,
               minWidth: 0,
@@ -325,7 +325,7 @@ export default function Timeline({ events }: TimelineProps) {
               outline: "none",
               color: T.text,
               fontFamily: T.mono,
-              fontSize: 12,
+              fontSize: 11.5,
             }}
           />
           {hasQuery && (
@@ -363,8 +363,7 @@ export default function Timeline({ events }: TimelineProps) {
       </div>
 
       {/* Log body */}
-      <div style={{ flex: 1, minHeight: 0, overflowY: "auto", padding: "4px 0 40px" }}>
-        <div ref={topRef} />
+      <div ref={scrollRef} style={{ flex: 1, minHeight: 0, overflowY: "auto", padding: "5px 0 40px" }}>
         {rows.length === 0 ? (
           <div
             style={{
@@ -373,11 +372,13 @@ export default function Timeline({ events }: TimelineProps) {
               color: T.textFaint,
               fontSize: 12,
               lineHeight: 1.6,
+              fontFamily: T.serif,
+              fontStyle: "italic",
             }}
           >
             {counts.total === 0
               ? "No commands yet — the log fills in as Claude runs tools."
-              : `no lines match — clear the filter to see all ${counts.total}.`}
+              : `nothing matches — clear the filter to see all ${counts.total}.`}
           </div>
         ) : (
           rows.map((row) =>
@@ -395,7 +396,7 @@ export default function Timeline({ events }: TimelineProps) {
                 key={row.key}
                 row={row}
                 open={groupOpen.has(row.key)}
-                onToggle={() => toggleGroup(row.key)}
+                onToggle={toggleGroup}
               />
             )
           )
@@ -428,9 +429,11 @@ function FilterTab({
         borderRadius: 6,
         padding: "3px 9px",
         cursor: "pointer",
+        whiteSpace: "nowrap",
+        flexShrink: 0,
         border: `1px solid ${active ? T.accentBorder : T.border}`,
-        background: active ? T.accentSoft : T.surface,
-        color: active ? T.path : "#7e8792",
+        background: active ? T.accentSoft : T.bg,
+        color: active ? T.accent : T.textDim,
       }}
     >
       {label}
@@ -438,8 +441,9 @@ function FilterTab({
   );
 }
 
-/** A single command rendered as one terminal line. */
-function SingleLine({
+/** A single command rendered as one terminal line. Memoized — the log
+ *  re-renders on every websocket message, so unchanged rows must skip. */
+const SingleLine = memo(function SingleLine({
   ev,
   open,
   copied,
@@ -466,11 +470,11 @@ function SingleLine({
       style={{
         display: "flex",
         gap: 8,
-        padding: "5px 12px",
+        padding: "6px 12px",
         cursor: hasMore ? "pointer" : "default",
         ...(isError
           ? {
-              background: "rgba(240,97,109,.07)",
+              background: T.errorTint,
               borderLeft: `2px solid ${T.error}`,
               paddingLeft: 10,
             }
@@ -484,8 +488,8 @@ function SingleLine({
           flexShrink: 0,
           textAlign: "center",
           color: gutter,
-          fontSize: 12,
-          lineHeight: 1.5,
+          fontSize: 11,
+          lineHeight: 1.6,
         }}
       >
         {isRunning ? (
@@ -501,41 +505,35 @@ function SingleLine({
       <div style={{ flex: 1, minWidth: 0, display: "flex", flexDirection: "column", gap: 3 }}>
         {/* Line 1: ts · tool · glyph · command · duration · copy */}
         <div style={{ display: "flex", alignItems: "baseline", gap: 8 }}>
-          <span style={{ color: "#4c5561", fontSize: 10.5, flexShrink: 0 }}>
+          <span style={{ color: T.timestamp, fontSize: 10, flexShrink: 0 }}>
             {formatTimestamp(ev.ts)}
           </span>
-          <span style={{ color: fam.color, fontWeight: 700, fontSize: 11, flexShrink: 0 }}>
+          <span style={{ color: fam.color, fontWeight: 600, fontSize: 11, flexShrink: 0 }}>
             {ev.tool}
           </span>
-          <span style={{ color: fam.color, opacity: 0.7, flexShrink: 0 }}>{fam.glyph}</span>
+          <span style={{ color: fam.color, opacity: 0.65, flexShrink: 0 }}>{fam.glyph}</span>
           {ev.command && (
             <span
               title={ev.command}
-              onClick={open ? (e) => e.stopPropagation() : undefined}
               style={{
                 fontSize: 11.5,
-                color: "#d4d4d4",
+                color: T.cmd,
                 minWidth: 0,
-                ...(open
-                  ? {
-                      whiteSpace: "pre-wrap",
-                      wordBreak: "break-word",
-                      userSelect: "text",
-                      cursor: "text",
-                    }
-                  : {
-                      whiteSpace: "nowrap",
-                      overflow: "hidden",
-                      textOverflow: "ellipsis",
-                      flexShrink: 1,
-                    }),
+                // Always one ellipsized line here — the meta row leaves only a
+                // sliver of width in a narrow sidebar, and break-wrapping in it
+                // stacks the command one character per line. The full command
+                // renders as its own block below when the row is expanded.
+                whiteSpace: "nowrap",
+                overflow: "hidden",
+                textOverflow: "ellipsis",
+                flexShrink: 1,
               }}
             >
               {ev.command}
             </span>
           )}
           {ev.durationMs !== null && (
-            <span style={{ color: "#4c5561", fontSize: 10, flexShrink: 0, marginLeft: "auto" }}>
+            <span style={{ color: T.timestamp, fontSize: 10, flexShrink: 0, marginLeft: "auto" }}>
               {formatDuration(ev.durationMs)}
             </span>
           )}
@@ -547,7 +545,7 @@ function SingleLine({
               background: "none",
               border: `1px solid ${copied ? T.success : T.border}`,
               borderRadius: 5,
-              color: copied ? T.success : "#7e8792",
+              color: copied ? T.success : T.textDim,
               cursor: "pointer",
               fontSize: 9.5,
               padding: "1px 6px",
@@ -560,12 +558,35 @@ function SingleLine({
           </button>
         </div>
 
+        {/* Expanded: the full command, wrapped across the row's whole width
+            (the inline copy above stays ellipsized). Only long commands need
+            this — short ones are already fully visible inline. */}
+        {open && ev.command && cmdLong && (
+          <div
+            onClick={(e) => e.stopPropagation()}
+            style={{
+              fontSize: 10.5,
+              lineHeight: 1.6,
+              color: T.cmd,
+              whiteSpace: "pre-wrap",
+              wordBreak: "break-word",
+              userSelect: "text",
+              cursor: "text",
+              display: "flex",
+              gap: 6,
+            }}
+          >
+            <span style={{ color: T.accentBorder, flexShrink: 0, userSelect: "none" }}>▏</span>
+            <span style={{ minWidth: 0 }}>{ev.command}</span>
+          </div>
+        )}
+
         {/* Collapsed: last output line as a compact preview */}
         {!open && ev.output && (
           <div
             style={{
               fontSize: 10.5,
-              color: isError ? "#e0a0a5" : "#6c7a6c",
+              color: isError ? T.errorPreview : PREVIEW_OK,
               whiteSpace: "nowrap",
               overflow: "hidden",
               textOverflow: "ellipsis",
@@ -573,7 +594,7 @@ function SingleLine({
               gap: 6,
             }}
           >
-            <span style={{ color: "#39404b" }}>▏</span>
+            <span style={{ color: T.borderStrong }}>▏</span>
             {previewLine(ev.output)}
           </div>
         )}
@@ -585,13 +606,13 @@ function SingleLine({
             style={{
               margin: "1px 0 2px",
               padding: "7px 9px",
-              background: isError ? "rgba(240,97,109,.07)" : "#141519",
-              border: `1px solid ${isError ? "#4a2830" : T.divider}`,
+              background: isError ? T.errorTint : T.bg,
+              border: `1px solid ${isError ? T.errorBorder : T.divider}`,
               borderRadius: 6,
               fontFamily: T.mono,
               fontSize: 10,
-              lineHeight: 1.55,
-              color: isError ? "#e0b4b8" : "#9aa1ab",
+              lineHeight: 1.6,
+              color: isError ? T.errorText : T.textDim,
               whiteSpace: "pre-wrap",
               wordBreak: "break-word",
               maxHeight: 180,
@@ -606,23 +627,23 @@ function SingleLine({
       </div>
     </div>
   );
-}
+});
 
-/** A folded run of consecutive same-tool successes. */
-function GroupLine({
+/** A folded run of consecutive same-tool successes. Memoized like SingleLine. */
+const GroupLine = memo(function GroupLine({
   row,
   open,
   onToggle,
 }: {
   row: Extract<Row, { kind: "group" }>;
   open: boolean;
-  onToggle: () => void;
+  onToggle: (id: string) => void;
 }) {
   return (
     <div style={{ borderLeft: `2px solid ${row.color}`, margin: "1px 0" }}>
       <div
         className="cv-line"
-        onClick={onToggle}
+        onClick={() => onToggle(row.key)}
         style={{
           display: "flex",
           alignItems: "baseline",
@@ -631,12 +652,12 @@ function GroupLine({
           cursor: "pointer",
         }}
       >
-        <span style={{ color: "#4c5561", fontSize: 10, width: 16, textAlign: "center", flexShrink: 0 }}>
+        <span style={{ color: T.timestamp, fontSize: 10, width: 16, textAlign: "center", flexShrink: 0 }}>
           {open ? "▾" : "▸"}
         </span>
-        <span style={{ color: row.color, fontWeight: 700, fontSize: 11 }}>{row.tool}</span>
-        <span style={{ color: "#7e8792", fontSize: 10.5 }}>{row.count} runs folded</span>
-        <span style={{ color: "#4c5561", fontSize: 10, marginLeft: "auto" }}>
+        <span style={{ color: row.color, fontWeight: 600, fontSize: 11 }}>{row.tool}</span>
+        <span style={{ color: T.textDim, fontSize: 10.5 }}>{row.count} runs folded</span>
+        <span style={{ color: T.timestamp, fontSize: 10, marginLeft: "auto" }}>
           {formatTimestamp(row.ts)}
         </span>
       </div>
@@ -656,7 +677,7 @@ function GroupLine({
               <span style={{ color: T.success, fontSize: 10, flexShrink: 0 }}>✓</span>
               <span
                 style={{
-                  color: "#a9b1bd",
+                  color: T.cmdFold,
                   fontSize: 10.5,
                   whiteSpace: "nowrap",
                   overflow: "hidden",
@@ -666,7 +687,7 @@ function GroupLine({
               >
                 {it.command}
               </span>
-              <span style={{ color: "#4c5561", fontSize: 10, flexShrink: 0 }}>
+              <span style={{ color: T.timestamp, fontSize: 10, flexShrink: 0 }}>
                 {formatDuration(it.durationMs)}
               </span>
             </div>
@@ -675,4 +696,4 @@ function GroupLine({
       )}
     </div>
   );
-}
+});
