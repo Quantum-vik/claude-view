@@ -113,6 +113,13 @@ pub struct Session {
     /// viewer drop the claude-only chrome (timeline, model switcher, context
     /// meter) and lets the backend rebuild the right window URL on reopen.
     pub is_terminal: bool,
+    /// True when this session's `claude` was launched with
+    /// `--dangerously-skip-permissions`, i.e. it runs every tool (file writes,
+    /// shell commands) without stopping to ask. Decided per session by whoever
+    /// launched it and fixed for the life of the process — the flag is argv, so
+    /// it cannot change without a respawn. Always `false` for
+    /// [`Self::is_terminal`]: a shell has no permission model to skip.
+    pub skip_permissions: bool,
     pub ended: AtomicBool,
     pub exit_code: RwLock<Option<i64>>,
     /// What the agent is doing, derived from hook events. See [`AgentState`].
@@ -405,6 +412,7 @@ impl Session {
             cwd: self.cwd.clone(),
             ended: self.is_ended(),
             is_terminal: self.is_terminal,
+            skip_permissions: self.skip_permissions,
             state: merge_state(hook, screen.as_deref(), self.is_terminal),
             blocked_kind: screen.filter(|_| !self.is_terminal),
             state_seq: self.state_seq.load(Ordering::Acquire),
@@ -505,6 +513,12 @@ pub struct SessionInfo {
     pub cwd: String,
     pub ended: bool,
     pub is_terminal: bool,
+    /// `true` when this session was launched with
+    /// `--dangerously-skip-permissions` — Claude runs every tool without asking
+    /// for approval, so no permission prompt will ever appear in it. The
+    /// default for new sessions, but a per-session choice; always `false` for
+    /// `is_terminal` sessions. See [`Session::skip_permissions`].
+    pub skip_permissions: bool,
     /// Effective agent state — the hook state, forced to `blocked` while the
     /// viewer reports a dialog on screen. See [`merge_state`]. Always `unknown`
     /// for `is_terminal` sessions.
@@ -694,6 +708,7 @@ mod tests {
             cwd: "/tmp".into(),
             ended: false,
             is_terminal: false,
+            skip_permissions: true,
             state: merge_state(AgentState::Idle, Some("trust"), false),
             blocked_kind: Some("trust".into()),
             state_seq: 3,
@@ -717,5 +732,56 @@ mod tests {
         let v = serde_json::to_value(&clear).unwrap();
         assert_eq!(v["state"], "idle");
         assert!(v["blocked_kind"].is_null());
+    }
+
+    /// The viewer decides whether to show the "permissions skipped" badge from
+    /// this one field, so its name and shape on the wire are the contract.
+    #[test]
+    fn session_info_reports_skip_permissions_in_snake_case() {
+        let base = SessionInfo {
+            viewer_id: "v1".into(),
+            session_id: None,
+            cwd: "/tmp".into(),
+            ended: false,
+            is_terminal: false,
+            skip_permissions: true,
+            state: AgentState::Idle,
+            blocked_kind: None,
+            state_seq: 0,
+            state_since: 0,
+            repo_key: None,
+            repo_name: None,
+            checkout_name: None,
+            is_linked_worktree: false,
+            branch: None,
+        };
+
+        let v = serde_json::to_value(&base).unwrap();
+        assert_eq!(v["skip_permissions"], true, "the app's default: skipping");
+        assert!(
+            v.get("skipPermissions").is_none(),
+            "no camelCase alias exists"
+        );
+
+        let strict = SessionInfo {
+            skip_permissions: false,
+            ..base.clone()
+        };
+        assert_eq!(
+            serde_json::to_value(&strict).unwrap()["skip_permissions"],
+            false
+        );
+
+        // A plain shell is never reported as having skipped permissions —
+        // `Session::info` copies the field, and `spawn_in_pty` pins it to false
+        // for terminals (asserted against a real PTY in pty.rs).
+        let terminal = SessionInfo {
+            is_terminal: true,
+            skip_permissions: false,
+            ..base
+        };
+        let v = serde_json::to_value(&terminal).unwrap();
+        assert_eq!(v["is_terminal"], true);
+        assert_eq!(v["skip_permissions"], false);
     }
 }

@@ -27,6 +27,21 @@ function maxListWidth(): number {
 const TABS_KEY = "cv.tabs";
 const ACTIVE_TAB_KEY = "cv.activeTab";
 
+/** Whether new claude sessions launch with `--dangerously-skip-permissions`.
+ *  This app has always passed that flag unconditionally, so the toggle defaults
+ *  to ON — it exists to disclose the behaviour and let you opt out, not to
+ *  change it under anyone who upgrades. Terminals are unaffected. */
+const SKIP_PERMS_KEY = "cv.skipPermissions";
+
+function savedSkipPermissions(): boolean {
+  try {
+    // Anything but an explicit "false" (including nothing stored) means on.
+    return localStorage.getItem(SKIP_PERMS_KEY) !== "false";
+  } catch {
+    return true;
+  }
+}
+
 /** Hook-derived agent state (src-tauri/src/session.rs — `AgentState`). Every
  *  transition comes from Claude Code's own hooks, so this is ground truth, not
  *  a heuristic. Plain terminals never emit hooks and stay "unknown" forever. */
@@ -52,6 +67,9 @@ interface SessionInfo {
   is_linked_worktree: boolean;
   /** null for a detached / reftable HEAD. */
   branch: string | null;
+  /** Launched with `--dangerously-skip-permissions` — Claude runs tools (file
+   *  writes, shell commands) without asking. Always false for a terminal. */
+  skip_permissions: boolean;
 }
 
 interface PastSession {
@@ -520,6 +538,11 @@ export default function Launcher() {
   );
   // "New Terminal" split-button dropdown (tmux | shell).
   const [newTermMenu, setNewTermMenu] = useState(false);
+  // Permission mode for the NEXT claude session (persisted; on by default —
+  // see SKIP_PERMS_KEY). The ref is what `launch()` reads, so the ⌘N handler
+  // (registered once) can never fire with a stale value.
+  const [skipPerms, setSkipPerms] = useState(savedSkipPermissions);
+  const skipPermsRef = useRef(skipPerms);
   // Split-pane sizing: the repos list is resizable and can be collapsed so the
   // session pane takes the full width. Live drags mutate the DOM directly; the
   // committed width persists.
@@ -867,6 +890,20 @@ export default function Launcher() {
     refreshSessions();
   }
 
+  /** Flip the permission mode for future launches (persisted immediately, so a
+   *  crash or a second window can't lose the choice). Running sessions keep
+   *  whatever they were spawned with — the flag is fixed at spawn. */
+  function toggleSkipPerms() {
+    const next = !skipPerms;
+    skipPermsRef.current = next;
+    setSkipPerms(next);
+    try {
+      localStorage.setItem(SKIP_PERMS_KEY, String(next));
+    } catch {
+      // private mode etc. — the choice still applies for this window
+    }
+  }
+
   async function launch(cwd: string, resume: string | null) {
     setNewSessionError(null);
     try {
@@ -875,6 +912,7 @@ export default function Launcher() {
         resume,
         continueLast: false,
         openWindow: !embedMode,
+        skipPermissions: skipPermsRef.current,
       });
       if (embedMode) {
         openInPane(info.viewer_id, info.cwd);
@@ -1162,6 +1200,13 @@ export default function Launcher() {
               )}
               {label}
             </span>
+            {/* Caution first: in a squeezed list the trailing chips are the
+                ones clipped, and this is the one that must survive. */}
+            {s.skip_permissions && (
+              <span style={skipPermsChipStyle} title={SKIP_PERMS_TITLE}>
+                skip perms
+              </span>
+            )}
             {/* Detached / reftable HEAD renders no chip at all — a "detached"
                 placeholder would be noise on every card that has one. */}
             {s.branch && (
@@ -1328,6 +1373,85 @@ export default function Launcher() {
             {newSessionError}
           </div>
         )}
+
+        {/* Permission mode for new sessions. Every session this app launches has
+            always passed --dangerously-skip-permissions; this states that out
+            loud and makes it optional. Default stays ON. */}
+        <div
+          style={{
+            display: "flex",
+            alignItems: "center",
+            gap: 11,
+            background: T.surface1,
+            border: `1px solid ${skipPerms ? tint(T.error, 0.35) : T.border}`,
+            borderRadius: 10,
+            padding: "9px 13px",
+            marginBottom: 14,
+          }}
+        >
+          <span
+            style={{
+              width: 7,
+              height: 7,
+              borderRadius: "50%",
+              background: skipPerms ? T.error : T.textFaint,
+              flexShrink: 0,
+            }}
+          />
+          <div style={{ flex: 1, minWidth: 0 }}>
+            <div
+              style={{
+                fontFamily: T.serif,
+                fontSize: 12.5,
+                fontWeight: 600,
+                color: skipPerms ? T.error : T.text,
+              }}
+            >
+              Skip permission prompts
+            </div>
+            <div style={{ fontSize: 11, color: T.textDim, marginTop: 3, lineHeight: 1.5 }}>
+              {skipPerms
+                ? "On — new sessions run claude --dangerously-skip-permissions: Claude edits files and runs shell commands without asking you first."
+                : "Off — new sessions ask before editing files or running shell commands."}
+            </div>
+          </div>
+          <button
+            role="switch"
+            aria-checked={skipPerms}
+            aria-label="Skip permission prompts for new sessions"
+            onClick={toggleSkipPerms}
+            title={
+              skipPerms
+                ? "Turn off to have new sessions ask before running tools"
+                : "Turn on to launch new sessions with --dangerously-skip-permissions"
+            }
+            style={{
+              position: "relative",
+              width: 34,
+              height: 19,
+              borderRadius: 999,
+              background: skipPerms ? tint(T.error, 0.22) : T.surface2,
+              border: `1px solid ${skipPerms ? tint(T.error, 0.55) : T.borderStrong}`,
+              cursor: "pointer",
+              flexShrink: 0,
+              padding: 0,
+              transition: "background 0.12s, border-color 0.12s",
+            }}
+          >
+            <span
+              style={{
+                position: "absolute",
+                top: 2,
+                left: skipPerms ? 16 : 2,
+                width: 13,
+                height: 13,
+                borderRadius: "50%",
+                background: skipPerms ? T.error : T.textFaint,
+                transition: "left 0.12s ease, background 0.12s",
+              }}
+            />
+          </button>
+        </div>
 
         {/* Search-first */}
         <div style={searchWrapStyle}>
@@ -2180,6 +2304,19 @@ const worktreeChipStyle: React.CSSProperties = {
   color: T.accent,
   border: `1px solid ${T.accentBorder}`,
 };
+
+/** `--dangerously-skip-permissions`. Deliberately in the error hue, not the
+ *  accent one: it's a caution, not a feature badge. */
+const skipPermsChipStyle: React.CSSProperties = {
+  ...chipStyle,
+  color: T.error,
+  background: T.errorTint,
+  border: `1px solid ${tint(T.error, 0.35)}`,
+};
+
+const SKIP_PERMS_TITLE =
+  "Running with --dangerously-skip-permissions — Claude edits files and runs " +
+  "shell commands in this session without asking.";
 
 const searchWrapStyle: React.CSSProperties = {
   display: "flex",

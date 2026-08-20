@@ -159,6 +159,7 @@ fn spawn_in_pty(
     mut cmd: CommandBuilder,
     seed_session_id: Option<String>,
     is_terminal: bool,
+    skip_permissions: bool,
 ) -> Result<Arc<Session>, String> {
     if !std::path::Path::new(&cwd).is_dir() {
         return Err(format!("working directory does not exist: {cwd}"));
@@ -220,6 +221,9 @@ fn spawn_in_pty(
         model: RwLock::new(None),
         usage: RwLock::new(None),
         is_terminal,
+        // Belt and braces: a plain shell has no permission model to skip, so it
+        // must never report `true` even if a caller passes one through.
+        skip_permissions: skip_permissions && !is_terminal,
         ended: Default::default(),
         exit_code: RwLock::new(None),
         // A terminal never receives hooks, so it stays Unknown for life. A
@@ -277,10 +281,47 @@ fn spawn_in_pty(
     Ok(session)
 }
 
+/// The argv `claude` is launched with, minus the binary itself.
+///
+/// Free function, not inlined into [`spawn_session`]: the one decision that
+/// carries real consequence here — whether `--dangerously-skip-permissions` is
+/// passed — is otherwise only observable by spawning a real `claude`, which CI
+/// has no copy of. Same reasoning as `session::merge_state`.
+fn claude_args(
+    skip_permissions: bool,
+    resume_id: Option<&str>,
+    continue_last: bool,
+) -> Vec<String> {
+    let mut args: Vec<String> = Vec::new();
+    // `--dangerously-skip-permissions` makes Claude Code run every tool — file
+    // writes, shell commands, everything — without stopping to ask for
+    // approval. It is a per-session choice made by the caller (defaulting to on
+    // for backwards compatibility), NOT something this function decides.
+    if skip_permissions {
+        args.push("--dangerously-skip-permissions".into());
+    }
+    // Reopen an existing conversation instead of starting fresh:
+    // --resume <id> targets a specific session, --continue the most recent
+    // one in this cwd.
+    if let Some(id) = resume_id {
+        args.push("--resume".into());
+        args.push(id.to_string());
+    } else if continue_last {
+        args.push("--continue".into());
+    }
+    args
+}
+
 /// Spawn `claude` inside a fresh PTY, register the session, and start the
 /// reader + waiter threads plus a transcript tailer. Raw master bytes are
 /// forwarded chunk-by-chunk (never line-buffered) to every connected
 /// WebSocket — this is the live mirror.
+///
+/// `skip_permissions` decides whether the child gets
+/// `--dangerously-skip-permissions`. Callers default it to `true` (see
+/// `new_session` in main.rs and `POST /sessions` in server.rs), which is the
+/// long-standing behaviour of this app; the value is recorded on the returned
+/// [`Session`] so a viewer can show which way the session was launched.
 pub fn spawn_session(
     registry: &Arc<Registry>,
     port: u16,
@@ -288,17 +329,12 @@ pub fn spawn_session(
     cwd: String,
     resume: Option<String>,
     continue_last: bool,
+    skip_permissions: bool,
 ) -> Result<Arc<Session>, String> {
     let claude_bin = resolve_claude_bin()?;
     let viewer_id = Uuid::new_v4().to_string();
 
     let mut cmd = CommandBuilder::new(claude_bin);
-    // Every session launched from this app runs with permission prompts off —
-    // the user's standing choice for their own machine.
-    cmd.arg("--dangerously-skip-permissions");
-    // Reopen an existing conversation instead of starting fresh:
-    // --resume <id> targets a specific session, --continue the most recent
-    // one in this cwd.
     let resume_id = resume
         .as_deref()
         .map(str::trim)
@@ -314,10 +350,9 @@ pub fn spawn_session(
                 &id[..id.len().min(8)]
             ));
         }
-        cmd.arg("--resume");
-        cmd.arg(id);
-    } else if continue_last {
-        cmd.arg("--continue");
+    }
+    for arg in claude_args(skip_permissions, resume_id.as_deref(), continue_last) {
+        cmd.arg(arg);
     }
     cmd.env("CLAUDE_VIEW_ID", &viewer_id);
     cmd.env("CLAUDE_VIEW_PORT", port.to_string());
@@ -328,7 +363,15 @@ pub fn spawn_session(
     // /bind + port wiring but not exported here.
     let _ = token;
 
-    let session = spawn_in_pty(registry, viewer_id, cwd.clone(), cmd, resume_id, false)?;
+    let session = spawn_in_pty(
+        registry,
+        viewer_id,
+        cwd.clone(),
+        cmd,
+        resume_id,
+        false,
+        skip_permissions,
+    )?;
 
     // Transcript tailer thread: reads Claude Code's session JSONL and merges
     // tool calls into the timeline. Works with hooks OFF and provides persistent
@@ -401,7 +444,10 @@ pub fn spawn_terminal(
 ) -> Result<Arc<Session>, String> {
     let viewer_id = Uuid::new_v4().to_string();
     let cmd = terminal_command(kind);
-    spawn_in_pty(registry, viewer_id, cwd, cmd, None, true)
+    // skip_permissions=false: a login shell has no permission model to skip.
+    // It already runs with the user's own privileges, and reporting `true`
+    // would claim a claude-only property a shell doesn't have.
+    spawn_in_pty(registry, viewer_id, cwd, cmd, None, true, false)
 }
 
 pub fn resize(session: &Session, cols: u16, rows: u16) {
@@ -460,10 +506,24 @@ mod tests {
             c
         };
 
-        let session = spawn_in_pty(&registry, "vid-test".into(), temp_cwd(), cmd, None, true)
-            .expect("spawn_in_pty should succeed");
+        let session = spawn_in_pty(
+            &registry,
+            "vid-test".into(),
+            temp_cwd(),
+            cmd,
+            None,
+            true,
+            // A caller passing `true` for a terminal is wrong; the session must
+            // still report `false` rather than claim a property a shell can't have.
+            true,
+        )
+        .expect("spawn_in_pty should succeed");
 
         assert!(session.is_terminal, "flagged as a terminal");
+        assert!(
+            !session.skip_permissions,
+            "a terminal never reports skipped permissions"
+        );
         assert!(wait_for(|| session.is_ended(), 5000), "child should exit");
         assert!(
             wait_for(|| scrollback_string(&session).contains(marker), 5000),
@@ -484,6 +544,10 @@ mod tests {
 
         assert!(session.is_terminal);
         assert!(session.session_id.read().is_none(), "no claude session id");
+        assert!(
+            !session.skip_permissions,
+            "a shell has no permission model to skip"
+        );
 
         let marker = "cv_shell_5521";
         session.write_input(format!("printf '{marker}\\n'\n").into_bytes());
@@ -498,6 +562,80 @@ mod tests {
             "driving the shell should surface the marker in the mirror; got {:?}",
             scrollback_string(&session)
         );
+    }
+
+    /// `--dangerously-skip-permissions` is passed if and only if the caller
+    /// asked for it. `claude` itself can't be spawned in CI (no binary on the
+    /// runner), so the argv is asserted directly — this is the only place in
+    /// the process where that flag is decided.
+    #[test]
+    fn skip_permissions_controls_the_dangerous_flag() {
+        const FLAG: &str = "--dangerously-skip-permissions";
+        struct Case {
+            name: &'static str,
+            skip: bool,
+            resume: Option<&'static str>,
+            continue_last: bool,
+            want: &'static [&'static str],
+        }
+        let case = |name, skip, resume, continue_last, want| Case {
+            name,
+            skip,
+            resume,
+            continue_last,
+            want,
+        };
+        let cases = [
+            // Today's default, and the only behaviour this app has ever had.
+            case("fresh session, skipping", true, None, false, &[FLAG]),
+            case("fresh session, permissions on", false, None, false, &[]),
+            case(
+                "resume keeps its args and the flag",
+                true,
+                Some("abc-123"),
+                false,
+                &[FLAG, "--resume", "abc-123"],
+            ),
+            case(
+                "resume without the flag",
+                false,
+                Some("abc-123"),
+                false,
+                &["--resume", "abc-123"],
+            ),
+            case(
+                "--continue keeps its args and the flag",
+                true,
+                None,
+                true,
+                &[FLAG, "--continue"],
+            ),
+            case(
+                "--continue without the flag",
+                false,
+                None,
+                true,
+                &["--continue"],
+            ),
+            // An explicit resume id wins over continue_last, flag or no flag.
+            case(
+                "resume beats continue",
+                false,
+                Some("abc-123"),
+                true,
+                &["--resume", "abc-123"],
+            ),
+        ];
+        for c in cases {
+            let got = claude_args(c.skip, c.resume, c.continue_last);
+            assert_eq!(got, c.want, "case: {}", c.name);
+            assert_eq!(
+                got.iter().any(|a| a == FLAG),
+                c.skip,
+                "case {}: the flag must appear exactly when asked for",
+                c.name
+            );
+        }
     }
 
     /// TerminalKind::parse maps "tmux" precisely and treats everything else

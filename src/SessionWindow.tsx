@@ -4,7 +4,7 @@ import Terminal from "./Terminal";
 import Timeline, { TimelineEvent } from "./Timeline";
 import { ConnectionStatus } from "./ws";
 import { DragHandle, clamp } from "./Resizer";
-import { T } from "./tokens";
+import { T, tint } from "./tokens";
 import ContextMeter from "./ContextMeter";
 import ThemeMenu from "./ThemeMenu";
 import {
@@ -249,6 +249,23 @@ export default function SessionWindow(props: SessionWindowProps = {}) {
   useEffect(() => {
     invoke<boolean>("hooks_status").then(setHooksOn).catch(() => setHooksOn(null));
   }, []);
+
+  // Was this session spawned with --dangerously-skip-permissions? The flag is
+  // fixed at spawn, so one lookup at mount is enough. `list_sessions` is the
+  // same source the launcher reads — a popped-out window has no props to
+  // inherit it from, so it asks directly. Optional field: an older backend that
+  // doesn't report it simply renders no chip.
+  const [skipPerms, setSkipPerms] = useState(false);
+  useEffect(() => {
+    if (!vid) return;
+    invoke<{ viewer_id: string; skip_permissions?: boolean }[]>("list_sessions")
+      .then((list) =>
+        setSkipPerms(list.find((s) => s.viewer_id === vid)?.skip_permissions ?? false)
+      )
+      .catch(() => {
+        // backend not ready — no chip rather than a wrong one
+      });
+  }, [vid]);
 
   // The popover is fixed-positioned from a rect captured at open time — a
   // window resize would leave it floating at a stale spot, so just close it.
@@ -648,6 +665,33 @@ export default function SessionWindow(props: SessionWindowProps = {}) {
               }
             >
               {hooksOn ? "hooks on" : "hooks off"}
+            </span>
+          </>
+        )}
+
+        {/* Permission mode. Only shown when prompts are being skipped — the
+            safe case needs no badge, the dangerous one does. */}
+        {skipPerms && (
+          <>
+            <span style={{ width: 1, height: 18, background: T.border, flexShrink: 0 }} />
+            <span
+              title={
+                "Running with --dangerously-skip-permissions — Claude edits files " +
+                "and runs shell commands in this session without asking."
+              }
+              style={{
+                fontFamily: T.mono,
+                fontSize: 10.5,
+                color: T.error,
+                background: T.errorTint,
+                border: `1px solid ${tint(T.error, 0.35)}`,
+                borderRadius: 6,
+                padding: "2px 8px",
+                flexShrink: 0,
+                whiteSpace: "nowrap",
+              }}
+            >
+              skip perms
             </span>
           </>
         )}
