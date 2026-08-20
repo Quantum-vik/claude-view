@@ -23,7 +23,10 @@ struct AppState {
 
 /// Spawn a claude PTY session and open its viewer window. Shared by the
 /// launcher UI command and the local POST /sessions endpoint.
-// Eight parameters, one over clippy's threshold. Bundling them into a struct
+///
+/// `skip_permissions` selects whether the child runs with
+/// `--dangerously-skip-permissions`; both callers default it to `true`.
+// Nine parameters, over clippy's threshold. Bundling them into a struct
 // would only move the argument list to the call sites, which are a Tauri
 // command and an axum handler that each already destructure their own request
 // type — so the struct would be pure ceremony.
@@ -36,9 +39,18 @@ pub fn open_session(
     cwd: String,
     resume: Option<String>,
     continue_last: bool,
+    skip_permissions: bool,
     open_window: bool,
 ) -> Result<SessionInfo, String> {
-    let session = pty::spawn_session(registry, port, token, cwd.clone(), resume, continue_last)?;
+    let session = pty::spawn_session(
+        registry,
+        port,
+        token,
+        cwd.clone(),
+        resume,
+        continue_last,
+        skip_permissions,
+    )?;
     let vid = session.viewer_id.clone();
 
     // open_window=false: the launcher embeds the viewer in its own split
@@ -68,6 +80,10 @@ pub fn open_session(
 /// and open its viewer window. The mirror machinery is shared with claude
 /// sessions; only the spawned command and the `kind=terminal` window flag (which
 /// tells the viewer to drop the claude-only chrome) differ.
+///
+/// There is deliberately no `skip_permissions` parameter: a shell has no
+/// permission model to skip, so `spawn_terminal` fixes it at `false` and these
+/// sessions always report `skip_permissions: false`.
 pub fn open_terminal(
     app: &AppHandle,
     registry: &Arc<Registry>,
@@ -98,6 +114,11 @@ pub fn open_terminal(
     Ok(session.info())
 }
 
+/// Launch a claude session. `skip_permissions` omitted means `true` — every
+/// session this app has ever launched ran with `--dangerously-skip-permissions`
+/// and that stays the default, so an older frontend (or one that simply doesn't
+/// ask) behaves exactly as before. Pass `false` to get a session that stops and
+/// asks before running tools.
 #[tauri::command]
 fn new_session(
     app: AppHandle,
@@ -105,6 +126,7 @@ fn new_session(
     cwd: String,
     resume: Option<String>,
     continue_last: Option<bool>,
+    skip_permissions: Option<bool>,
     open_window: Option<bool>,
 ) -> Result<SessionInfo, String> {
     open_session(
@@ -115,6 +137,7 @@ fn new_session(
         cwd,
         resume,
         continue_last.unwrap_or(false),
+        skip_permissions.unwrap_or(true),
         open_window.unwrap_or(true),
     )
 }

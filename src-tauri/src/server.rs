@@ -72,6 +72,18 @@ async fn past_sessions_handler(
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))
 }
 
+/// `skip_permissions` defaults to `true` when the key is absent — the
+/// behaviour every session this app has ever launched had.
+///
+/// Spelled out as a function rather than `#[serde(default)]` on purpose:
+/// `bool::default()` is `false`, so the derive would silently flip the default
+/// for every scripted caller and turn a documentation change into a
+/// security-posture change. A *present* but non-boolean value is still a parse
+/// error (400) — guessing either way for junk would be worse than saying so.
+fn default_skip_permissions() -> bool {
+    true
+}
+
 #[derive(Deserialize)]
 struct NewSessionReq {
     cwd: String,
@@ -79,6 +91,11 @@ struct NewSessionReq {
     resume: Option<String>,
     #[serde(default)]
     continue_last: bool,
+    /// Run `claude --dangerously-skip-permissions` (tools execute without
+    /// asking). Omit for the default, `true`; send `false` for a session that
+    /// stops and asks.
+    #[serde(default = "default_skip_permissions")]
+    skip_permissions: bool,
 }
 
 /// Token-authed local endpoint to launch a session (with its viewer window)
@@ -101,6 +118,7 @@ async fn sessions_handler(
         req.cwd,
         req.resume,
         req.continue_last,
+        req.skip_permissions,
         true,
     )
     .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
@@ -457,13 +475,13 @@ const IDLE_PING: &str = "claude is waiting for your input";
 ///
 /// A Notification is not synonymous with "blocked". Claude Code fires it for
 /// exactly two things: a permission prompt, and an idle ping after ~60s with no
-/// input. Every session this app spawns runs with
-/// `--dangerously-skip-permissions` (see `pty::spawn_session`), so the
-/// permission prompt effectively never fires and what actually arrives is the
-/// idle ping — which means Claude is waiting on the *user*, i.e. Idle. Mapping
-/// every Notification to Blocked would paint every quiet session red once a
-/// minute forever: exactly the false-positive class hook-driven state exists to
-/// avoid.
+/// input. Sessions this app spawns run with `--dangerously-skip-permissions` by
+/// default (see `pty::spawn_session`; it's off only when the launcher asked for
+/// it), so for the default session the permission prompt effectively never
+/// fires and what actually arrives is the idle ping — which means Claude is
+/// waiting on the *user*, i.e. Idle. Mapping every Notification to Blocked
+/// would paint every quiet session red once a minute forever: exactly the
+/// false-positive class hook-driven state exists to avoid.
 ///
 /// Blocked is therefore opt-in — only permission/approval-shaped text qualifies.
 fn notification_state(message: &str) -> (AgentState, &'static str) {
@@ -1340,8 +1358,10 @@ mod tests {
     fn notification_blocks_only_on_permission_shaped_text() {
         let cases: &[(&str, AgentState)] = &[
             // What actually arrives: the ~60s idle ping. Sessions run with
-            // --dangerously-skip-permissions, so this is the common case and it
-            // means "waiting on you", not "blocked on an approval".
+            // --dangerously-skip-permissions by default, so this is the common
+            // case and it means "waiting on you", not "blocked on an approval".
+            // (A session launched with skip_permissions=false does get real
+            // permission prompts — those hit the Blocked cases below.)
             ("Claude is waiting for your input", AgentState::Idle),
             ("claude is waiting for your input", AgentState::Idle),
             ("Task complete", AgentState::Idle),
@@ -1373,6 +1393,72 @@ mod tests {
             notification_state("Claude needs your permission to use Bash").1,
             "needs_input"
         );
+    }
+
+    // ---- POST /sessions request parsing -------------------------------------
+
+    /// The regression guard for the whole feature. `POST /sessions` is the
+    /// scripting path, and an absent `skip_permissions` key must keep meaning
+    /// "yes, skip them" — the behaviour every existing caller relies on.
+    ///
+    /// If someone ever "tidies" `#[serde(default = "default_skip_permissions")]`
+    /// into a bare `#[serde(default)]`, `bool::default()` is `false` and every
+    /// scripted session silently starts asking for approval instead. That is a
+    /// behaviour change disguised as a cleanup, and this test is what catches it.
+    #[test]
+    fn skip_permissions_defaults_to_true_when_the_key_is_absent() {
+        let cases: &[(&str, &str, bool)] = &[
+            ("absent key defaults to ON", r#"{"cwd":"/x"}"#, true),
+            (
+                "explicit false is honoured",
+                r#"{"cwd":"/x","skip_permissions":false}"#,
+                false,
+            ),
+            (
+                "explicit true is honoured",
+                r#"{"cwd":"/x","skip_permissions":true}"#,
+                true,
+            ),
+            (
+                "absent alongside the other optional fields",
+                r#"{"cwd":"/x","continue_last":true,"resume":null}"#,
+                true,
+            ),
+            (
+                "false survives next to a resume",
+                r#"{"cwd":"/x","resume":"abc","skip_permissions":false}"#,
+                false,
+            ),
+        ];
+        for (name, body, want) in cases {
+            let req: NewSessionReq =
+                serde_json::from_str(body).unwrap_or_else(|e| panic!("case {name}: {e}"));
+            assert_eq!(req.skip_permissions, *want, "case: {name}");
+            assert_eq!(req.cwd, "/x", "case: {name}");
+        }
+    }
+
+    /// A present-but-junk value is rejected rather than guessed at. Defaulting
+    /// junk to `true` would silently skip permissions on a caller that clearly
+    /// meant to say something; defaulting it to `false` would flip the app's
+    /// default. A 400 spawns nothing and tells the caller to fix the request —
+    /// the only answer that isn't a guess about someone's security posture.
+    #[test]
+    fn a_junk_skip_permissions_is_rejected_not_guessed() {
+        let cases: &[(&str, &str)] = &[
+            ("string", r#"{"cwd":"/x","skip_permissions":"false"}"#),
+            ("truthy string", r#"{"cwd":"/x","skip_permissions":"yes"}"#),
+            ("number", r#"{"cwd":"/x","skip_permissions":0}"#),
+            ("null", r#"{"cwd":"/x","skip_permissions":null}"#),
+            ("array", r#"{"cwd":"/x","skip_permissions":[false]}"#),
+            ("object", r#"{"cwd":"/x","skip_permissions":{"on":true}}"#),
+        ];
+        for (name, body) in cases {
+            assert!(
+                serde_json::from_str::<NewSessionReq>(body).is_err(),
+                "case {name}: junk must be a 400, not a silent default"
+            );
+        }
     }
 
     // ---- dialog reports from the viewer -------------------------------------

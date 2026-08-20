@@ -5,6 +5,31 @@ session's terminal **in real time, character-by-character** — every command, i
 output, and Claude's messages — plus a **structured command-timeline sidebar** driven by Claude
 Code hooks.
 
+## Permissions: sessions skip approval prompts by default
+
+**Every session claude-view launches runs `claude --dangerously-skip-permissions` unless you turn
+that off.** That has been true since the app's first commit. It is now a visible, per-session
+choice instead of a hardcoded one — but the default is unchanged, so upgrading does not alter how
+anything you already run behaves.
+
+What the flag does: Claude Code stops asking you to approve tool calls. For the whole session,
+Claude writes, edits and deletes files and runs shell commands immediately, without confirmation.
+Nothing sits between the model deciding to run something and it running on your machine, in
+whatever directory you pointed the session at.
+
+**Turning it off.** The launcher has a **Skip permission prompts** toggle that applies to the next
+session you start; the choice is remembered. With it off, the session gets Claude Code's normal
+approval prompts. The setting is fixed once a session is running — it's a process argument, so
+changing it means launching a new session. Sessions running with it on are tagged **skip perms**
+in the launcher list, and every session reports `"skip_permissions": true|false` in the session
+API. Terminal windows are unaffected: they run your login shell with your own privileges and have
+no such flag (they always report `false`).
+
+**Why a session can sit there looking idle.** With prompts skipped, a permission prompt is never
+drawn, so nothing ever puts a session into the `blocked` state because of one. A quiet session
+mid-task has already run the command — a stricter setup would have stopped there and asked you
+first. That is the trade this default makes; the toggle is how you take the other side of it.
+
 ## How it works (the two layers)
 
 Claude Code's observability channels (hooks, Agent SDK, `stream-json`, transcripts, OTel) only
@@ -35,8 +60,10 @@ npm run tauri dev
 ```
 
 The launcher window opens. Click **New Session**, pick a working directory, and a session window
-opens running `claude` with a live terminal mirror. The session is fully interactive from the
-window — type into it exactly as you would in a terminal.
+opens running `claude --dangerously-skip-permissions` (the default — see
+[Permissions](#permissions-sessions-skip-approval-prompts-by-default)) with a live terminal
+mirror. The session is fully interactive from the window — type into it exactly as you would in a
+terminal.
 
 ## Build (release)
 
@@ -73,7 +100,10 @@ timeline stays empty.
 
 ## Using it
 
-- **New Session** → directory picker → new window running `claude` in that cwd.
+- **New Session** → directory picker → new window running `claude` in that cwd. By default that is
+  `claude --dangerously-skip-permissions`; the **Skip permission prompts** toggle next to the
+  launcher's session controls decides, and it applies to **Resume in viewer** too. Read
+  [Permissions](#permissions-sessions-skip-approval-prompts-by-default) before leaving it on.
 - **Resume in viewer** → directory picker → runs `claude --continue` (most recent conversation in
   that directory) or `claude --resume <id>` if you paste a session id. This is how you bring an
   *existing* session into the viewer: the app can only mirror terminals it owns, so live-attaching
@@ -124,13 +154,19 @@ Where the spec was silent (or allowed a choice), these defaults were picked:
   on WS (re)connect, so refreshed/reopened windows aren't blank.
 - **`SessionStart`/`SessionEnd` hook entries omit `matcher`** (lifecycle events match all sources
   that way); `PreToolUse`/`PostToolUse` use `"matcher": "*"` per the spec.
+- **Permission mode:** sessions default to `--dangerously-skip-permissions`, per-session
+  overridable, reported as `skip_permissions` on every session. The default is kept as-is because
+  changing it would silently alter the security posture of an existing install; see
+  [Permissions](#permissions-sessions-skip-approval-prompts-by-default) for what it costs you.
 - **claude discovery:** `CLAUDE_BIN` env override, then PATH, then common install dirs
   (`/opt/homebrew/bin`, `/usr/local/bin`, `~/.local/bin`, `~/.claude/local`).
 - **Session windows** get their config via URL query params (`vid`, `port`, `token`, `cwd`).
 - **Scripting affordances** (added beyond the spec, used by the e2e smoke tests):
   - `CLAUDE_VIEW_TOKEN` env var fixes the auth token instead of a random per-run UUID.
   - `POST /sessions` `{"cwd": "..."}` (token-authed, localhost) launches a session + window
-    from the CLI: the response returns the `viewer_id`.
+    from the CLI: the response returns the `viewer_id`. Add `"skip_permissions": false` for a
+    session that asks before running tools; **omitting the key means `true`**, matching the app's
+    default. A present-but-non-boolean value is a 400, not a guess in either direction.
 
 ## Project layout
 
