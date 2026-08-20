@@ -1,3 +1,4 @@
+use std::sync::atomic::Ordering;
 use std::sync::Arc;
 
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
@@ -11,7 +12,9 @@ use serde_json::{json, Value};
 use uuid::Uuid;
 
 use crate::pty;
-use crate::session::{now_ms, Registry, Session, TimelineEvent};
+use crate::session::{
+    cap_command, now_ms, push_timeline, AgentState, Registry, Session, TimelineEvent,
+};
 
 #[derive(Clone)]
 pub struct ServerState {
@@ -32,7 +35,10 @@ pub fn router(registry: Arc<Registry>, token: String, app: tauri::AppHandle, por
         .route("/ws/:id", get(ws_handler))
         .route("/hooks", post(hooks_handler))
         .route("/bind", post(bind_handler))
-        .route("/sessions", post(sessions_handler).get(list_sessions_handler))
+        .route(
+            "/sessions",
+            post(sessions_handler).get(list_sessions_handler),
+        )
         .route("/terminals", post(terminals_handler))
         .route("/past_sessions", get(past_sessions_handler))
         .with_state(state)
@@ -172,7 +178,14 @@ async fn handle_ws(socket: WebSocket, session: Arc<Session>) {
     }
     let snapshot = {
         let timeline = session.timeline.lock();
-        json!({ "type": "timeline_snapshot", "events": &*timeline })
+        json!({
+            "type": "timeline_snapshot",
+            "events": &*timeline,
+            // Cards already evicted by TIMELINE_CAP. Without this the viewer
+            // can't tell a session that ran 12 commands from one that ran 5012
+            // — it just shows the tail as if it were the whole history.
+            "elided": session.timeline_elided.load(Ordering::Relaxed),
+        })
     };
     if tx.send(Message::Text(snapshot.to_string())).await.is_err() {
         return;
@@ -185,7 +198,9 @@ async fn handle_ws(socket: WebSocket, session: Arc<Session>) {
     let current_model = session.model.read().clone();
     if let Some(model) = current_model {
         let _ = tx
-            .send(Message::Text(json!({ "type": "model", "model": model }).to_string()))
+            .send(Message::Text(
+                json!({ "type": "model", "model": model }).to_string(),
+            ))
             .await;
     }
     let current_usage = *session.usage.read();
@@ -199,7 +214,9 @@ async fn handle_ws(socket: WebSocket, session: Arc<Session>) {
     if session.is_ended() {
         let code = session.exit_code.read().unwrap_or(0);
         let _ = tx
-            .send(Message::Text(json!({ "type": "exit", "code": code }).to_string()))
+            .send(Message::Text(
+                json!({ "type": "exit", "code": code }).to_string(),
+            ))
             .await;
     }
 
@@ -242,7 +259,7 @@ async fn handle_ws(socket: WebSocket, session: Arc<Session>) {
         }
     });
 
-    // Inbound: binary = keystrokes -> PTY; text = control (resize).
+    // Inbound: binary = keystrokes -> PTY; text = control (resize, dialog).
     while let Some(Ok(msg)) = rx.next().await {
         match msg {
             Message::Binary(data) => {
@@ -255,6 +272,14 @@ async fn handle_ws(socket: WebSocket, session: Arc<Session>) {
                         let cols = v["cols"].as_u64().unwrap_or(120) as u16;
                         let rows = v["rows"].as_u64().unwrap_or(34) as u16;
                         pty::resize(&session, cols, rows);
+                    } else if v["type"] == "dialog" {
+                        // The viewer has a fully parsed screen (xterm.js) and we
+                        // have raw bytes, so it — not us — decides what a dialog
+                        // looks like. Sent edge-triggered, plus once per
+                        // reconnect. Like `resize` above, nothing here can fail:
+                        // junk degrades to "no dialog visible". A viewer must
+                        // never be able to take the server down.
+                        session.set_screen_blocked(parse_dialog(&v));
                     }
                 }
             }
@@ -330,19 +355,29 @@ async fn hooks_handler(
         return StatusCode::BAD_REQUEST;
     };
 
-    let event = v["hook_event_name"].as_str().unwrap_or_default().to_string();
+    let event = v["hook_event_name"]
+        .as_str()
+        .unwrap_or_default()
+        .to_string();
     let session_id = v["session_id"].as_str().map(str::to_string);
     let viewer_id = header_viewer_id(&headers);
 
     // Bind eagerly on any event that carries session_id — SessionStart is the
     // designed path, but this also self-heals if SessionStart was missed.
+    //
+    // Compare the STORED id against the incoming one; "is anything bound?" is
+    // the wrong question. `pty::spawn_in_pty` pre-seeds session_id for every
+    // `claude --resume`, so an is_some() test is already true on the FIRST hook:
+    // the bind was skipped entirely for resumed sessions, and when Claude Code
+    // forks a NEW id on resume the seeded (now stale) one was never replaced —
+    // leaving the viewer unbound and the dead id resolving to this session
+    // forever. Registry::bind retires the superseded index entry.
     if let (Some(vid), Some(sid)) = (&viewer_id, &session_id) {
-        let already_bound = state
+        let bound = state
             .registry
             .get(vid)
-            .and_then(|s| s.session_id.read().clone())
-            .is_some();
-        if !already_bound {
+            .and_then(|s| s.session_id.read().clone());
+        if bound.as_deref() != Some(sid.as_str()) {
             do_bind(&state.registry, vid, sid);
         }
     }
@@ -356,22 +391,49 @@ async fn hooks_handler(
         return StatusCode::OK; // not one of our sessions; ignore quietly
     };
 
+    // One timestamp for the whole event: it orders the state transition against
+    // concurrently-delivered hooks (the bridge backgrounds a curl per hook, so
+    // arrival order isn't send order — see Session::set_state).
+    let ts = now_ms();
+
     match event.as_str() {
-        "PreToolUse" => on_pre_tool_use(&session, &v),
-        "PostToolUse" => on_post_tool_use(&session, &v),
+        // The process is up but no turn has begun. Also fires after /clear.
+        "SessionStart" => session.set_state(AgentState::Idle, "session_start", ts),
+        // Start of a turn — the only signal for a turn that thinks for 90s
+        // before it touches a tool (PreToolUse might never come at all).
+        "UserPromptSubmit" => session.set_state(AgentState::Working, "prompt", ts),
+        "PreToolUse" => {
+            session.set_state(AgentState::Working, "tool", ts);
+            on_pre_tool_use(&session, &v);
+        }
+        "PostToolUse" => {
+            // Still Working, not Idle: the tool finished, the *turn* has not.
+            // Claude is now thinking about the result; Stop ends the turn.
+            session.set_state(AgentState::Working, "tool_done", ts);
+            on_post_tool_use(&session, &v);
+        }
         "SessionEnd" => {
             // The PTY waiter thread owns the authoritative "ended" state; the
-            // hook just settles any cards still marked running.
+            // hook just settles any cards still marked running. Deliberately
+            // sets no terminal state: Claude Code fires SessionEnd with
+            // reason "clear" on a still-live process, so treating it as the end
+            // of the session would freeze a perfectly healthy agent's state.
             settle_running_cards(&session);
         }
         // Claude finished its turn — the viewer decides whether to raise a
         // native notification (it knows if the window is focused).
         "Stop" => {
+            session.set_state(AgentState::Idle, "turn_done", ts);
             session.send_control(json!({ "type": "turn_done" }));
         }
-        // Claude is waiting on the user (permission prompt, long idle).
+        // Claude wants attention. Whether that means *blocked* depends on what
+        // it says — see notification_state.
         "Notification" => {
-            let message = v["message"].as_str().unwrap_or("Claude needs your attention");
+            let message = v["message"]
+                .as_str()
+                .unwrap_or("Claude needs your attention");
+            let (next, reason) = notification_state(message);
+            session.set_state(next, reason, ts);
             session.send_control(json!({ "type": "attention", "message": message }));
         }
         _ => {}
@@ -379,12 +441,99 @@ async fn hooks_handler(
     StatusCode::OK
 }
 
+/// Unambiguously permission/approval-shaped text. Matched case-insensitively
+/// against a `Notification`'s `message`.
+const BLOCKED_MARKERS: &[&str] = &["permission", "approve", "approval", "confirm"];
+
+/// Also permission-shaped in general — but Claude Code's idle ping is literally
+/// "Claude is waiting for your input", so this one needs [`IDLE_PING`] carved
+/// out of it. See [`notification_state`].
+const WAITING_MARKER: &str = "waiting for your input";
+
+/// Claude Code's ~60-second idle ping, lowercased. Not a blocking condition.
+const IDLE_PING: &str = "claude is waiting for your input";
+
+/// The [`AgentState`] a `Notification` implies, and the reason to record.
+///
+/// A Notification is not synonymous with "blocked". Claude Code fires it for
+/// exactly two things: a permission prompt, and an idle ping after ~60s with no
+/// input. Every session this app spawns runs with
+/// `--dangerously-skip-permissions` (see `pty::spawn_session`), so the
+/// permission prompt effectively never fires and what actually arrives is the
+/// idle ping — which means Claude is waiting on the *user*, i.e. Idle. Mapping
+/// every Notification to Blocked would paint every quiet session red once a
+/// minute forever: exactly the false-positive class hook-driven state exists to
+/// avoid.
+///
+/// Blocked is therefore opt-in — only permission/approval-shaped text qualifies.
+fn notification_state(message: &str) -> (AgentState, &'static str) {
+    let text = message.to_lowercase();
+    if BLOCKED_MARKERS.iter().any(|m| text.contains(m)) {
+        return (AgentState::Blocked, "needs_input");
+    }
+    // "waiting for your input" reads as blocking, and would be — except that
+    // it's a substring of the idle ping, which is the message we actually get.
+    if text.contains(WAITING_MARKER) && !text.contains(IDLE_PING) {
+        return (AgentState::Blocked, "needs_input");
+    }
+    // Anything else is a custom/unknown notification: Claude stopped to talk to
+    // us rather than to run a tool, so Idle is the honest read — and the next
+    // UserPromptSubmit/PreToolUse corrects it the moment work resumes.
+    let reason = if text.contains(IDLE_PING) {
+        "idle_ping"
+    } else {
+        "notification"
+    };
+    (AgentState::Idle, reason)
+}
+
+/// Longest dialog kind we'll store. The contract's four are ≤10 chars; this
+/// only stops a buggy or hostile viewer from parking an unbounded string in a
+/// field that every `/sessions` response then echoes.
+const DIALOG_KIND_CAP: usize = 32;
+
+/// Fallback label for a `blocked: true` whose `kind` we can't read. The boolean
+/// is the signal and the kind is only what the UI prints, so a malformed label
+/// must not swallow a real block — the session genuinely is stopped on a human.
+const DIALOG_KIND_UNKNOWN: &str = "dialog";
+
+/// Interpret a viewer's `{"type":"dialog", …}` frame as a dialog kind, or `None`
+/// for "no dialog on screen".
+///
+/// Total over arbitrary JSON — there is no error case and no panic path, which
+/// is the point: this parses input from a webview, on the same lenient footing
+/// as the `resize` branch's `unwrap_or` defaults.
+///
+/// `blocked` must be a literal `true`; absent, `false`, or any non-boolean all
+/// mean "not blocked", so a stray frame can't strand a session red. `kind` is
+/// then read best-effort and is deliberately *not* validated against the four
+/// names in the contract — a viewer that learns to recognise a fifth dialog
+/// shouldn't need a backend release to report it.
+fn parse_dialog(v: &Value) -> Option<String> {
+    if v["blocked"].as_bool() != Some(true) {
+        return None;
+    }
+    let kind = v["kind"]
+        .as_str()
+        .map(str::trim)
+        .filter(|k| !k.is_empty())
+        .unwrap_or(DIALOG_KIND_UNKNOWN);
+    Some(kind.chars().take(DIALOG_KIND_CAP).collect())
+}
+
 /// Best-effort human-readable subject for a tool call card.
 fn describe_input(tool_name: &str, tool_input: &Value) -> Option<String> {
     if tool_name == "Bash" {
         return tool_input["command"].as_str().map(str::to_string);
     }
-    for key in ["file_path", "path", "pattern", "query", "url", "description"] {
+    for key in [
+        "file_path",
+        "path",
+        "pattern",
+        "query",
+        "url",
+        "description",
+    ] {
         if let Some(s) = tool_input[key].as_str() {
             return Some(s.to_string());
         }
@@ -434,7 +583,23 @@ fn extract_output(resp: &Value) -> Option<String> {
     Some(out)
 }
 
-fn on_pre_tool_use(session: &Arc<Session>, v: &Value) {
+// ---------------------------------------------------------------------------
+// Timeline correlation.
+//
+// These three operate on a plain `&mut Vec<TimelineEvent>` rather than on a
+// `Session`, because a `Session` owns a live PTY: nothing that takes one can be
+// unit-tested, and this is the bug-densest logic in the app (id correlation,
+// FIFO fallback, eviction). The `on_*` fns below are the thin Session-facing
+// wrappers — lock, delegate, account, broadcast.
+// ---------------------------------------------------------------------------
+
+/// Open a card for a tool call. Returns the card to broadcast and how many
+/// older cards the append evicted.
+pub(crate) fn apply_pre_tool_use(
+    timeline: &mut Vec<TimelineEvent>,
+    v: &Value,
+    ts: u64,
+) -> (TimelineEvent, u64) {
     let tool = v["tool_name"].as_str().unwrap_or("Tool").to_string();
     // tool_use_id is present in recent Claude Code versions; fall back to a
     // generated id + FIFO matching when absent.
@@ -446,19 +611,43 @@ fn on_pre_tool_use(session: &Arc<Session>, v: &Value) {
         id,
         kind: "command".into(),
         tool: tool.clone(),
-        command: describe_input(&tool, &v["tool_input"]),
+        command: describe_input(&tool, &v["tool_input"]).map(|c| cap_command(&c)),
         status: "running".into(),
         duration_ms: None,
-        ts: now_ms(),
+        ts,
         output: None,
     };
-    session.timeline.lock().push(event.clone());
-    session.send_control(json!({ "type": "timeline", "event": event }));
+    let dropped = push_timeline(timeline, event.clone());
+    (event, dropped)
 }
 
-fn on_post_tool_use(session: &Arc<Session>, v: &Value) {
+/// Resolve the card a tool call opened (or create one if its Pre was missed).
+///
+/// The whole-payload entry point. `on_post_tool_use` deliberately calls
+/// [`apply_post_tool_use_with_output`] instead so the extraction happens off the
+/// lock, which leaves this one exercised only by tests in a non-test build —
+/// keeping it is what guarantees those tests extract output exactly the way
+/// production does, instead of hand-feeding it.
+#[cfg_attr(not(test), allow(dead_code))]
+pub(crate) fn apply_post_tool_use(
+    timeline: &mut Vec<TimelineEvent>,
+    v: &Value,
+    ts: u64,
+) -> (TimelineEvent, u64) {
+    let output = extract_output(&v["tool_response"]);
+    apply_post_tool_use_with_output(timeline, v, ts, output)
+}
+
+/// Body of [`apply_post_tool_use`] with the (potentially expensive) output
+/// extraction already done, so the caller can run it *outside* the timeline
+/// lock. See [`on_post_tool_use`].
+fn apply_post_tool_use_with_output(
+    timeline: &mut Vec<TimelineEvent>,
+    v: &Value,
+    ts: u64,
+    output: Option<String>,
+) -> (TimelineEvent, u64) {
     let tool = v["tool_name"].as_str().unwrap_or("Tool").to_string();
-    let ts = now_ms();
 
     // Hook payloads don't carry a reliable success flag across versions; treat
     // an error-shaped tool_response defensively and default to success.
@@ -468,13 +657,7 @@ fn on_post_tool_use(session: &Arc<Session>, v: &Value) {
         || (resp.is_object() && resp["error"].is_string());
     let status = if is_error { "error" } else { "success" };
 
-    // Extract/serialize output BEFORE taking the lock — a large tool_response
-    // would otherwise hold the timeline mutex through a heavy allocation and
-    // stall concurrent hook handlers.
-    let output = extract_output(resp);
-
     let tool_use_id = v["tool_use_id"].as_str();
-    let mut timeline = session.timeline.lock();
     // FIFO note: without tool_use_id, we resolve the oldest running card for
     // this tool. This misattributes when two same-tool calls (e.g. a subagent's
     // Bash) overlap; recent Claude Code emits tool_use_id, which is exact.
@@ -485,11 +668,11 @@ fn on_post_tool_use(session: &Arc<Session>, v: &Value) {
             .find(|e| e.status == "running" && e.tool == tool),
     };
 
-    let updated = if let Some(entry) = entry {
+    if let Some(entry) = entry {
         entry.status = status.into();
         entry.duration_ms = Some(ts.saturating_sub(entry.ts));
         entry.output = output;
-        entry.clone()
+        (entry.clone(), 0)
     } else {
         // PostToolUse without a matching Pre (e.g. viewer attached mid-call).
         let event = TimelineEvent {
@@ -498,35 +681,811 @@ fn on_post_tool_use(session: &Arc<Session>, v: &Value) {
                 .unwrap_or_else(|| Uuid::new_v4().to_string()),
             kind: "command".into(),
             tool: tool.clone(),
-            command: describe_input(&tool, &v["tool_input"]),
+            command: describe_input(&tool, &v["tool_input"]).map(|c| cap_command(&c)),
             status: status.into(),
             duration_ms: None,
             ts,
             output,
         };
-        timeline.push(event.clone());
-        event
+        let dropped = push_timeline(timeline, event.clone());
+        (event, dropped)
+    }
+}
+
+/// Close out every still-running card. Returns the cards that changed.
+///
+/// Takes a slice, not a `&mut Vec`, because unlike its two siblings it only ever
+/// rewrites cards in place — it can't append or evict.
+pub(crate) fn settle_running(timeline: &mut [TimelineEvent], ts: u64) -> Vec<TimelineEvent> {
+    // These cards never got a PostToolUse before the session ended. That's not
+    // necessarily a failure (the Post may have been dropped or the command
+    // interrupted), so use a distinct "interrupted" status rather than falsely
+    // reporting "error".
+    timeline
+        .iter_mut()
+        .filter(|e| e.status == "running")
+        .map(|entry| {
+            entry.status = "interrupted".into();
+            entry.duration_ms = Some(ts.saturating_sub(entry.ts));
+            entry.clone()
+        })
+        .collect()
+}
+
+fn on_pre_tool_use(session: &Arc<Session>, v: &Value) {
+    let ts = now_ms();
+    let (event, dropped) = {
+        let mut timeline = session.timeline.lock();
+        apply_pre_tool_use(&mut timeline, v, ts)
     };
-    drop(timeline);
-    session.send_control(json!({ "type": "timeline", "event": updated }));
+    session.note_elided(dropped);
+    session.send_control(json!({ "type": "timeline", "event": event }));
+}
+
+fn on_post_tool_use(session: &Arc<Session>, v: &Value) {
+    let ts = now_ms();
+    // Extract/serialize output BEFORE taking the lock — a large tool_response
+    // would otherwise hold the timeline mutex through a heavy allocation and
+    // stall concurrent hook handlers.
+    let output = extract_output(&v["tool_response"]);
+    let (event, dropped) = {
+        let mut timeline = session.timeline.lock();
+        apply_post_tool_use_with_output(&mut timeline, v, ts, output)
+    };
+    session.note_elided(dropped);
+    session.send_control(json!({ "type": "timeline", "event": event }));
 }
 
 fn settle_running_cards(session: &Arc<Session>) {
     let ts = now_ms();
-    let mut updates = Vec::new();
-    {
+    let updates = {
         let mut timeline = session.timeline.lock();
-        // These cards never got a PostToolUse before the session ended. That's
-        // not necessarily a failure (the Post may have been dropped or the
-        // command interrupted), so use a distinct "interrupted" status rather
-        // than falsely reporting "error".
-        for entry in timeline.iter_mut().filter(|e| e.status == "running") {
-            entry.status = "interrupted".into();
-            entry.duration_ms = Some(ts.saturating_sub(entry.ts));
-            updates.push(entry.clone());
-        }
-    }
+        settle_running(&mut timeline, ts)
+    };
     for event in updates {
         session.send_control(json!({ "type": "timeline", "event": event }));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::session::{COMMAND_CAP, TIMELINE_CAP};
+
+    /// A PreToolUse payload in the shape Claude Code actually posts (see
+    /// scripts/demo-timeline.sh for captured examples).
+    fn pre(tool: &str, id: Option<&str>, input: Value) -> Value {
+        let mut v = json!({
+            "hook_event_name": "PreToolUse",
+            "session_id": "11111111-2222-3333-4444-555555555555",
+            "cwd": "/Users/dev/app",
+            "tool_name": tool,
+            "tool_input": input,
+        });
+        if let Some(id) = id {
+            v["tool_use_id"] = json!(id);
+        }
+        v
+    }
+
+    fn post(tool: &str, id: Option<&str>, input: Value, response: Value) -> Value {
+        let mut v = json!({
+            "hook_event_name": "PostToolUse",
+            "session_id": "11111111-2222-3333-4444-555555555555",
+            "cwd": "/Users/dev/app",
+            "tool_name": tool,
+            "tool_input": input,
+            "tool_response": response,
+        });
+        if let Some(id) = id {
+            v["tool_use_id"] = json!(id);
+        }
+        v
+    }
+
+    /// A finished card, for filling a timeline without going through the hooks.
+    fn settled(id: &str, ts: u64) -> TimelineEvent {
+        TimelineEvent {
+            id: id.into(),
+            kind: "command".into(),
+            tool: "Read".into(),
+            command: Some("src/lib.rs".into()),
+            status: "success".into(),
+            duration_ms: Some(4),
+            ts,
+            output: None,
+        }
+    }
+
+    // ---- describe_input -----------------------------------------------------
+
+    #[test]
+    fn describe_input_picks_the_right_key() {
+        let cases: &[(&str, &str, Value, Option<&str>)] = &[
+            (
+                "Bash reads command, not description",
+                "Bash",
+                json!({ "command": "npm test", "description": "run the tests" }),
+                Some("npm test"),
+            ),
+            (
+                "Bash is command-only — it never falls through",
+                "Bash",
+                json!({ "description": "run the tests", "file_path": "a.rs" }),
+                None,
+            ),
+            (
+                "file_path outranks every other key",
+                "Edit",
+                json!({
+                    "file_path": "a", "path": "b", "pattern": "c",
+                    "query": "d", "url": "e", "description": "f"
+                }),
+                Some("a"),
+            ),
+            (
+                "path outranks pattern",
+                "Grep",
+                json!({ "path": "b", "pattern": "c", "query": "d" }),
+                Some("b"),
+            ),
+            (
+                "pattern outranks query",
+                "Glob",
+                json!({ "pattern": "c", "query": "d", "url": "e" }),
+                Some("c"),
+            ),
+            (
+                "query outranks url",
+                "WebSearch",
+                json!({ "query": "axum websocket backpressure", "url": "e" }),
+                Some("axum websocket backpressure"),
+            ),
+            (
+                "url outranks description",
+                "WebFetch",
+                json!({ "url": "https://example.com", "description": "f" }),
+                Some("https://example.com"),
+            ),
+            (
+                "description is the last resort",
+                "Agent",
+                json!({ "description": "search the codebase" }),
+                Some("search the codebase"),
+            ),
+            ("no known key", "Weird", json!({ "foo": "bar" }), None),
+            ("empty input", "Weird", json!({}), None),
+            ("missing tool_input", "Weird", Value::Null, None),
+            (
+                "non-string values are skipped",
+                "Edit",
+                json!({ "file_path": 42, "path": ["a"] }),
+                None,
+            ),
+        ];
+        for (name, tool, input, want) in cases {
+            assert_eq!(
+                describe_input(tool, input).as_deref(),
+                *want,
+                "case: {name}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_huge_command_is_capped_on_the_card() {
+        let huge = format!("echo {}", "a".repeat(COMMAND_CAP * 3));
+        let marker = " … (truncated)";
+        // describe_input itself is faithful; capping happens on the card.
+        assert_eq!(
+            describe_input("Bash", &json!({ "command": huge.clone() }))
+                .unwrap()
+                .chars()
+                .count(),
+            huge.chars().count()
+        );
+
+        let mut timeline = Vec::new();
+        let (card, _) = apply_pre_tool_use(
+            &mut timeline,
+            &pre("Bash", Some("t1"), json!({ "command": huge.clone() })),
+            10,
+        );
+        let command = card.command.expect("Bash card has a command");
+        assert!(command.ends_with(marker), "got: {}", &command[..40]);
+        assert_eq!(
+            command.chars().count(),
+            COMMAND_CAP + marker.chars().count()
+        );
+
+        // The Post-without-Pre path builds a card too, and must cap it as well.
+        let mut timeline = Vec::new();
+        let (card, _) = apply_post_tool_use(
+            &mut timeline,
+            &post(
+                "Bash",
+                Some("t2"),
+                json!({ "command": huge }),
+                json!({ "output": "ok" }),
+            ),
+            10,
+        );
+        assert!(card.command.unwrap().ends_with(marker));
+    }
+
+    // ---- extract_output -----------------------------------------------------
+
+    #[test]
+    fn extract_output_handles_every_response_shape() {
+        let cases: &[(&str, Value, Option<&str>)] = &[
+            ("plain string", json!("just text"), Some("just text")),
+            (
+                "{output}",
+                json!({ "output": "added 42 packages" }),
+                Some("added 42 packages"),
+            ),
+            ("{stdout}", json!({ "stdout": "hello\n" }), Some("hello")),
+            (
+                "{content} as string",
+                json!({ "content": "file body" }),
+                Some("file body"),
+            ),
+            (
+                "{content} as content blocks",
+                json!({ "content": [{ "type": "text", "text": "block text" }] }),
+                Some("block text"),
+            ),
+            (
+                "bare content-block array",
+                json!([{ "type": "text", "text": "array text" }]),
+                Some("array text"),
+            ),
+            ("array with no text block", json!([1, 2, 3]), None),
+            (
+                "generic object falls back to pretty JSON",
+                json!({ "filePath": "a.rs", "numLines": 3 }),
+                Some("{\n  \"filePath\": \"a.rs\",\n  \"numLines\": 3\n}"),
+            ),
+            ("null", Value::Null, None),
+            ("number", json!(7), None),
+            ("blank output", json!({ "output": "   " }), None),
+            (
+                "stderr is appended, marked",
+                json!({ "output": "ok", "stderr": "warning: unused" }),
+                Some("ok\n[stderr]\nwarning: unused"),
+            ),
+            (
+                "stderr alone still surfaces",
+                json!({ "stdout": "", "stderr": "command not found" }),
+                Some("[stderr]\ncommand not found"),
+            ),
+            (
+                "blank stderr is ignored",
+                json!({ "output": "ok", "stderr": "  \n" }),
+                Some("ok"),
+            ),
+        ];
+        for (name, response, want) in cases {
+            assert_eq!(extract_output(response).as_deref(), *want, "case: {name}");
+        }
+    }
+
+    #[test]
+    fn extract_output_caps_long_results() {
+        let marker = "\n… (truncated)";
+        let long = "x".repeat(5000);
+        let out = extract_output(&json!({ "output": long })).unwrap();
+        assert!(out.ends_with(marker));
+        assert_eq!(out.chars().count(), 4000 + marker.chars().count());
+
+        // Exactly at the cap: no marker.
+        let exact = "y".repeat(4000);
+        let out = extract_output(&json!({ "output": exact })).unwrap();
+        assert_eq!(out.chars().count(), 4000);
+        assert!(!out.contains("truncated"));
+    }
+
+    // ---- error heuristic ----------------------------------------------------
+
+    #[test]
+    fn error_shaped_responses_mark_the_card_failed() {
+        let cases: &[(&str, Value, &str)] = &[
+            (
+                "is_error",
+                json!({ "is_error": true, "output": "boom" }),
+                "error",
+            ),
+            (
+                "success:false",
+                json!({ "success": false, "output": "boom" }),
+                "error",
+            ),
+            ("string error field", json!({ "error": "ENOENT" }), "error"),
+            // Only a *string* error counts: some tools return `error: null` or a
+            // numeric exit-style field on a perfectly successful call.
+            (
+                "non-string error field",
+                json!({ "error": 42, "output": "ok" }),
+                "success",
+            ),
+            (
+                "null error field",
+                json!({ "error": null, "output": "ok" }),
+                "success",
+            ),
+            ("plain success", json!({ "output": "ok" }), "success"),
+            (
+                "is_error:false",
+                json!({ "is_error": false, "output": "ok" }),
+                "success",
+            ),
+            ("plain string response", json!("done"), "success"),
+        ];
+        for (name, response, want) in cases {
+            let mut timeline = Vec::new();
+            let (card, _) = apply_post_tool_use(
+                &mut timeline,
+                &post(
+                    "Bash",
+                    Some("t"),
+                    json!({ "command": "x" }),
+                    response.clone(),
+                ),
+                10,
+            );
+            assert_eq!(card.status, *want, "case: {name}");
+        }
+    }
+
+    // ---- correlation --------------------------------------------------------
+
+    #[test]
+    fn pre_then_post_with_the_same_id_resolves_one_card() {
+        let mut timeline = Vec::new();
+        let (opened, dropped) = apply_pre_tool_use(
+            &mut timeline,
+            &pre(
+                "Bash",
+                Some("toolu_01"),
+                json!({ "command": "npm install" }),
+            ),
+            1_000,
+        );
+        assert_eq!((opened.status.as_str(), dropped), ("running", 0));
+        assert_eq!(timeline.len(), 1);
+
+        let (resolved, dropped) = apply_post_tool_use(
+            &mut timeline,
+            &post(
+                "Bash",
+                Some("toolu_01"),
+                json!({ "command": "npm install" }),
+                json!({ "output": "added 42 packages" }),
+            ),
+            3_500,
+        );
+        assert_eq!(dropped, 0);
+        assert_eq!(timeline.len(), 1, "must resolve in place, not append");
+        assert_eq!(resolved.id, "toolu_01");
+        assert_eq!(resolved.status, "success");
+        assert_eq!(resolved.duration_ms, Some(2_500));
+        assert_eq!(resolved.output.as_deref(), Some("added 42 packages"));
+        assert_eq!(timeline[0].status, "success");
+    }
+
+    #[test]
+    fn post_without_a_matching_pre_opens_its_own_card() {
+        let mut timeline = Vec::new();
+        let (card, _) = apply_post_tool_use(
+            &mut timeline,
+            &post(
+                "Read",
+                Some("toolu_orphan"),
+                json!({ "file_path": "src/App.tsx" }),
+                json!({ "output": "…" }),
+            ),
+            2_000,
+        );
+        assert_eq!(timeline.len(), 1);
+        assert_eq!(card.id, "toolu_orphan");
+        assert_eq!(card.status, "success");
+        assert_eq!(card.command.as_deref(), Some("src/App.tsx"));
+        assert_eq!(
+            card.duration_ms, None,
+            "no Pre means no start time to measure"
+        );
+    }
+
+    #[test]
+    fn a_pre_without_an_id_still_gets_a_unique_one() {
+        let mut timeline = Vec::new();
+        let payload = pre("Bash", None, json!({ "command": "ls" }));
+        let (a, _) = apply_pre_tool_use(&mut timeline, &payload, 1);
+        let (b, _) = apply_pre_tool_use(&mut timeline, &payload, 2);
+        assert!(!a.id.is_empty());
+        assert_ne!(a.id, b.id);
+    }
+
+    #[test]
+    fn fifo_fallback_resolves_the_oldest_running_card_of_that_tool() {
+        let mut timeline = Vec::new();
+        apply_pre_tool_use(
+            &mut timeline,
+            &pre("Bash", Some("old"), json!({ "command": "sleep 10" })),
+            1_000,
+        );
+        apply_pre_tool_use(
+            &mut timeline,
+            &pre("Read", Some("other-tool"), json!({ "file_path": "a.rs" })),
+            1_100,
+        );
+        apply_pre_tool_use(
+            &mut timeline,
+            &pre("Bash", Some("new"), json!({ "command": "sleep 1" })),
+            1_200,
+        );
+
+        // No tool_use_id — the older Claude Code payload shape.
+        let (resolved, _) = apply_post_tool_use(
+            &mut timeline,
+            &post(
+                "Bash",
+                None,
+                json!({ "command": "sleep 1" }),
+                json!({ "output": "ok" }),
+            ),
+            2_000,
+        );
+        assert_eq!(resolved.id, "old", "oldest running card of that tool wins");
+        assert_eq!(timeline.len(), 3, "nothing new appended");
+        let status = |id: &str| {
+            timeline
+                .iter()
+                .find(|e| e.id == id)
+                .map(|e| e.status.clone())
+                .unwrap()
+        };
+        assert_eq!(status("new"), "running");
+        assert_eq!(
+            status("other-tool"),
+            "running",
+            "a different tool is untouched"
+        );
+    }
+
+    /// The case FIFO gets wrong — and the reason id correlation exists: two
+    /// overlapping calls to the same tool that finish out of order.
+    #[test]
+    fn overlapping_same_tool_calls_resolve_by_id() {
+        let mut timeline = Vec::new();
+        apply_pre_tool_use(
+            &mut timeline,
+            &pre("Bash", Some("first"), json!({ "command": "npm run build" })),
+            1_000,
+        );
+        apply_pre_tool_use(
+            &mut timeline,
+            &pre("Bash", Some("second"), json!({ "command": "git status" })),
+            1_100,
+        );
+
+        // The second call finishes first.
+        let (b, _) = apply_post_tool_use(
+            &mut timeline,
+            &post(
+                "Bash",
+                Some("second"),
+                json!({ "command": "git status" }),
+                json!({ "output": "clean" }),
+            ),
+            1_300,
+        );
+        assert_eq!(b.id, "second");
+        assert_eq!(b.duration_ms, Some(200));
+        assert_eq!(
+            timeline[0].status, "running",
+            "the first call is still going"
+        );
+
+        let (a, _) = apply_post_tool_use(
+            &mut timeline,
+            &post(
+                "Bash",
+                Some("first"),
+                json!({ "command": "npm run build" }),
+                json!({ "is_error": true, "output": "build failed" }),
+            ),
+            9_000,
+        );
+        assert_eq!(a.id, "first");
+        assert_eq!(a.status, "error");
+        assert_eq!(a.duration_ms, Some(8_000));
+        assert_eq!(timeline.len(), 2);
+        assert_eq!(timeline[0].output.as_deref(), Some("build failed"));
+        assert_eq!(timeline[1].output.as_deref(), Some("clean"));
+    }
+
+    // ---- eviction -----------------------------------------------------------
+
+    /// The regression the running-card exemption in `push_timeline` exists for:
+    /// evicting a card whose PostToolUse hasn't arrived makes that Post open a
+    /// duplicate (with no duration) instead of resolving the original.
+    #[test]
+    fn eviction_never_drops_a_running_card() {
+        let mut timeline = Vec::new();
+        let (running, _) = apply_pre_tool_use(
+            &mut timeline,
+            &pre(
+                "Bash",
+                Some("long-runner"),
+                json!({ "command": "npm run build" }),
+            ),
+            1_000,
+        );
+        assert_eq!(running.status, "running");
+
+        // Flood past the cap with settled cards.
+        let mut dropped = 0;
+        for i in 0..TIMELINE_CAP + 10 {
+            dropped += push_timeline(
+                &mut timeline,
+                settled(&format!("filler-{i}"), 2_000 + i as u64),
+            );
+        }
+        assert_eq!(dropped, 11, "every push past the cap evicts exactly one");
+        assert_eq!(timeline.len(), TIMELINE_CAP);
+        assert_eq!(
+            timeline[0].id, "long-runner",
+            "the oldest card survived because it is still running"
+        );
+        assert!(
+            !timeline.iter().any(|e| e.id == "filler-0"),
+            "the oldest *settled* cards are what got evicted"
+        );
+
+        // And the late Post still resolves it rather than duplicating it.
+        let before = timeline.len();
+        let (resolved, _) = apply_post_tool_use(
+            &mut timeline,
+            &post(
+                "Bash",
+                Some("long-runner"),
+                json!({ "command": "npm run build" }),
+                json!({ "output": "done" }),
+            ),
+            60_000,
+        );
+        assert_eq!(resolved.id, "long-runner");
+        assert_eq!(resolved.status, "success");
+        assert_eq!(resolved.duration_ms, Some(59_000));
+        assert_eq!(timeline.len(), before, "resolved in place, no duplicate");
+    }
+
+    #[test]
+    fn eviction_reports_what_it_dropped() {
+        let mut timeline: Vec<TimelineEvent> = (0..TIMELINE_CAP)
+            .map(|i| settled(&format!("old-{i}"), i as u64))
+            .collect();
+        let (_, dropped) = apply_pre_tool_use(
+            &mut timeline,
+            &pre("Bash", Some("newest"), json!({ "command": "ls" })),
+            9_999,
+        );
+        assert_eq!(dropped, 1);
+        assert_eq!(timeline.len(), TIMELINE_CAP);
+        assert!(!timeline.iter().any(|e| e.id == "old-0"));
+        assert!(timeline.iter().any(|e| e.id == "newest"));
+    }
+
+    // ---- settle -------------------------------------------------------------
+
+    #[test]
+    fn settle_running_interrupts_rather_than_errors() {
+        let mut timeline = Vec::new();
+        apply_pre_tool_use(
+            &mut timeline,
+            &pre(
+                "Bash",
+                Some("stuck"),
+                json!({ "command": "tail -f app.log" }),
+            ),
+            1_000,
+        );
+        apply_pre_tool_use(
+            &mut timeline,
+            &pre("Read", Some("done"), json!({ "file_path": "a.rs" })),
+            1_100,
+        );
+        apply_post_tool_use(
+            &mut timeline,
+            &post(
+                "Read",
+                Some("done"),
+                json!({ "file_path": "a.rs" }),
+                json!({ "output": "…" }),
+            ),
+            1_200,
+        );
+        apply_pre_tool_use(
+            &mut timeline,
+            &pre(
+                "Bash",
+                Some("also-stuck"),
+                json!({ "command": "sleep 999" }),
+            ),
+            1_300,
+        );
+
+        let settled_now = settle_running(&mut timeline, 5_000);
+        assert_eq!(settled_now.len(), 2);
+        for card in &settled_now {
+            assert_eq!(card.status, "interrupted", "never a false 'error'");
+            assert!(card.duration_ms.is_some(), "how long it ran before dying");
+        }
+        assert_eq!(settled_now[0].duration_ms, Some(4_000));
+        assert_eq!(
+            timeline.iter().find(|e| e.id == "done").unwrap().status,
+            "success",
+            "already-resolved cards are untouched"
+        );
+        assert!(
+            settle_running(&mut timeline, 6_000).is_empty(),
+            "nothing left running on a second pass"
+        );
+    }
+
+    // ---- notification heuristic --------------------------------------------
+
+    #[test]
+    fn notification_blocks_only_on_permission_shaped_text() {
+        let cases: &[(&str, AgentState)] = &[
+            // What actually arrives: the ~60s idle ping. Sessions run with
+            // --dangerously-skip-permissions, so this is the common case and it
+            // means "waiting on you", not "blocked on an approval".
+            ("Claude is waiting for your input", AgentState::Idle),
+            ("claude is waiting for your input", AgentState::Idle),
+            ("Task complete", AgentState::Idle),
+            ("", AgentState::Idle),
+            // Permission/approval shaped.
+            (
+                "Claude needs your permission to use Bash",
+                AgentState::Blocked,
+            ),
+            ("Approve this plan?", AgentState::Blocked),
+            ("APPROVAL required to continue", AgentState::Blocked),
+            ("Please confirm before I force-push", AgentState::Blocked),
+            ("Waiting for your input on the plan", AgentState::Blocked),
+            // The idle phrase does not launder an approval request.
+            (
+                "Claude is waiting for your input to approve the plan",
+                AgentState::Blocked,
+            ),
+        ];
+        for (message, want) in cases {
+            let (state, reason) = notification_state(message);
+            assert_eq!(state, *want, "case: {message:?} (reason: {reason})");
+        }
+        assert_eq!(
+            notification_state("Claude is waiting for your input").1,
+            "idle_ping"
+        );
+        assert_eq!(
+            notification_state("Claude needs your permission to use Bash").1,
+            "needs_input"
+        );
+    }
+
+    // ---- dialog reports from the viewer -------------------------------------
+
+    #[test]
+    fn parse_dialog_reads_the_wire_contract() {
+        let cases: &[(&str, Value, Option<&str>)] = &[
+            (
+                "the contract, blocked",
+                json!({ "type": "dialog", "blocked": true, "kind": "trust" }),
+                Some("trust"),
+            ),
+            (
+                "the contract, cleared",
+                json!({ "type": "dialog", "blocked": false, "kind": null }),
+                None,
+            ),
+            (
+                "every named kind survives verbatim",
+                json!({ "blocked": true, "kind": "permission" }),
+                Some("permission"),
+            ),
+            (
+                "an unnamed kind is passed through, not rejected",
+                json!({ "blocked": true, "kind": "bash_permission" }),
+                Some("bash_permission"),
+            ),
+            (
+                "a stale kind can't outvote blocked:false",
+                json!({ "blocked": false, "kind": "plan" }),
+                None,
+            ),
+            (
+                "surrounding space is trimmed",
+                json!({ "blocked": true, "kind": "  plan  " }),
+                Some("plan"),
+            ),
+        ];
+        for (name, v, want) in cases {
+            assert_eq!(parse_dialog(v).as_deref(), *want, "case: {name}");
+        }
+    }
+
+    /// A viewer is untrusted input. Nothing it can send may panic the server,
+    /// and nothing malformed may strand a session red.
+    #[test]
+    fn parse_dialog_treats_junk_as_no_dialog() {
+        let cases: &[(&str, Value)] = &[
+            ("empty object", json!({})),
+            ("blocked missing", json!({ "type": "dialog" })),
+            ("blocked null", json!({ "blocked": null, "kind": "trust" })),
+            (
+                "blocked as a string",
+                json!({ "blocked": "true", "kind": "trust" }),
+            ),
+            (
+                "blocked as a number",
+                json!({ "blocked": 1, "kind": "trust" }),
+            ),
+            (
+                "blocked as an object",
+                json!({ "blocked": { "yes": true } }),
+            ),
+            ("not an object at all", json!("dialog")),
+            ("null payload", Value::Null),
+            ("an array", json!([1, 2, 3])),
+        ];
+        for (name, v) in cases {
+            assert_eq!(parse_dialog(v), None, "case: {name}");
+        }
+    }
+
+    /// `blocked` is the signal; `kind` is only the label the UI prints. A report
+    /// that blocks but can't name itself still blocks — losing a real dialog is
+    /// far worse than showing a generic reason for it.
+    #[test]
+    fn a_blocked_report_with_an_unreadable_kind_still_blocks() {
+        for kind in [json!(null), json!(42), json!("   "), json!(["plan"])] {
+            let v = json!({ "type": "dialog", "blocked": true, "kind": kind });
+            assert_eq!(parse_dialog(&v).as_deref(), Some("dialog"), "kind: {kind}");
+        }
+        // Missing entirely, too.
+        assert_eq!(
+            parse_dialog(&json!({ "blocked": true })).as_deref(),
+            Some("dialog")
+        );
+    }
+
+    #[test]
+    fn a_giant_kind_is_capped_before_it_reaches_session_info() {
+        let huge = "x".repeat(10_000);
+        let kind = parse_dialog(&json!({ "blocked": true, "kind": huge })).unwrap();
+        assert_eq!(kind.chars().count(), 32);
+    }
+
+    /// The merge lives in session.rs, but this is the pairing that matters:
+    /// what the wire says, run through what the viewer ends up seeing.
+    #[test]
+    fn a_parsed_dialog_blocks_a_session_hooks_call_idle() {
+        use crate::session::merge_state;
+
+        let trust = json!({ "type": "dialog", "blocked": true, "kind": "trust" });
+        let screen = parse_dialog(&trust);
+        assert_eq!(
+            merge_state(AgentState::Idle, screen.as_deref(), false),
+            AgentState::Blocked,
+            "the whole point: no hook fires for the trust prompt, so hooks say idle"
+        );
+
+        let cleared = parse_dialog(&json!({ "type": "dialog", "blocked": false, "kind": null }));
+        assert_eq!(
+            merge_state(AgentState::Idle, cleared.as_deref(), false),
+            AgentState::Idle
+        );
     }
 }

@@ -1,6 +1,7 @@
 // Prevents an extra console window on Windows in release builds.
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod git;
 mod hooks_install;
 mod past_sessions;
 mod pty;
@@ -22,6 +23,11 @@ struct AppState {
 
 /// Spawn a claude PTY session and open its viewer window. Shared by the
 /// launcher UI command and the local POST /sessions endpoint.
+// Eight parameters, one over clippy's threshold. Bundling them into a struct
+// would only move the argument list to the call sites, which are a Tauri
+// command and an axum handler that each already destructure their own request
+// type — so the struct would be pure ceremony.
+#[allow(clippy::too_many_arguments)]
 pub fn open_session(
     app: &AppHandle,
     registry: &Arc<Registry>,
@@ -52,13 +58,10 @@ pub fn open_session(
             .map_err(|e| format!("failed to open session window: {e}"))?;
     }
 
-    Ok(SessionInfo {
-        viewer_id: vid,
-        session_id: None,
-        cwd,
-        ended: false,
-        is_terminal: false,
-    })
+    // Built by the session itself, never hand-rolled here: three construction
+    // sites for one struct is how the launcher's optimistic card ends up
+    // missing fields the registry listing has.
+    Ok(session.info())
 }
 
 /// Spawn a plain terminal (login shell or tmux attach-or-create) inside a PTY
@@ -92,13 +95,7 @@ pub fn open_terminal(
             .map_err(|e| format!("failed to open terminal window: {e}"))?;
     }
 
-    Ok(SessionInfo {
-        viewer_id: vid,
-        session_id: None,
-        cwd,
-        ended: false,
-        is_terminal: true,
-    })
+    Ok(session.info())
 }
 
 #[tauri::command]
@@ -171,10 +168,56 @@ fn split_line_suffix(s: &str) -> (&str, Option<u32>) {
 /// executables — because terminal output is untrusted (a malicious program can
 /// print an OSC 8 link with spoofed visible text pointing anywhere).
 const SAFE_OPEN_EXTS: &[&str] = &[
-    "txt", "md", "markdown", "json", "yaml", "yml", "toml", "ini", "cfg", "conf", "env", "log",
-    "csv", "tsv", "xml", "html", "htm", "css", "scss", "rs", "py", "js", "jsx", "ts", "tsx", "go",
-    "java", "kt", "rb", "php", "c", "h", "cpp", "hpp", "cc", "cs", "swift", "sql", "sh", "lock",
-    "gitignore", "dockerfile", "vue", "svelte", "lua", "r", "pl", "dart", "ex", "exs",
+    "txt",
+    "md",
+    "markdown",
+    "json",
+    "yaml",
+    "yml",
+    "toml",
+    "ini",
+    "cfg",
+    "conf",
+    "env",
+    "log",
+    "csv",
+    "tsv",
+    "xml",
+    "html",
+    "htm",
+    "css",
+    "scss",
+    "rs",
+    "py",
+    "js",
+    "jsx",
+    "ts",
+    "tsx",
+    "go",
+    "java",
+    "kt",
+    "rb",
+    "php",
+    "c",
+    "h",
+    "cpp",
+    "hpp",
+    "cc",
+    "cs",
+    "swift",
+    "sql",
+    "sh",
+    "lock",
+    "gitignore",
+    "dockerfile",
+    "vue",
+    "svelte",
+    "lua",
+    "r",
+    "pl",
+    "dart",
+    "ex",
+    "exs",
 ];
 
 #[cfg(unix)]
@@ -242,7 +285,10 @@ fn open_path(path: String, cwd: Option<String>) -> Result<(), String> {
         .extension()
         .and_then(|e| e.to_str())
         .map(|s| s.to_ascii_lowercase());
-    let allowed = ext.as_deref().map(|e| SAFE_OPEN_EXTS.contains(&e)).unwrap_or(false);
+    let allowed = ext
+        .as_deref()
+        .map(|e| SAFE_OPEN_EXTS.contains(&e))
+        .unwrap_or(false);
     if !allowed {
         return Err(format!(
             "refusing to hand '{}' to the OS opener (install the `code` CLI to open arbitrary files as text)",
@@ -289,7 +335,11 @@ fn list_sessions(state: State<'_, AppState>) -> Vec<SessionInfo> {
 }
 
 #[tauri::command]
-fn focus_session(app: AppHandle, state: State<'_, AppState>, viewer_id: String) -> Result<(), String> {
+fn focus_session(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    viewer_id: String,
+) -> Result<(), String> {
     let label = format!("session-{viewer_id}");
     if let Some(window) = app.get_webview_window(&label) {
         return window.set_focus().map_err(|e| e.to_string());
@@ -298,7 +348,11 @@ fn focus_session(app: AppHandle, state: State<'_, AppState>, viewer_id: String) 
     // reopen a viewer; scrollback replays on connect. A terminal reopens with
     // the same `kind=terminal` flag and title it was created with.
     let session = state.registry.get(&viewer_id).ok_or("session not found")?;
-    let kind_suffix = if session.is_terminal { "&kind=terminal" } else { "" };
+    let kind_suffix = if session.is_terminal {
+        "&kind=terminal"
+    } else {
+        ""
+    };
     let url = format!(
         "index.html?vid={}&port={}&token={}&cwd={}{}",
         viewer_id,
@@ -312,7 +366,11 @@ fn focus_session(app: AppHandle, state: State<'_, AppState>, viewer_id: String) 
     } else {
         format!("Claude — {}", session.cwd)
     };
-    let size = if session.is_terminal { (1000.0, 680.0) } else { (1160.0, 740.0) };
+    let size = if session.is_terminal {
+        (1000.0, 680.0)
+    } else {
+        (1160.0, 740.0)
+    };
     WebviewWindowBuilder::new(&app, label, WebviewUrl::App(url.into()))
         .title(title)
         .inner_size(size.0, size.1)
@@ -326,7 +384,11 @@ fn focus_session(app: AppHandle, state: State<'_, AppState>, viewer_id: String) 
 /// session window. The session itself (PTY, scrollback) is untouched — the
 /// tab simply reconnects as another viewer.
 #[tauri::command]
-fn dock_session(app: AppHandle, state: State<'_, AppState>, viewer_id: String) -> Result<(), String> {
+fn dock_session(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    viewer_id: String,
+) -> Result<(), String> {
     let session = state.registry.get(&viewer_id).ok_or("session not found")?;
     let payload = serde_json::json!({
         "vid": viewer_id,
@@ -339,7 +401,8 @@ fn dock_session(app: AppHandle, state: State<'_, AppState>, viewer_id: String) -
     let had_launcher = app.get_webview_window("main").is_some();
     show_launcher(&app);
     if had_launcher {
-        app.emit_to("main", "cv:dock", payload).map_err(|e| e.to_string())?;
+        app.emit_to("main", "cv:dock", payload)
+            .map_err(|e| e.to_string())?;
         if let Some(window) = app.get_webview_window(&format!("session-{viewer_id}")) {
             let _ = window.close();
         }
@@ -398,10 +461,22 @@ fn hooks_status() -> bool {
 /// Script Editor, and clicks opened that instead. The sound name is
 /// restricted to a known set so nothing user-controlled leaks through.
 #[tauri::command]
-fn notify(app: AppHandle, title: String, body: String, sound: Option<String>) -> Result<(), String> {
+fn notify(
+    app: AppHandle,
+    title: String,
+    body: String,
+    sound: Option<String>,
+) -> Result<(), String> {
     use tauri_plugin_notification::{NotificationExt, PermissionState};
     const SOUNDS: &[&str] = &[
-        "Glass", "Ping", "Pop", "Funk", "Hero", "Purr", "Submarine", "Tink",
+        "Glass",
+        "Ping",
+        "Pop",
+        "Funk",
+        "Hero",
+        "Purr",
+        "Submarine",
+        "Tink",
     ];
     let sound = sound
         .as_deref()
@@ -438,16 +513,17 @@ fn uninstall_hooks() -> Result<String, String> {
 
 fn main() {
     // Hook-set upgrade: users who installed hooks under an older build pick up
-    // newly-added events (Stop/Notification) automatically. install() is
-    // idempotent — it only appends entries that are missing.
+    // newly-added events (this release adds UserPromptSubmit, which is what
+    // makes a turn that thinks for 90s before its first tool call show as
+    // Working) automatically. install() is idempotent — it only appends entries
+    // that are missing.
     if hooks_install::installed() {
         let _ = hooks_install::install();
     }
 
     let registry = Arc::new(Registry::default());
     // Random per run; CLAUDE_VIEW_TOKEN overrides for scripting/testing.
-    let token =
-        std::env::var("CLAUDE_VIEW_TOKEN").unwrap_or_else(|_| Uuid::new_v4().to_string());
+    let token = std::env::var("CLAUDE_VIEW_TOKEN").unwrap_or_else(|_| Uuid::new_v4().to_string());
 
     // Bind an ephemeral local port up front so its number can live in managed
     // state (sessions inject it into claude's env as CLAUDE_VIEW_PORT).
@@ -527,7 +603,9 @@ fn main() {
             // their PTYs live in this process). `code: None` is the
             // all-windows-closed case; explicit quits (Cmd+Q) pass a code.
             #[cfg(target_os = "macos")]
-            tauri::RunEvent::ExitRequested { code: None, api, .. } => api.prevent_exit(),
+            tauri::RunEvent::ExitRequested {
+                code: None, api, ..
+            } => api.prevent_exit(),
             // Actual shutdown: kill every child so no `claude` is orphaned, and
             // remove the instance discovery file.
             tauri::RunEvent::Exit => {
@@ -537,7 +615,9 @@ fn main() {
                 }
                 if let Some(home) = dirs::home_dir() {
                     let _ = std::fs::remove_file(
-                        home.join(".claude").join("claude-view").join("instance.json"),
+                        home.join(".claude")
+                            .join("claude-view")
+                            .join("instance.json"),
                     );
                 }
             }

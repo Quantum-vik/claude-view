@@ -1,0 +1,117 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  ci:
+    name: build, lint, test (Linux)
+    # Ubuntu, not macOS, purely for cost: this is a PRIVATE repo, so Actions
+    # minutes are billed, and GitHub bills macOS at a 10x multiplier (Windows
+    # 2x, Linux 1x). A full run here builds the entire Tauri dependency tree,
+    # so the macOS equivalent burned ~10x the minutes for an identical result —
+    # nothing in the suite is platform-specific: the Rust tests, clippy, fmt
+    # and tsc all pass the same way on any host. Platform-specific compilation
+    # is covered by the windows-check job below.
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      # Tauri links against the system webview on Linux, so src-tauri cannot
+      # compile (not even `cargo check`) without these. macOS and Windows ship
+      # their webviews with the OS, which is why this step has no counterpart
+      # in the other job. Package set per Tauri v2's Linux prerequisites.
+      - name: Install Tauri system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libwebkit2gtk-4.1-dev \
+            libayatana-appindicator3-dev \
+            librsvg2-dev \
+            libxdo-dev \
+            libssl-dev \
+            build-essential \
+            curl wget file
+
+      - name: Setup Node
+        uses: actions/setup-node@v7
+        with:
+          node-version: 20
+          cache: npm
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+
+      - name: Install just
+        uses: extractions/setup-just@v4
+
+      # Parity with local dev: this runs exactly what `just ci` runs on a
+      # developer's machine (build the frontend, then lint, then test).
+      - name: Run CI pipeline
+        run: just ci
+
+  windows-check:
+    name: cargo check (Windows)
+    runs-on: windows-latest
+    # src-tauri/src/hooks_install.rs embeds a PowerShell bridge script and
+    # builds a `powershell -NoProfile -ExecutionPolicy Bypass -File …` command
+    # under #[cfg(windows)], and src-tauri/src/pty.rs has several more
+    # #[cfg(windows)] branches (including inside its own test module). The
+    # `ci` job above runs on Linux and never compiles any of it, so without
+    # this job that code would silently rot. It deliberately does not run the
+    # test suite (that stays in `ci`) — it only proves the Windows-only paths
+    # still compile, including test-only ones (hence `--all-targets`).
+    #
+    # Caveat: this job could not be exercised on a real Windows runner while
+    # authoring it (no Windows machine was available). Tauri v2 on
+    # windows-latest is generally expected to work out of the box — the
+    # runner image ships the MSVC toolchain, the Windows SDK, and a
+    # preinstalled WebView2 — but this is genuinely the first time this
+    # project has been built on Windows in CI, so a first-run failure here
+    # would be a real (and useful) finding, not necessarily a workflow bug.
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Setup Node
+        uses: actions/setup-node@v7
+        with:
+          node-version: 20
+          cache: npm
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+
+      # Same prerequisite as the `just build` recipe: tauri.conf.json points
+      # frontendDist at ../dist (gitignored), and generate_context!() reads
+      # it when src-tauri compiles.
+      - name: Build frontend
+        run: |
+          npm ci
+          npm run build
+
+      - name: cargo check
+        working-directory: src-tauri
+        run: cargo check --all-targets --locked

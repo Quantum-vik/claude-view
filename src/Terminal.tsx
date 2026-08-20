@@ -21,6 +21,10 @@ interface TerminalProps {
   /** Populated with a function that injects raw input into this session's PTY
    *  (used by header controls like the model switcher). Cleared on unmount. */
   sendRef?: React.MutableRefObject<((data: string) => void) | null>;
+  /** Scan the rendered screen for Claude Code's blocking dialogs and report
+   *  them upstream (see {@link detectDialog}). OFF by default: a plain shell's
+   *  `git rebase -i` todo list is not a blocked agent. */
+  detectDialogs?: boolean;
 }
 
 // path-ish tokens: optional ~/ ./ ../ prefix, segments, an extension, and an
@@ -33,7 +37,140 @@ const URL_REGEX = /https?:\/\/[^\s"'<>()\]]+/g;
 // fall back to the app mono stack when it isn't installed.
 const TERM_FONT = `'MesloLGS NF', 'JetBrainsMono Nerd Font', 'Hack Nerd Font', ${T.mono}`;
 
-export default function Terminal({ vid, port, token, cwd, onControl, onStatusChange, sendRef }: TerminalProps) {
+// ---------------------------------------------------------------------------
+// Dialog detection
+//
+// Hooks are ground truth for TURN BOUNDARIES (UserPromptSubmit → working,
+// Stop → idle) but they are blind to dialogs: a session parked on "Do you trust
+// this folder?" is genuinely stopped, waiting on a human, and reports `idle`
+// because no hook fires for it. xterm already has the screen parsed, so we read
+// the grid here and tell the server, which merges it with hook state.
+// ---------------------------------------------------------------------------
+
+export type DialogKind = "trust" | "permission" | "plan" | "choice";
+
+export interface DialogState {
+  blocked: boolean;
+  /** Only meaningful when `blocked`. */
+  kind: DialogKind | null;
+}
+
+/** Selection carets Claude Code draws beside the highlighted choice. */
+const CARET_CLASS = "❯>▶→›»";
+/** Leading/trailing box-drawing border (permission prompts are boxed) plus
+ *  surrounding padding, stripped so the option regexes can stay anchored. */
+const BORDER_RE = /^[\s│┃║|╎┆┊╭╰┌└]+|[\s│┃║|╎┆┊╮╯┐┘]+$/g;
+/** Rule 1, the load-bearing signal: a caret-marked numbered option. */
+const CARET_OPTION_RE = new RegExp(`^\\s*[${CARET_CLASS}]\\s*\\d+[.)]\\s+\\S`);
+/** Rule 2a: any numbered option, caret or not. */
+const OPTION_RE = new RegExp(`^\\s*(?:[${CARET_CLASS}]\\s*)?\\d+[.)]\\s+\\S`);
+/** Rule 2b: a confirm affordance ("Enter to confirm · Esc to cancel"). */
+const CONFIRM_RE = /enter to (?:confirm|select|continue)|esc to (?:cancel|exit)/i;
+/** Claude Code prints "esc to interrupt" while it is WORKING. It must never
+ *  satisfy the affordance rule, and its presence at/below the options means the
+ *  spinner is live — i.e. mid-turn, not waiting on a human. (Claude Code draws
+ *  the spinner and a dialog in the same slot, so they never co-render; if that
+ *  ever changes, narrow this veto rather than dropping it.) */
+const INTERRUPT_RE = /\bto interrupt\b/i;
+
+/** How far up from the bottom of the viewport a dialog's caret may sit.
+ *  Dialogs render at the bottom; a numbered list halfway up the screen is prose. */
+const TAIL_LINES = 20;
+/** Lines pulled in above the caret for option counting and classification —
+ *  the question text sits a few lines above the choices. */
+const CONTEXT_LINES = 14;
+
+const NOT_BLOCKED: DialogState = { blocked: false, kind: null };
+
+/**
+ * Decide whether the visible screen is a blocking Claude Code dialog.
+ *
+ * Takes the viewport as rendered grid text (top row first). Pure — exported
+ * for tests.
+ *
+ * Predicate: within the bottom {@link TAIL_LINES} rows there is a caret-marked
+ * numbered option, nothing at or below it is a live "esc to interrupt" spinner,
+ * and the surrounding block has either two numbered options or a confirm
+ * affordance. Deliberately biased toward false negatives — an incorrectly
+ * "blocked" session poisons the launcher's triage view.
+ *
+ * Real capture (Claude Code v2.1.220, trust dialog; spacing approximate) —
+ * detectDialog(...) → { blocked: true, kind: "trust" }:
+ *
+ *      Accessing workspace:
+ *      /private/tmp/cv-wt-test
+ *
+ *      Quick safety check: Is this a project you created or one you trust? (Like your own code, a
+ *      well-known open source project, or work from your team). If not, take a moment to review
+ *      what's in this folder first.
+ *
+ *      Claude Code'll be able to read, edit, and execute files here.
+ *      Security guide
+ *
+ *      ❯ 1. Yes, I trust this folder
+ *        2. No, exit
+ *
+ *      Enter to confirm · Esc to cancel
+ */
+export function detectDialog(lines: string[]): DialogState {
+  const clean = lines.map((l) => l.replace(BORDER_RE, ""));
+
+  // Rule 1 — a caret-marked numbered option, low on the screen. A Claude
+  // response containing a plain numbered list has no caret and stops here.
+  const floor = Math.max(0, clean.length - TAIL_LINES);
+  let caret = -1;
+  for (let i = clean.length - 1; i >= floor; i--) {
+    if (CARET_OPTION_RE.test(clean[i])) {
+      caret = i;
+      break;
+    }
+  }
+  if (caret === -1) return NOT_BLOCKED;
+
+  // Working-spinner veto (see INTERRUPT_RE). The spinner renders BELOW the
+  // streamed transcript, so anything caret-ish above a live one is output, not
+  // a prompt.
+  for (let i = caret; i < clean.length; i++) {
+    if (INTERRUPT_RE.test(clean[i])) return NOT_BLOCKED;
+  }
+
+  // Rule 2 — corroboration: two numbered options, or a confirm affordance.
+  const block = clean.slice(Math.max(0, caret - CONTEXT_LINES));
+  let options = 0;
+  let affordance = false;
+  for (const l of block) {
+    if (OPTION_RE.test(l)) options++;
+    if (CONFIRM_RE.test(l) && !INTERRUPT_RE.test(l)) affordance = true;
+  }
+  if (options < 2 && !affordance) return NOT_BLOCKED;
+
+  // Classify from the block's text, first match wins. Two deliberate tweaks:
+  // `plan` is word-bounded so "explanation" can't claim it, and "do you want
+  // to…" counts as permission — that is the literal wording of Claude Code's
+  // tool-permission prompt ("Do you want to proceed?" / "Do you want to make
+  // this edit to X?"), the single most common dialog we will ever see. Plan
+  // approval says "Would you like to proceed?", so the two do not collide.
+  const text = block.join("\n").toLowerCase();
+  const kind: DialogKind = /trust this folder|do you trust/.test(text)
+    ? "trust"
+    : /permission|wants to (?:run|use)|do you want to|\ballow\b[^\n]{0,60}?\bto\b/.test(text)
+    ? "permission"
+    : /would you like to proceed|proceed with|\bplan\b/.test(text)
+    ? "plan"
+    : "choice";
+  return { blocked: true, kind };
+}
+
+export default function Terminal({
+  vid,
+  port,
+  token,
+  cwd,
+  onControl,
+  onStatusChange,
+  sendRef,
+  detectDialogs = false,
+}: TerminalProps) {
   const containerRef = useRef<HTMLDivElement>(null);
   const searchInputRef = useRef<HTMLInputElement>(null);
   const [searchOpen, setSearchOpen] = useState(false);
@@ -53,8 +190,14 @@ export default function Terminal({ vid, port, token, cwd, onControl, onStatusCha
   // it must not capture the parent's (re-created every render) handlers.
   const onControlRef = useRef(onControl);
   const onStatusRef = useRef(onStatusChange);
+  const detectDialogsRef = useRef(detectDialogs);
   onControlRef.current = onControl;
   onStatusRef.current = onStatusChange;
+  // Read through a ref rather than a dependency: toggling it must never tear
+  // down and rebuild the WebSocket (that resets the terminal and replays the
+  // whole scrollback). In practice it is fixed per mount — the terminal-vs-
+  // session routing decides it — but the ref keeps that from being load-bearing.
+  detectDialogsRef.current = detectDialogs;
 
   useEffect(() => {
     const container = containerRef.current;
@@ -182,6 +325,14 @@ export default function Terminal({ vid, port, token, cwd, onControl, onStatusCha
       },
     });
 
+    // --- Dialog detection ---
+    // Edge-triggered: only transitions go on the wire. `null` means "nothing
+    // sent on this connection yet", which forces the next scan to send — that
+    // is how the re-send on (re)connect happens, since the server does not
+    // persist dialog state across a viewer reconnect. Declared up here because
+    // the onStatus handler below clears it.
+    let sentDialog: DialogState | null = null;
+
     // --- WebSocket ---
     // The server replays the full scrollback on every (re)connect. On a
     // reconnect the terminal already has content, so reset first to avoid
@@ -208,6 +359,10 @@ export default function Terminal({ vid, port, token, cwd, onControl, onStatusCha
           if (doFit()) {
             client.sendControl({ type: "resize", cols: term.cols, rows: term.rows });
           }
+          // Fresh connection: the server knows nothing about our dialog state,
+          // so drop the edge-trigger baseline. The scan that settles after the
+          // scrollback replay then re-sends unconditionally.
+          sentDialog = null;
         }
       })
       .connect();
@@ -395,6 +550,53 @@ export default function Terminal({ vid, port, token, cwd, onControl, onStatusCha
     const sbResizeDisp = term.onResize(updateScrollbar);
     const sbBufferDisp = term.buffer.onBufferChange(updateScrollbar);
     updateScrollbar();
+
+    // --- Dialog scan feed ---
+    // Same rAF throttle as the scroll roller, plus a settle delay: onRender
+    // fires per output frame, and a dialog is static, so there is no reason to
+    // scan mid-stream. Nothing here touches React state — the server owns the
+    // merged agent state and broadcasts it back to every viewer.
+    const DIALOG_SETTLE_MS = 200;
+    let dlgRaf = 0;
+    let dlgTimer: ReturnType<typeof setTimeout> | null = null;
+
+    const scanDialog = () => {
+      const buf = term.buffer.active;
+      // Only the live bottom of the buffer counts. Scrolled back into history,
+      // the viewport can be showing a prompt that was answered ten minutes ago.
+      if (buf.viewportY < buf.baseY) return;
+      const lines: string[] = [];
+      for (let i = 0; i < term.rows; i++) {
+        // Rendered grid text, not raw bytes: the TUI positions text with cursor
+        // moves, so the spaces only exist in the buffer.
+        lines.push(buf.getLine(buf.viewportY + i)?.translateToString(true) ?? "");
+      }
+      const next = detectDialog(lines);
+      if (sentDialog && next.blocked === sentDialog.blocked && next.kind === sentDialog.kind) return;
+      sentDialog = next;
+      client.sendControl({
+        type: "dialog",
+        blocked: next.blocked,
+        kind: next.blocked ? next.kind : null,
+      });
+    };
+
+    const scheduleDialogScan = () => {
+      if (!detectDialogsRef.current) return;
+      if (dlgTimer) clearTimeout(dlgTimer);
+      dlgTimer = setTimeout(() => {
+        dlgTimer = null;
+        if (dlgRaf) return;
+        dlgRaf = requestAnimationFrame(() => {
+          dlgRaf = 0;
+          scanDialog();
+        });
+      }, DIALOG_SETTLE_MS);
+    };
+    const dlgRenderDisp = term.onRender(scheduleDialogScan);
+    const dlgScrollDisp = term.onScroll(scheduleDialogScan);
+    scheduleDialogScan();
+
     termRef.current = term;
 
     return () => {
@@ -405,6 +607,10 @@ export default function Terminal({ vid, port, token, cwd, onControl, onStatusCha
       sbRenderDisp.dispose();
       sbResizeDisp.dispose();
       sbBufferDisp.dispose();
+      if (dlgRaf) cancelAnimationFrame(dlgRaf);
+      if (dlgTimer) clearTimeout(dlgTimer);
+      dlgRenderDisp.dispose();
+      dlgScrollDisp.dispose();
       // Cut off imperative senders FIRST so nothing writes to a dying client.
       if (sendRef) sendRef.current = null;
       if (fitRaf) cancelAnimationFrame(fitRaf);

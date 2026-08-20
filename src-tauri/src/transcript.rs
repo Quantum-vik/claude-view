@@ -137,7 +137,9 @@ fn parse_record(v: &Value, out: &mut Vec<Record>) {
     // Assistant turns record the model they ran on — the CLI's ground truth.
     if v["type"].as_str() == Some("assistant") {
         if let Some(model) = v["message"]["model"].as_str() {
-            out.push(Record::Model { model: model.to_string() });
+            out.push(Record::Model {
+                model: model.to_string(),
+            });
         }
         if let Some((input, output)) = usage_from(v) {
             out.push(Record::Usage { input, output });
@@ -160,7 +162,9 @@ fn parse_record(v: &Value, out: &mut Vec<Record>) {
                 });
             }
             Some("tool_result") => {
-                let Some(id) = b["tool_use_id"].as_str() else { continue };
+                let Some(id) = b["tool_use_id"].as_str() else {
+                    continue;
+                };
                 out.push(Record::End {
                     id: id.to_string(),
                     is_error: b["is_error"].as_bool().unwrap_or(false),
@@ -200,7 +204,14 @@ fn describe_input(tool: &str, input: &Value) -> Option<String> {
     if tool == "Bash" {
         return input["command"].as_str().map(str::to_string);
     }
-    for key in ["file_path", "path", "pattern", "query", "url", "description"] {
+    for key in [
+        "file_path",
+        "path",
+        "pattern",
+        "query",
+        "url",
+        "description",
+    ] {
         if let Some(s) = input[key].as_str() {
             return Some(s.to_string());
         }
@@ -331,7 +342,7 @@ fn parse_iso_ms(s: &str) -> Option<u64> {
     // days from civil (Howard Hinnant's algorithm)
     let y = if mo <= 2 { y - 1 } else { y };
     let era = if y >= 0 { y } else { y - 399 } / 400;
-    let yoe = (y - era * 400) as i64;
+    let yoe = y - era * 400;
     let doy = (153 * (if mo > 2 { mo - 3 } else { mo + 9 }) + 2) / 5 + d - 1;
     let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
     let days = era * 146097 + doe - 719468;
@@ -358,13 +369,17 @@ mod tests {
             Some(h) => h.join(".claude/projects"),
             None => return,
         };
-        let Ok(dirs) = fs::read_dir(&projects) else { return };
+        let Ok(dirs) = fs::read_dir(&projects) else {
+            return;
+        };
         let mut newest: Option<(std::time::SystemTime, PathBuf)> = None;
         for d in dirs.flatten() {
             if !d.path().is_dir() {
                 continue;
             }
-            let Ok(files) = fs::read_dir(d.path()) else { continue };
+            let Ok(files) = fs::read_dir(d.path()) else {
+                continue;
+            };
             for f in files.flatten() {
                 let p = f.path();
                 if p.extension().and_then(|e| e.to_str()) != Some("jsonl") {
@@ -403,6 +418,9 @@ mod tests {
         }
         eprintln!("parsed {starts} tool_use + {ends} tool_result from {path:?}");
         assert!(starts > 0, "expected tool_use records in a real transcript");
-        assert!(ends > 0, "expected tool_result records in a real transcript");
+        assert!(
+            ends > 0,
+            "expected tool_result records in a real transcript"
+        );
     }
 }
