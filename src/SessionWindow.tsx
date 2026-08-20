@@ -670,6 +670,14 @@ export default function SessionWindow(props: SessionWindowProps = {}) {
               onControl={handleControl}
               onStatusChange={setConnStatus}
               sendRef={sendRef}
+              // Screen-scan for Claude Code's blocking dialogs (trust /
+              // permission / plan), which fire no hook and would otherwise read
+              // as "idle". This is the `!isTerminal` branch: the terminal-vs-
+              // session split already happened upstream — main.tsx routes on
+              // `kind=terminal` and Launcher on `tab.isTerminal`, and both send
+              // plain shells to TerminalWindow, which leaves the prop at its
+              // `false` default. So reaching this component IS !isTerminal.
+              detectDialogs
             />
           ) : (
             <div style={{ padding: 24, color: T.error }}>

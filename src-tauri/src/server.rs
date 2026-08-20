@@ -259,7 +259,7 @@ async fn handle_ws(socket: WebSocket, session: Arc<Session>) {
         }
     });
 
-    // Inbound: binary = keystrokes -> PTY; text = control (resize).
+    // Inbound: binary = keystrokes -> PTY; text = control (resize, dialog).
     while let Some(Ok(msg)) = rx.next().await {
         match msg {
             Message::Binary(data) => {
@@ -272,6 +272,14 @@ async fn handle_ws(socket: WebSocket, session: Arc<Session>) {
                         let cols = v["cols"].as_u64().unwrap_or(120) as u16;
                         let rows = v["rows"].as_u64().unwrap_or(34) as u16;
                         pty::resize(&session, cols, rows);
+                    } else if v["type"] == "dialog" {
+                        // The viewer has a fully parsed screen (xterm.js) and we
+                        // have raw bytes, so it — not us — decides what a dialog
+                        // looks like. Sent edge-triggered, plus once per
+                        // reconnect. Like `resize` above, nothing here can fail:
+                        // junk degrades to "no dialog visible". A viewer must
+                        // never be able to take the server down.
+                        session.set_screen_blocked(parse_dialog(&v));
                     }
                 }
             }
@@ -477,6 +485,40 @@ fn notification_state(message: &str) -> (AgentState, &'static str) {
         "notification"
     };
     (AgentState::Idle, reason)
+}
+
+/// Longest dialog kind we'll store. The contract's four are ≤10 chars; this
+/// only stops a buggy or hostile viewer from parking an unbounded string in a
+/// field that every `/sessions` response then echoes.
+const DIALOG_KIND_CAP: usize = 32;
+
+/// Fallback label for a `blocked: true` whose `kind` we can't read. The boolean
+/// is the signal and the kind is only what the UI prints, so a malformed label
+/// must not swallow a real block — the session genuinely is stopped on a human.
+const DIALOG_KIND_UNKNOWN: &str = "dialog";
+
+/// Interpret a viewer's `{"type":"dialog", …}` frame as a dialog kind, or `None`
+/// for "no dialog on screen".
+///
+/// Total over arbitrary JSON — there is no error case and no panic path, which
+/// is the point: this parses input from a webview, on the same lenient footing
+/// as the `resize` branch's `unwrap_or` defaults.
+///
+/// `blocked` must be a literal `true`; absent, `false`, or any non-boolean all
+/// mean "not blocked", so a stray frame can't strand a session red. `kind` is
+/// then read best-effort and is deliberately *not* validated against the four
+/// names in the contract — a viewer that learns to recognise a fifth dialog
+/// shouldn't need a backend release to report it.
+fn parse_dialog(v: &Value) -> Option<String> {
+    if v["blocked"].as_bool() != Some(true) {
+        return None;
+    }
+    let kind = v["kind"]
+        .as_str()
+        .map(str::trim)
+        .filter(|k| !k.is_empty())
+        .unwrap_or(DIALOG_KIND_UNKNOWN);
+    Some(kind.chars().take(DIALOG_KIND_CAP).collect())
 }
 
 /// Best-effort human-readable subject for a tool call card.
@@ -1330,6 +1372,120 @@ mod tests {
         assert_eq!(
             notification_state("Claude needs your permission to use Bash").1,
             "needs_input"
+        );
+    }
+
+    // ---- dialog reports from the viewer -------------------------------------
+
+    #[test]
+    fn parse_dialog_reads_the_wire_contract() {
+        let cases: &[(&str, Value, Option<&str>)] = &[
+            (
+                "the contract, blocked",
+                json!({ "type": "dialog", "blocked": true, "kind": "trust" }),
+                Some("trust"),
+            ),
+            (
+                "the contract, cleared",
+                json!({ "type": "dialog", "blocked": false, "kind": null }),
+                None,
+            ),
+            (
+                "every named kind survives verbatim",
+                json!({ "blocked": true, "kind": "permission" }),
+                Some("permission"),
+            ),
+            (
+                "an unnamed kind is passed through, not rejected",
+                json!({ "blocked": true, "kind": "bash_permission" }),
+                Some("bash_permission"),
+            ),
+            (
+                "a stale kind can't outvote blocked:false",
+                json!({ "blocked": false, "kind": "plan" }),
+                None,
+            ),
+            (
+                "surrounding space is trimmed",
+                json!({ "blocked": true, "kind": "  plan  " }),
+                Some("plan"),
+            ),
+        ];
+        for (name, v, want) in cases {
+            assert_eq!(parse_dialog(v).as_deref(), *want, "case: {name}");
+        }
+    }
+
+    /// A viewer is untrusted input. Nothing it can send may panic the server,
+    /// and nothing malformed may strand a session red.
+    #[test]
+    fn parse_dialog_treats_junk_as_no_dialog() {
+        let cases: &[(&str, Value)] = &[
+            ("empty object", json!({})),
+            ("blocked missing", json!({ "type": "dialog" })),
+            ("blocked null", json!({ "blocked": null, "kind": "trust" })),
+            (
+                "blocked as a string",
+                json!({ "blocked": "true", "kind": "trust" }),
+            ),
+            (
+                "blocked as a number",
+                json!({ "blocked": 1, "kind": "trust" }),
+            ),
+            (
+                "blocked as an object",
+                json!({ "blocked": { "yes": true } }),
+            ),
+            ("not an object at all", json!("dialog")),
+            ("null payload", Value::Null),
+            ("an array", json!([1, 2, 3])),
+        ];
+        for (name, v) in cases {
+            assert_eq!(parse_dialog(v), None, "case: {name}");
+        }
+    }
+
+    /// `blocked` is the signal; `kind` is only the label the UI prints. A report
+    /// that blocks but can't name itself still blocks — losing a real dialog is
+    /// far worse than showing a generic reason for it.
+    #[test]
+    fn a_blocked_report_with_an_unreadable_kind_still_blocks() {
+        for kind in [json!(null), json!(42), json!("   "), json!(["plan"])] {
+            let v = json!({ "type": "dialog", "blocked": true, "kind": kind });
+            assert_eq!(parse_dialog(&v).as_deref(), Some("dialog"), "kind: {kind}");
+        }
+        // Missing entirely, too.
+        assert_eq!(
+            parse_dialog(&json!({ "blocked": true })).as_deref(),
+            Some("dialog")
+        );
+    }
+
+    #[test]
+    fn a_giant_kind_is_capped_before_it_reaches_session_info() {
+        let huge = "x".repeat(10_000);
+        let kind = parse_dialog(&json!({ "blocked": true, "kind": huge })).unwrap();
+        assert_eq!(kind.chars().count(), 32);
+    }
+
+    /// The merge lives in session.rs, but this is the pairing that matters:
+    /// what the wire says, run through what the viewer ends up seeing.
+    #[test]
+    fn a_parsed_dialog_blocks_a_session_hooks_call_idle() {
+        use crate::session::merge_state;
+
+        let trust = json!({ "type": "dialog", "blocked": true, "kind": "trust" });
+        let screen = parse_dialog(&trust);
+        assert_eq!(
+            merge_state(AgentState::Idle, screen.as_deref(), false),
+            AgentState::Blocked,
+            "the whole point: no hook fires for the trust prompt, so hooks say idle"
+        );
+
+        let cleared = parse_dialog(&json!({ "type": "dialog", "blocked": false, "kind": null }));
+        assert_eq!(
+            merge_state(AgentState::Idle, cleared.as_deref(), false),
+            AgentState::Idle
         );
     }
 }

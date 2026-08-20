@@ -117,6 +117,17 @@ pub struct Session {
     pub exit_code: RwLock<Option<i64>>,
     /// What the agent is doing, derived from hook events. See [`AgentState`].
     pub state: RwLock<AgentState>,
+    /// Which blocking dialog the *viewer* currently sees on screen (`"trust"`,
+    /// `"permission"`, `"plan"`, `"choice"`), or `None` when the screen is clear.
+    ///
+    /// Deliberately a second variable rather than a write into [`Self::state`]:
+    /// the two sources are blind to different things and would otherwise
+    /// overwrite each other. Hooks are ground truth for turn *boundaries* and
+    /// see no dialogs at all — a session parked on "Do you trust this folder?"
+    /// emits no hook and reports `idle`. The screen sees dialogs and nothing
+    /// else — it can't tell thinking from finished. Merged, never mixed, by
+    /// [`merge_state`].
+    pub screen_blocked: RwLock<Option<String>>,
     /// Epoch ms of the last accepted transition — "working for 4m".
     pub state_since: AtomicU64,
     /// Bumped on every real transition. Lets a viewer distinguish "still
@@ -234,12 +245,22 @@ impl Session {
     /// change. Deliberately has none of herdr's confirmation hold or startup
     /// grace period (`herdr/src/pane/agent_detection.rs`) — those debounce
     /// screen-scrape flicker, and discrete hook events don't flicker.
+    ///
+    /// "A real change" means a change to the [`Self::effective_state`], not to
+    /// the hook state: with a dialog on screen a `Stop` moves this session from
+    /// Working to Idle internally while viewers correctly keep seeing Blocked,
+    /// and announcing that would only reset their "blocked for 2m" clock.
     pub fn set_state(&self, next: AgentState, reason: &str, ts: u64) {
         // Plain terminals never receive hooks; anything arriving for one is
         // misrouted. Keep them Unknown so they stay out of every aggregate.
         if self.is_terminal {
             return;
         }
+        // Snapshot what viewers believe *before* touching anything, so the
+        // broadcast below can be gated on what they'd actually see change. With
+        // no dialog on screen this is exactly the hook state and the whole
+        // function behaves as it always did.
+        let before = self.effective_state();
         {
             let mut current = self.state.write();
             let prev_ts = self.last_state_ts.load(Ordering::Acquire);
@@ -247,24 +268,93 @@ impl Session {
                 return; // stale report; a newer one already won
             }
             self.last_state_ts.store(ts, Ordering::Release);
-            if *current == next {
-                return; // no-op: don't bump the seq or wake every viewer
-            }
             *current = next;
+        }
+        // If Claude is working, nothing is blocking it — whatever dialog the
+        // screen last reported has been answered. This is the rule that makes
+        // "user approved the prompt, Claude carried on" resolve on its own, with
+        // no `blocked:false` from the webview: the window may well be closed,
+        // and a session stuck red forever is worse than one that's briefly late.
+        //
+        // Note this runs even when the hook state didn't move (PostToolUse after
+        // PreToolUse is Working -> Working), which is precisely the transition a
+        // permission prompt is answered on.
+        if next == AgentState::Working {
+            *self.screen_blocked.write() = None;
+        }
+        let after = self.effective_state();
+        if after == before {
+            return; // no-op: don't bump the seq or wake every viewer
         }
         self.state_since.store(ts, Ordering::Release);
         let seq = self.state_seq.fetch_add(1, Ordering::AcqRel) + 1;
         self.send_control(serde_json::json!({
             "type": "agent_state",
-            "state": next.as_str(),
+            "state": after.as_str(),
             "reason": reason,
             "seq": seq,
             "since": ts,
         }));
     }
 
+    /// Record whether the viewer can see a blocking dialog right now.
+    ///
+    /// The webview has a fully parsed screen (xterm.js) and we have raw bytes,
+    /// so it — not the backend — decides what a dialog looks like. Sent
+    /// edge-triggered over the session WebSocket, plus once per reconnect.
+    ///
+    /// **No timestamp, deliberately.** [`Self::set_state`] needs one because the
+    /// hook bridge backgrounds a `curl` per event, so arrival order isn't send
+    /// order and a slow `PreToolUse` can land after the `Stop` that followed it.
+    /// Dialog reports have neither problem: they arrive in order on one TCP
+    /// connection, and they describe the screen *now* rather than an event that
+    /// happened at some past instant — a report has no timestamp of its own to
+    /// carry. So there's nothing to compare against and nothing to drop;
+    /// [`Self::last_state_ts`] is left untouched on purpose, since stamping it
+    /// here would start discarding genuinely newer hooks.
+    pub fn set_screen_blocked(&self, kind: Option<String>) {
+        // A plain shell showing `git rebase -i`'s pick-list is not a blocked
+        // agent — and terminals have no agent to block. Ignore them outright so
+        // the flag can never be set for one.
+        if self.is_terminal {
+            return;
+        }
+        {
+            let mut current = self.screen_blocked.write();
+            if *current == kind {
+                return; // no-op: don't bump the seq or wake every viewer
+            }
+            *current = kind;
+        }
+        // Compute the merge only after dropping the write guard: parking_lot's
+        // RwLock isn't reentrant, so reading it again here would deadlock.
+        let effective = self.effective_state();
+        let ts = now_ms();
+        self.state_since.store(ts, Ordering::Release);
+        let seq = self.state_seq.fetch_add(1, Ordering::AcqRel) + 1;
+        self.send_control(serde_json::json!({
+            "type": "agent_state",
+            "state": effective.as_str(),
+            "reason": "screen",
+            "seq": seq,
+            "since": ts,
+        }));
+    }
+
+    /// Raw hook state, ignoring anything the screen reports. Prefer
+    /// [`Self::effective_state`] for anything a human will see.
     pub fn agent_state(&self) -> AgentState {
         *self.state.read()
+    }
+
+    /// What the session is *actually* doing: the hook state, overridden to
+    /// Blocked while a dialog is on screen. See [`merge_state`].
+    pub fn effective_state(&self) -> AgentState {
+        // Clone the kind out on its own line so that read guard is released
+        // before `agent_state` takes the other lock. Nothing in here — and
+        // nothing that calls it — ever holds two of these locks at once.
+        let screen = self.screen_blocked.read().clone();
+        merge_state(self.agent_state(), screen.as_deref(), self.is_terminal)
     }
 
     /// Record cards dropped by [`push_timeline`] so the viewer can say
@@ -304,13 +394,19 @@ impl Session {
     /// post-spawn returns in main.rs — so adding a field can't silently leave
     /// the launcher's optimistic card missing it.
     pub fn info(&self) -> SessionInfo {
+        // One read of each source, shared by the merge and the label below, so
+        // `state: blocked` can't be reported next to a `blocked_kind: null` that
+        // a concurrent dismissal snuck in between two reads.
+        let screen = self.screen_blocked.read().clone();
+        let hook = *self.state.read();
         SessionInfo {
             viewer_id: self.viewer_id.clone(),
             session_id: self.session_id.read().clone(),
             cwd: self.cwd.clone(),
             ended: self.is_ended(),
             is_terminal: self.is_terminal,
-            state: self.agent_state(),
+            state: merge_state(hook, screen.as_deref(), self.is_terminal),
+            blocked_kind: screen.filter(|_| !self.is_terminal),
             state_seq: self.state_seq.load(Ordering::Acquire),
             state_since: self.state_since.load(Ordering::Acquire),
             repo_key: self.repo.as_ref().map(|r| r.repo_key.clone()),
@@ -355,6 +451,43 @@ pub fn push_timeline(timeline: &mut Vec<TimelineEvent>, event: TimelineEvent) ->
     (before - timeline.len()) as u64
 }
 
+/// Merge the two independent state sources into the one state a human sees.
+///
+/// Precedence, highest first:
+///
+/// | `is_terminal` | `screen` | result            |
+/// |---------------|----------|-------------------|
+/// | true          | any      | `hook` (`Unknown`)|
+/// | false         | `Some`   | `Blocked`         |
+/// | false         | `None`   | `hook`            |
+///
+/// **A visible dialog outranks the hook state, including `Working`.** A dialog
+/// is direct evidence the process is parked on a human; `Working` is only
+/// evidence of what the last hook said, and `PreToolUse` means "a tool started",
+/// not "no prompt appeared while it ran" — a permission prompt is *precisely*
+/// the thing that interrupts a tool mid-flight, so the older signal must not win.
+/// The combination is short-lived by construction anyway: the next `Working`
+/// hook clears `screen_blocked` outright (see [`Session::set_state`]), so it can
+/// only persist while genuinely nothing is happening.
+///
+/// Free function, not a method: a [`Session`] owns a live PTY and can't be built
+/// in a test, so the one piece of real logic here lives where it can be
+/// table-tested — same reasoning as [`push_timeline`].
+pub fn merge_state(hook: AgentState, screen: Option<&str>, is_terminal: bool) -> AgentState {
+    // A plain shell showing `git rebase -i`'s pick-list, or fzf, or less, is not
+    // a blocked agent — it isn't an agent. Terminals get no hooks either, so
+    // this returns Unknown and they stay out of every aggregate.
+    // Belt and braces: `Session::set_screen_blocked` already refuses to record a
+    // dialog for one, so this branch is unreachable through the live path.
+    if is_terminal {
+        return hook;
+    }
+    if screen.is_some() {
+        return AgentState::Blocked;
+    }
+    hook
+}
+
 /// Truncate a card's subject to [`COMMAND_CAP`], on a char boundary.
 pub fn cap_command(s: &str) -> String {
     if s.len() <= COMMAND_CAP {
@@ -372,8 +505,15 @@ pub struct SessionInfo {
     pub cwd: String,
     pub ended: bool,
     pub is_terminal: bool,
-    /// Hook-derived agent state. Always `unknown` for `is_terminal` sessions.
+    /// Effective agent state — the hook state, forced to `blocked` while the
+    /// viewer reports a dialog on screen. See [`merge_state`]. Always `unknown`
+    /// for `is_terminal` sessions.
     pub state: AgentState,
+    /// Which dialog is up, when `state` is `blocked` *because of the screen*:
+    /// `"trust"`, `"permission"`, `"plan"` or `"choice"`, so the UI can say why.
+    /// `None` otherwise — including for a hook-derived block (a `Notification`
+    /// carries no dialog kind), so this is a label, never the blocked test.
+    pub blocked_kind: Option<String>,
     pub state_seq: u64,
     pub state_since: u64,
     /// git common dir — the same string for a repo and all its worktrees, so
@@ -471,4 +611,111 @@ pub fn now_ms() -> u64 {
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_millis() as u64)
         .unwrap_or(0)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const ALL_HOOK_STATES: [AgentState; 4] = [
+        AgentState::Unknown,
+        AgentState::Idle,
+        AgentState::Working,
+        AgentState::Blocked,
+    ];
+
+    /// The bug this whole mechanism exists for: a session parked on Claude
+    /// Code's "Do you trust this folder?" prompt fires no hook at all, so hooks
+    /// keep reporting the Idle it started in while a human sits there waiting.
+    #[test]
+    fn a_dialog_on_screen_blocks_an_idle_session() {
+        assert_eq!(
+            merge_state(AgentState::Idle, Some("trust"), false),
+            AgentState::Blocked
+        );
+        // Every dialog kind blocks; the kind is a label for the UI, not a test.
+        for kind in ["trust", "permission", "plan", "choice", "something_new"] {
+            assert_eq!(
+                merge_state(AgentState::Idle, Some(kind), false),
+                AgentState::Blocked,
+                "kind: {kind}"
+            );
+        }
+    }
+
+    /// The screen wins over `Working`. Justification in [`merge_state`]'s docs:
+    /// a dialog is evidence about *now*, `Working` is evidence about the last
+    /// hook — and a permission prompt is exactly what interrupts a running tool.
+    /// Rule 5 in `set_state` (a `Working` hook clears the flag) means the pair
+    /// can only coexist while no hook is firing, i.e. while nothing is happening.
+    #[test]
+    fn a_dialog_on_screen_outranks_a_working_hook() {
+        assert_eq!(
+            merge_state(AgentState::Working, Some("permission"), false),
+            AgentState::Blocked
+        );
+    }
+
+    #[test]
+    fn a_terminal_is_never_blocked_by_whats_on_its_screen() {
+        // `git rebase -i`, fzf, and `less` all paint a screen that looks like a
+        // dialog. None of them is a stopped agent.
+        for hook in ALL_HOOK_STATES {
+            for kind in [None, Some("choice"), Some("trust")] {
+                assert_eq!(
+                    merge_state(hook, kind, true),
+                    hook,
+                    "terminal must pass {hook:?} through untouched (screen {kind:?})"
+                );
+            }
+        }
+        // In practice a terminal's hook state is Unknown for life, so this is
+        // what the launcher actually sees.
+        assert_eq!(
+            merge_state(AgentState::Unknown, Some("choice"), true),
+            AgentState::Unknown
+        );
+    }
+
+    #[test]
+    fn a_clear_screen_passes_every_hook_state_through_unchanged() {
+        for hook in ALL_HOOK_STATES {
+            assert_eq!(merge_state(hook, None, false), hook, "hook: {hook:?}");
+        }
+    }
+
+    /// `SessionInfo` is serialized straight to the frontend with no serde
+    /// renames, so the field names are the wire contract. Pin them.
+    #[test]
+    fn session_info_reports_blocked_kind_in_snake_case() {
+        let info = SessionInfo {
+            viewer_id: "v1".into(),
+            session_id: None,
+            cwd: "/tmp".into(),
+            ended: false,
+            is_terminal: false,
+            state: merge_state(AgentState::Idle, Some("trust"), false),
+            blocked_kind: Some("trust".into()),
+            state_seq: 3,
+            state_since: 1_700_000_000_000,
+            repo_key: None,
+            repo_name: None,
+            checkout_name: None,
+            is_linked_worktree: false,
+            branch: None,
+        };
+        let v = serde_json::to_value(&info).unwrap();
+        assert_eq!(v["state"], "blocked");
+        assert_eq!(v["blocked_kind"], "trust");
+        assert!(v.get("blockedKind").is_none(), "no camelCase alias exists");
+
+        let clear = SessionInfo {
+            state: AgentState::Idle,
+            blocked_kind: None,
+            ..info
+        };
+        let v = serde_json::to_value(&clear).unwrap();
+        assert_eq!(v["state"], "idle");
+        assert!(v["blocked_kind"].is_null());
+    }
 }

@@ -229,6 +229,8 @@ fn spawn_in_pty(
         } else {
             crate::session::AgentState::Idle
         }),
+        // No viewer is attached yet, so no dialog has been reported.
+        screen_blocked: RwLock::new(None),
         state_since: std::sync::atomic::AtomicU64::new(spawned_at),
         state_seq: Default::default(),
         last_state_ts: Default::default(),
