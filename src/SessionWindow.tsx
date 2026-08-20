@@ -110,6 +110,64 @@ interface PendingNotify {
   sound: string;
 }
 
+// Model/effort injection.
+//
+// The switcher works by typing slash commands into the session's PTY, exactly
+// as a person would. Two things about that are load-bearing, both measured
+// against a live Claude Code v2.1.220 session on 2026-08-20 by driving the PTY
+// over the session WebSocket and reading the rendered screen back.
+//
+// 1. Two commands cannot go out back to back. `/model <alias>\r` immediately
+//    followed by `/effort <level>\r` loses the SECOND command outright — the
+//    CLI never echoes it, never applies it, and does not even leave it in the
+//    composer. Submitting a command evidently takes the input handler out of
+//    play for a beat, and whatever lands in that window is dropped.
+//
+//        gap between the two commands      second command landed
+//           0ms                              0 / 9
+//           5ms                              0 / 6
+//          10ms                              3 / 6   (flaky)
+//          20ms                              6 / 6
+//          30ms                              6 / 6
+//          50ms                              9 / 9
+//         100 / 200 / 400 / 800ms            always
+//
+//    20ms is the smallest reliable value, and it still held 6/6 with the
+//    machine at load average 18 on 10 cores — so the requirement is small and
+//    stable rather than load-dependent. 200ms is a 10x margin on that and
+//    costs at most one barely perceptible pause per apply.
+//
+// 2. The command text and its Enter do NOT need to be split. A single write of
+//    `"/model sonnet\r"` submitted 54/54 times in the same harness; so did
+//    plain prose + `\r`, and so did a write that landed while the CLI was
+//    still booting. A one-shot write is not mistaken for a paste, so one write
+//    per command is both correct and simpler than typing then pressing Enter.
+const INJECT_GAP_MS = 200;
+
+/** Why this session can't be typed into right now, or null when it can.
+ *
+ *  Injecting mid-turn appends free text to whatever Claude is doing, and
+ *  injecting at a dialog answers the dialog — `/model opus` typed into a
+ *  permission prompt. So only states that positively say "the composer is
+ *  free" pass. "unknown" is one of them: it means the hooks aren't installed
+ *  and the backend has no state to report, and the switcher has to keep
+ *  working for those sessions. */
+function injectBlockReason(state: AgentState, ended: boolean): string | null {
+  if (ended) return "This session has ended.";
+  if (state === "working")
+    return "Claude is working — switching models would type into the current turn.";
+  if (state === "blocked")
+    return "Claude is waiting on a prompt — switching models would answer it instead.";
+  return null;
+}
+
+/** An injection sequence in flight. `cancelled` is checked at every step, so a
+ *  timer that has already fired can still be discarded. */
+interface InjectJob {
+  cancelled: boolean;
+  timer: ReturnType<typeof setTimeout> | null;
+}
+
 interface SessionWindowProps {
   /** When set, connection details come from props (embedded in the launcher's
    *  split pane) instead of the window URL. */
@@ -151,9 +209,10 @@ export default function SessionWindow(props: SessionWindowProps = {}) {
   const sidebarRef = useRef<HTMLDivElement>(null);
   const widthRef = useRef(sidebarWidth);
   const [hooksOn, setHooksOn] = useState<boolean | null>(null);
-  // Model switcher: inject `/model <alias>` into this session's PTY. Affects
-  // only the current session; the highlight is optimistic (the CLI owns the
-  // real state, but we don't get a machine-readable confirmation back).
+  // Raw write into this session's PTY — how the model switcher types `/model`
+  // and `/effort` (see injectCommands, which owns the pacing and the gating).
+  // Affects only the current session, and the CLI owns the real state; we get
+  // no machine-readable confirmation back.
   const sendRef = useRef<((data: string) => void) | null>(null);
   // The session's ACTUAL model, read back from the transcript (ground truth).
   // Null until the first assistant turn. Drives the chip so a declined switch
@@ -207,18 +266,80 @@ export default function SessionWindow(props: SessionWindowProps = {}) {
     setPendingEffort((prev) => (m.supported.includes(prev) ? prev : m.defaultEffort));
   }
 
+  // An injected sequence outlives the click that started it, so it has to be
+  // cancellable: a gap timer must never fire into a PTY that has gone away, and
+  // a second Apply must supersede the first instead of interleaving with it.
+  const injectRef = useRef<InjectJob | null>(null);
+  // Read from inside a timer callback, which would otherwise see whatever
+  // `ended` was when the sequence started.
+  const endedRef = useRef(ended);
+  useEffect(() => {
+    endedRef.current = ended;
+  }, [ended]);
+
+  const cancelInject = useCallback(() => {
+    const job = injectRef.current;
+    if (!job) return;
+    job.cancelled = true;
+    if (job.timer !== null) clearTimeout(job.timer);
+    injectRef.current = null;
+  }, []);
+
+  // Closing the tab mid-sequence must not leave a timer holding a send fn.
+  useEffect(() => cancelInject, [cancelInject]);
+
+  /** Type each command into the session, one Enter each, {@link INJECT_GAP_MS}
+   *  apart.
+   *
+   *  Fire-and-forget on purpose. There is nothing to wait for: the `model`
+   *  control message is derived from the transcript and only appears on the
+   *  NEXT assistant turn, so waiting for a readback would hang forever at an
+   *  idle prompt. And nothing is queued: if a command can no longer be
+   *  delivered it is dropped, because applying a model switch minutes later —
+   *  after the user has moved on — is worse than not applying it. */
+  const injectCommands = useCallback(
+    (cmds: string[]) => {
+      cancelInject(); // a second Apply supersedes the first
+      if (cmds.length === 0) return;
+      const job: InjectJob = { cancelled: false, timer: null };
+      injectRef.current = job;
+      const step = (i: number) => {
+        // Cancelled, unmounted, or superseded while we waited out the gap.
+        if (job.cancelled || injectRef.current !== job) return;
+        const send = sendRef.current;
+        // The socket went away or the session died mid-sequence — stop here.
+        if (!send || endedRef.current) {
+          injectRef.current = null;
+          return;
+        }
+        send(`${cmds[i]}\r`);
+        if (i + 1 >= cmds.length) {
+          injectRef.current = null;
+          return;
+        }
+        job.timer = setTimeout(() => step(i + 1), INJECT_GAP_MS);
+      };
+      step(0);
+    },
+    [cancelInject]
+  );
+
   /** Apply the staged model + effort to the session (the "Done" action).
    *  Only sends what changed. Does NOT optimistically mark the chip — the model
    *  updates from the transcript, and the CLI may prompt for confirmation. */
   function applyMenu() {
+    // The Done button is disabled whenever this would block, but the agent can
+    // move between the render that drew it and the click that lands on it — so
+    // re-check, and refuse rather than type into a busy composer. The popover
+    // stays open; its now-disabled button carries the reason.
+    if (injectBlockReason(agentState, ended)) return;
     const alias = pendingModel;
     const m = modelByAlias(alias)!;
     const eff = m.supported.includes(pendingEffort) ? pendingEffort : m.defaultEffort;
-    const send = sendRef.current;
-    if (send && !ended) {
-      if (alias !== aliasForModelId(liveModel)) send(`/model ${alias}\r`);
-      if (eff !== effortByModel[alias]) send(`/effort ${eff}\r`);
-    }
+    const cmds: string[] = [];
+    if (alias !== aliasForModelId(liveModel)) cmds.push(`/model ${alias}`);
+    if (eff !== effortByModel[alias]) cmds.push(`/effort ${eff}`);
+    injectCommands(cmds);
     // Remember the requested effort only to position the slider next time.
     setEffortByModel((prev) => ({ ...prev, [alias]: eff }));
     setMenu(null);
@@ -385,11 +506,14 @@ export default function SessionWindow(props: SessionWindowProps = {}) {
         // Whatever was pending is moot now; the session ending supersedes it.
         clearPending("turn_done");
         clearPending("attention");
+        // Same for a half-sent /model + /effort pair — the PTY is gone, and the
+        // gap timer would otherwise fire into a dead send fn.
+        cancelInject();
         deliverNotify("exit", "Session ended", repo, "Submarine");
         break;
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [cwd, clearPending, deliverNotify, notifyDeferred]);
+  }, [cwd, clearPending, deliverNotify, notifyDeferred, cancelInject]);
 
   // One merged connection/liveness state (replaces the scattered dots + badge).
   // Ended and connection trouble outrank the agent state — a "working" badge on
@@ -702,6 +826,11 @@ export default function SessionWindow(props: SessionWindowProps = {}) {
             const dirty =
               pendingModel !== aliasForModelId(liveModel) ||
               pendingEffort !== (effortByModel[pendingModel] ?? model.defaultEffort);
+            // Prevent, don't fail: if typing into the session right now would
+            // land in the middle of a turn or answer an open dialog, Done is
+            // disabled and says why, rather than firing and corrupting the turn.
+            const blocked = injectBlockReason(agentState, ended);
+            const canApply = dirty && !blocked;
             return (
               <div
                 style={{
@@ -843,10 +972,22 @@ export default function SessionWindow(props: SessionWindowProps = {}) {
                   )}
                 </div>
 
-                <div style={{ fontSize: 10.5, color: T.textFaint, lineHeight: 1.5 }}>
-                  Applies to this session only — <b style={{ color: T.textDim }}>Done</b> sends{" "}
-                  <code style={codeStyle}>/model</code> and <code style={codeStyle}>/effort</code> to
-                  the running CLI.
+                {/* A disabled button with only a tooltip to explain itself is
+                    a dead end, so the reason replaces the hint line too. */}
+                <div
+                  style={{
+                    fontSize: 10.5,
+                    color: blocked ? T.error : T.textFaint,
+                    lineHeight: 1.5,
+                  }}
+                >
+                  {blocked ?? (
+                    <>
+                      Applies to this session only — <b style={{ color: T.textDim }}>Done</b> sends{" "}
+                      <code style={codeStyle}>/model</code> and{" "}
+                      <code style={codeStyle}>/effort</code> to the running CLI.
+                    </>
+                  )}
                 </div>
 
                 {/* Footer: Cancel / Done — nothing switches until Done */}
@@ -877,17 +1018,21 @@ export default function SessionWindow(props: SessionWindowProps = {}) {
                   </button>
                   <button
                     onClick={applyMenu}
-                    disabled={!dirty}
-                    title={dirty ? "Apply model & effort to this session" : "Nothing changed"}
+                    disabled={!canApply}
+                    title={
+                      !dirty
+                        ? "Nothing changed"
+                        : (blocked ?? "Apply model & effort to this session")
+                    }
                     style={{
-                      background: dirty ? T.accent : T.surface2,
+                      background: canApply ? T.accent : T.surface2,
                       border: "none",
                       borderRadius: 8,
-                      color: dirty ? T.accentInk : T.textFaint,
+                      color: canApply ? T.accentInk : T.textFaint,
                       fontSize: 11.5,
                       fontWeight: 600,
                       padding: "6px 16px",
-                      cursor: dirty ? "pointer" : "default",
+                      cursor: canApply ? "pointer" : "default",
                       whiteSpace: "nowrap",
                     }}
                   >
