@@ -530,6 +530,7 @@ dependencies = [
  "axum",
  "dirs 5.0.1",
  "futures-util",
+ "libc",
  "open",
  "parking_lot",
  "portable-pty",

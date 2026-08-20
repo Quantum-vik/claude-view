@@ -34,6 +34,14 @@ open = "5"
 # so an accidental delete in the launcher is recoverable from the Trash.
 trash = "5"
 
+# Liveness check for instance discovery files: `kill(pid, 0)`, to tell a stale
+# file left by a crashed run from one a running instance still owns. Already in
+# the lock file transitively (portable-pty, tokio, …), so a direct dependency
+# costs nothing — and it beats pulling in something like `sysinfo` to answer a
+# single one-syscall question.
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
 [profile.release]
 strip = true
 lto = true

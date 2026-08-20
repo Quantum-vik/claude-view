@@ -81,18 +81,7 @@ fn write_settings(settings: &Value) -> Result<(), String> {
     // silently detaches them from their own config.
     let path = path.canonicalize().unwrap_or(path);
 
-    // Keep a backup of the PRE-modification state. Only create it once (don't
-    // clobber it on a later write, or uninstall would overwrite the original
-    // snapshot with the already-installed state).
-    let backup = path.with_extension("json.claude-view.bak");
-    if path.exists() && !backup.exists() && fs::copy(&path, &backup).is_ok() {
-        // settings.json can hold secrets; keep the backup private.
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            let _ = fs::set_permissions(&backup, fs::Permissions::from_mode(0o600));
-        }
-    }
+    backup_once(&path);
 
     let text = serde_json::to_string_pretty(settings).map_err(|e| e.to_string())?;
 
@@ -107,6 +96,29 @@ fn write_settings(settings: &Value) -> Result<(), String> {
     }
 
     atomic_write(&path, text.as_bytes())
+}
+
+/// Snapshot the PRE-modification state of `path` exactly once — never clobber
+/// an existing backup on a later write, or uninstall would overwrite the
+/// original snapshot with the already-installed state.
+///
+/// Deliberately NOT `fs::copy` + `set_permissions`: settings.json can hold API
+/// keys, and `copy` creates the destination at the umask default (0644), so
+/// there is a window in which any local user can read them — and it happily
+/// writes *through* a symlink planted at the backup path. `write_private`
+/// creates the file 0600 with `O_EXCL` and renames it into place, so it is
+/// never briefly world-readable and never follows a link.
+///
+/// Best effort throughout: failing to take a backup must not block installing
+/// hooks, which is the thing the user actually asked for.
+fn backup_once(path: &Path) {
+    let backup = path.with_extension("json.claude-view.bak");
+    if !path.exists() || backup.exists() {
+        return;
+    }
+    if let Ok(bytes) = fs::read(path) {
+        let _ = crate::instance::write_private(&backup, &bytes);
+    }
 }
 
 /// Write via a sibling temp file + rename, so a crash mid-write can't leave a
@@ -389,6 +401,69 @@ mod tests {
 
         let mode = fs::metadata(&path).unwrap().permissions().mode() & 0o777;
         assert_eq!(mode, 0o600, "must not widen a locked-down settings.json");
+    }
+
+    /// The backup holds a verbatim copy of a file that can contain API keys.
+    /// `fs::copy` would create it at the umask default and only then chmod it,
+    /// leaving a window in which any local user can read them.
+    #[cfg(unix)]
+    #[test]
+    fn the_settings_backup_is_never_briefly_world_readable() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = scratch("backup-perms");
+        let path = dir.join("settings.json");
+        fs::write(&path, r#"{"env":{"ANTHROPIC_API_KEY":"sk-secret"}}"#).unwrap();
+
+        backup_once(&path);
+
+        let backup = dir.join("settings.json.claude-view.bak");
+        let mode = fs::metadata(&backup).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600, "backup must never be group/world readable");
+        assert_eq!(
+            fs::read_to_string(&backup).unwrap(),
+            r#"{"env":{"ANTHROPIC_API_KEY":"sk-secret"}}"#
+        );
+    }
+
+    /// A symlink planted at the backup path would redirect a verbatim copy of
+    /// settings.json anywhere the attacker likes. `fs::copy` follows it.
+    #[cfg(unix)]
+    #[test]
+    fn the_settings_backup_does_not_follow_a_planted_symlink() {
+        let dir = scratch("backup-symlink");
+        let path = dir.join("settings.json");
+        fs::write(&path, "{\"a\":1}").unwrap();
+        let victim = dir.join("victim");
+        fs::write(&victim, "untouched").unwrap();
+        std::os::unix::fs::symlink(&victim, dir.join("settings.json.claude-view.bak")).unwrap();
+
+        backup_once(&path);
+
+        assert_eq!(fs::read_to_string(&victim).unwrap(), "untouched");
+    }
+
+    /// The snapshot must stay the PRE-install state: re-running install (which
+    /// main() does on every launch) must not overwrite it with the already-
+    /// installed settings, or uninstall would restore the wrong thing.
+    #[test]
+    fn the_settings_backup_is_only_taken_once() {
+        let dir = scratch("backup-once");
+        let path = dir.join("settings.json");
+        fs::write(&path, "original").unwrap();
+        backup_once(&path);
+
+        fs::write(&path, "after install").unwrap();
+        backup_once(&path);
+
+        let backup = dir.join("settings.json.claude-view.bak");
+        assert_eq!(fs::read_to_string(&backup).unwrap(), "original");
+    }
+
+    #[test]
+    fn no_backup_is_taken_when_there_is_nothing_to_back_up() {
+        let dir = scratch("backup-none");
+        backup_once(&dir.join("settings.json"));
+        assert!(!dir.join("settings.json.claude-view.bak").exists());
     }
 
     /// `entry_is_ours` drives uninstall — it must not claim a hook we didn't

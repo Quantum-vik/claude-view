@@ -6,16 +6,36 @@
 # claude sessions are unaffected.
 [ -n "$CLAUDE_VIEW_ID" ] || exit 0
 [ -n "$CLAUDE_VIEW_PORT" ] || exit 0
+# The port is injected by the app and is always an integer; refuse anything else
+# rather than interpolate it into a path below.
+case "$CLAUDE_VIEW_PORT" in *[!0-9]*) exit 0 ;; esac
 
 # The auth token is NOT in the environment (it would leak to every child
 # process). Read it from the 0600 discovery file the app writes on startup.
-INSTANCE="$HOME/.claude/claude-view/instance.json"
-[ -f "$INSTANCE" ] || exit 0
+#
+# Preferred: instances/<port>.json — the filename IS the port, so two running
+# apps can never clobber each other's file and "does this file belong to the app
+# that owns my session?" is answered by the path itself.
+#
+# Fallback: the legacy single instance.json, for an app older than the per-port
+# layout. That one file is shared by every instance, so it has to be checked
+# against this session's port explicitly.
+#
+# No jq dependency anywhere — values are extracted with sed.
+DIR="$HOME/.claude/claude-view"
+PER_PORT="$DIR/instances/${CLAUDE_VIEW_PORT}.json"
+LEGACY="$DIR/instance.json"
 
-# Only trust the token if the discovery file belongs to the app that owns this
-# session (same port). No jq dependency — extract with sed.
-IPORT=$(sed -n 's/.*"port":[[:space:]]*\([0-9][0-9]*\).*/\1/p' "$INSTANCE")
-[ "$IPORT" = "$CLAUDE_VIEW_PORT" ] || exit 0
+if [ -f "$PER_PORT" ]; then
+  INSTANCE="$PER_PORT"
+elif [ -f "$LEGACY" ]; then
+  INSTANCE="$LEGACY"
+  IPORT=$(sed -n 's/.*"port":[[:space:]]*\([0-9][0-9]*\).*/\1/p' "$INSTANCE")
+  [ "$IPORT" = "$CLAUDE_VIEW_PORT" ] || exit 0
+else
+  exit 0
+fi
+
 TOKEN=$(sed -n 's/.*"token":[[:space:]]*"\([^"]*\)".*/\1/p' "$INSTANCE")
 [ -n "$TOKEN" ] || exit 0
 

@@ -3,6 +3,7 @@
 
 mod git;
 mod hooks_install;
+mod instance;
 mod past_sessions;
 mod pty;
 mod server;
@@ -557,24 +558,19 @@ fn main() {
         .expect("failed to set listener non-blocking");
     let port = listener.local_addr().expect("listener addr").port();
 
-    // Discovery file so local scripts (e.g. scripts/demo-timeline.sh) can
-    // find this instance without token/port coordination. Localhost-only
-    // server; file is user-readable only.
-    if let Some(home) = dirs::home_dir() {
-        let dir = home.join(".claude").join("claude-view");
-        let _ = std::fs::create_dir_all(&dir);
-        let path = dir.join("instance.json");
-        let info = serde_json::json!({
-            "port": port,
-            "token": token,
-            "pid": std::process::id(),
-        });
-        if std::fs::write(&path, info.to_string()).is_ok() {
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::PermissionsExt;
-                let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600));
-            }
+    // Discovery files so the hook bridge (and local scripts like
+    // scripts/demo-timeline.sh) can find this instance without token/port
+    // coordination. Localhost-only server; the files are owner-readable only
+    // because the token in them grants full control of every session.
+    //
+    // Reap first: RunEvent::Exit never fires on a crash or `kill -9`, so a
+    // previous run's file can still be sitting there advertising a dead pid.
+    if let Some(root) = instance::default_root() {
+        instance::reap_stale(&root);
+        if let Err(e) = instance::publish(&root, port, &token, std::process::id()) {
+            // Not fatal — the app still runs, but hooks can't authenticate, so
+            // say so instead of leaving an empty timeline unexplained.
+            eprintln!("claude-view: could not publish instance discovery file: {e}");
         }
     }
 
@@ -630,18 +626,16 @@ fn main() {
                 code: None, api, ..
             } => api.prevent_exit(),
             // Actual shutdown: kill every child so no `claude` is orphaned, and
-            // remove the instance discovery file.
+            // remove OUR discovery files — matched by pid, never blindly. A
+            // second instance may be running and own the legacy instance.json;
+            // deleting it would break that instance's hook bridge.
             tauri::RunEvent::Exit => {
                 let state = app.state::<AppState>();
                 for session in state.registry.all() {
                     session.kill();
                 }
-                if let Some(home) = dirs::home_dir() {
-                    let _ = std::fs::remove_file(
-                        home.join(".claude")
-                            .join("claude-view")
-                            .join("instance.json"),
-                    );
+                if let Some(root) = instance::default_root() {
+                    instance::cleanup(&root, std::process::id());
                 }
             }
             _ => {}
