@@ -1,0 +1,96 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  ci:
+    name: build, lint, test (macOS)
+    runs-on: macos-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Setup Node
+        uses: actions/setup-node@v7
+        with:
+          node-version: 20
+          cache: npm
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+
+      - name: Install just
+        uses: extractions/setup-just@v4
+
+      # Parity with local dev: this runs exactly what `just ci` runs on a
+      # developer's machine (build the frontend, then lint, then test).
+      - name: Run CI pipeline
+        run: just ci
+
+  windows-check:
+    name: cargo check (Windows)
+    runs-on: windows-latest
+    # claude-view is not macOS-only: src-tauri/src/hooks_install.rs embeds a
+    # PowerShell bridge script and builds a
+    # `powershell -NoProfile -ExecutionPolicy Bypass -File …` command under
+    # #[cfg(windows)], and src-tauri/src/pty.rs has several more
+    # #[cfg(windows)] branches (including inside its own test module). A
+    # macOS-only workflow would mean none of that code is ever compiled
+    # again, and it would silently rot. This job intentionally does not run
+    # the test suite (that stays macOS-only, see the `ci` job above) — it
+    # just proves the Windows-only code paths still compile, including
+    # test-only ones (hence `--all-targets`).
+    #
+    # Caveat: this job could not be exercised on a real Windows runner while
+    # authoring it (no Windows machine was available). Tauri v2 on
+    # windows-latest is generally expected to work out of the box — the
+    # runner image ships the MSVC toolchain, the Windows SDK, and a
+    # preinstalled WebView2 — but this is genuinely the first time this
+    # project has been built on Windows in CI, so a first-run failure here
+    # would be a real (and useful) finding, not necessarily a workflow bug.
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Setup Node
+        uses: actions/setup-node@v7
+        with:
+          node-version: 20
+          cache: npm
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+
+      # Same prerequisite as the `just build` recipe: tauri.conf.json points
+      # frontendDist at ../dist (gitignored), and generate_context!() reads
+      # it when src-tauri compiles.
+      - name: Build frontend
+        run: |
+          npm ci
+          npm run build
+
+      - name: cargo check
+        working-directory: src-tauri
+        run: cargo check --all-targets --locked

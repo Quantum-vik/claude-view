@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::fs;
 use std::io::{BufRead, BufReader, Read, Seek, SeekFrom};
 use std::path::Path;
@@ -5,6 +6,7 @@ use std::path::Path;
 use serde::Serialize;
 use serde_json::Value;
 
+use crate::git::{self, RepoInfo};
 use crate::transcript::usage_from;
 
 /// A session found on disk in ~/.claude/projects, resumable via
@@ -22,6 +24,39 @@ pub struct PastSession {
     /// assistant turn). None if no usage found in the tail.
     #[serde(rename = "contextTokens")]
     pub context_tokens: Option<u64>,
+    /// Grouping key: the repo's git *common* dir, shared by a checkout and all
+    /// of its linked worktrees, so four worktrees of one repo collapse into one
+    /// launcher group. `None` when the cwd is gone from disk (routine for a past
+    /// session) or was never a repo — the frontend then groups by `cwd`.
+    #[serde(rename = "repoKey")]
+    pub repo_key: Option<String>,
+    #[serde(rename = "repoName")]
+    pub repo_name: Option<String>,
+    /// This checkout's own directory name; equals `repo_name` for the main copy.
+    #[serde(rename = "checkoutName")]
+    pub checkout_name: Option<String>,
+    #[serde(rename = "isLinkedWorktree")]
+    pub is_linked_worktree: bool,
+}
+
+/// Per-`list()` memo of repo identity, keyed by the raw cwd string.
+///
+/// Deliberately *not* a global: a cwd never changes, but the filesystem does —
+/// a process-lifetime cache would keep reporting a repo as absent after a
+/// `git worktree add` recreated it.
+type RepoCache = HashMap<String, Option<RepoInfo>>;
+
+/// Repo identity for `cwd`, probing the filesystem at most once per distinct
+/// cwd within a scan. Many transcripts share one cwd, and the `None` results
+/// are the most repeated of all (deleted worktrees accumulate transcripts), so
+/// misses are memoized too.
+fn repo_ident(cwd: &str, cache: &mut RepoCache) -> Option<RepoInfo> {
+    if let Some(hit) = cache.get(cwd) {
+        return hit.clone();
+    }
+    let info = git::discover(Path::new(cwd));
+    cache.insert(cwd.to_string(), info.clone());
+    info
 }
 
 /// Scan every project transcript and return sessions newest-first. Only the
@@ -33,6 +68,7 @@ pub fn list() -> Result<Vec<PastSession>, String> {
         .join(".claude")
         .join("projects");
     let mut out = Vec::new();
+    let mut repos: RepoCache = HashMap::new();
     let Ok(project_dirs) = fs::read_dir(&projects) else {
         return Ok(out); // no projects dir -> no sessions
     };
@@ -73,6 +109,7 @@ pub fn list() -> Result<Vec<PastSession>, String> {
             // the tail model for both the chip and the meter's window, since a
             // session may have switched models (e.g. fable → opus).
             let (context_tokens, tail_model) = scan_tail(&path);
+            let repo = repo_ident(&cwd, &mut repos);
             out.push(PastSession {
                 session_id: stem.to_string(),
                 cwd,
@@ -80,11 +117,17 @@ pub fn list() -> Result<Vec<PastSession>, String> {
                 preview,
                 model: tail_model.or(head_model),
                 context_tokens,
+                // No `branch` here on purpose: a past session's checkout has
+                // moved on, so HEAD would show a branch it never ran on.
+                is_linked_worktree: repo.as_ref().is_some_and(|r| r.is_linked_worktree),
+                repo_key: repo.as_ref().map(|r| r.repo_key.clone()),
+                repo_name: repo.as_ref().map(|r| r.repo_name.clone()),
+                checkout_name: repo.map(|r| r.checkout_name),
             });
         }
     }
 
-    out.sort_by(|a, b| b.modified_ms.cmp(&a.modified_ms));
+    out.sort_by_key(|s| std::cmp::Reverse(s.modified_ms));
     Ok(out)
 }
 
@@ -111,7 +154,8 @@ pub fn delete(session_id: &str) -> Result<(), String> {
     for project in project_dirs.flatten() {
         let candidate = project.path().join(&file_name);
         if candidate.is_file() {
-            return trash::delete(&candidate).map_err(|e| format!("failed to trash transcript: {e}"));
+            return trash::delete(&candidate)
+                .map_err(|e| format!("failed to trash transcript: {e}"));
         }
     }
     Err("session transcript not found".into())
@@ -230,4 +274,51 @@ fn truncate(s: &str, max_chars: usize) -> String {
         out.push('…');
     }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A path that cannot exist, so `git::discover` is guaranteed to miss.
+    /// (`discover` canonicalizes first, so no ancestor `.git` can rescue it.)
+    fn phantom_cwd(tag: &str) -> String {
+        std::env::temp_dir()
+            .join(format!("cv-past-{}-{tag}-gone", std::process::id()))
+            .to_string_lossy()
+            .into_owned()
+    }
+
+    /// The memo is consulted *before* the filesystem: a seeded entry wins even
+    /// though probing this cwd for real would come back empty.
+    #[test]
+    fn cache_hit_short_circuits_the_probe() {
+        let cwd = phantom_cwd("hit");
+        let seeded = RepoInfo {
+            repo_key: "/code/app/.git".into(),
+            repo_name: "app".into(),
+            checkout_name: "app-fix".into(),
+            is_linked_worktree: true,
+            git_dir: "/code/app/.git/worktrees/app-fix".into(),
+        };
+        let mut cache: RepoCache = HashMap::new();
+        cache.insert(cwd.clone(), Some(seeded.clone()));
+
+        assert_eq!(git::discover(Path::new(&cwd)), None, "cwd must be absent");
+        assert_eq!(repo_ident(&cwd, &mut cache), Some(seeded));
+        assert_eq!(cache.len(), 1, "a hit must not add an entry");
+    }
+
+    /// Deleted worktrees are the cwd that repeats most across transcripts, so
+    /// the miss has to be memoized too — otherwise it re-probes on every row.
+    #[test]
+    fn missing_directory_memoizes_none() {
+        let cwd = phantom_cwd("miss");
+        let mut cache: RepoCache = HashMap::new();
+
+        assert_eq!(repo_ident(&cwd, &mut cache), None);
+        assert_eq!(cache.get(&cwd), Some(&None), "the miss must be recorded");
+        assert_eq!(repo_ident(&cwd, &mut cache), None);
+        assert_eq!(cache.len(), 1);
+    }
 }

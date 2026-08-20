@@ -196,11 +196,15 @@ fn spawn_in_pty(
         .take_writer()
         .map_err(|e| format!("pty writer: {e}"))?;
 
-    let (bytes_tx, _) = broadcast::channel::<Vec<u8>>(8192);
+    // 256 slots, not 8192: every slot holds an owned Vec<u8> of up to 8 KiB, so
+    // the old ring could pin ~64 MiB per session. A viewer that falls behind is
+    // resynced from scrollback anyway, so a deeper ring only delays that.
+    let (bytes_tx, _) = broadcast::channel::<Vec<u8>>(256);
     let (control_tx, _) = broadcast::channel::<String>(256);
     let (writer_tx, writer_rx) = std::sync::mpsc::channel::<Vec<u8>>();
 
     let spawned_at = crate::session::now_ms();
+    let repo = crate::git::discover(std::path::Path::new(&cwd));
     let session = Arc::new(Session {
         viewer_id,
         cwd,
@@ -218,6 +222,18 @@ fn spawn_in_pty(
         is_terminal,
         ended: Default::default(),
         exit_code: RwLock::new(None),
+        // A terminal never receives hooks, so it stays Unknown for life. A
+        // claude session starts Idle: the process is up but no turn has begun.
+        state: RwLock::new(if is_terminal {
+            crate::session::AgentState::Unknown
+        } else {
+            crate::session::AgentState::Idle
+        }),
+        state_since: std::sync::atomic::AtomicU64::new(spawned_at),
+        state_seq: Default::default(),
+        last_state_ts: Default::default(),
+        timeline_elided: Default::default(),
+        repo,
     });
     registry.insert(session.clone());
 
@@ -287,6 +303,15 @@ pub fn spawn_session(
         .filter(|s| !s.is_empty())
         .map(str::to_string);
     if let Some(id) = &resume_id {
+        // Two processes resuming one conversation both append to the same
+        // transcript JSONL and corrupt it. Registry::insert indexes the seeded
+        // id, so this check sees resumes that haven't bound a hook yet.
+        if registry.has_session_id(id) {
+            return Err(format!(
+                "session {} is already open — focus it instead of resuming it twice",
+                &id[..id.len().min(8)]
+            ));
+        }
         cmd.arg("--resume");
         cmd.arg(id);
     } else if continue_last {
@@ -308,11 +333,8 @@ pub fn spawn_session(
     // history; deduped against hook events by tool-use id. Holds only a Weak ref
     // so it never keeps an ended/removed session alive.
     let weak = Arc::downgrade(&session);
-    let mut tailer = crate::transcript::Tailer::new(
-        cwd,
-        session.session_id.read().clone(),
-        session.spawned_at,
-    );
+    let mut tailer =
+        crate::transcript::Tailer::new(cwd, session.session_id.read().clone(), session.spawned_at);
     std::thread::spawn(move || {
         let mut post_end_polls = 0;
         loop {
@@ -482,7 +504,10 @@ mod tests {
     fn terminal_kind_parse_defaults_to_shell() {
         assert!(matches!(TerminalKind::parse("tmux"), TerminalKind::Tmux));
         assert!(matches!(TerminalKind::parse("shell"), TerminalKind::Shell));
-        assert!(matches!(TerminalKind::parse("nonsense"), TerminalKind::Shell));
+        assert!(matches!(
+            TerminalKind::parse("nonsense"),
+            TerminalKind::Shell
+        ));
         assert!(matches!(TerminalKind::parse(""), TerminalKind::Shell));
     }
 }

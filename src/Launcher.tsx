@@ -27,12 +27,31 @@ function maxListWidth(): number {
 const TABS_KEY = "cv.tabs";
 const ACTIVE_TAB_KEY = "cv.activeTab";
 
+/** Hook-derived agent state (src-tauri/src/session.rs — `AgentState`). Every
+ *  transition comes from Claude Code's own hooks, so this is ground truth, not
+ *  a heuristic. Plain terminals never emit hooks and stay "unknown" forever. */
+type AgentState = "unknown" | "idle" | "working" | "blocked";
+
 interface SessionInfo {
   viewer_id: string;
   session_id: string | null;
   cwd: string;
   ended: boolean;
   is_terminal: boolean;
+  state: AgentState;
+  /** Bumped on every real transition. */
+  state_seq: number;
+  /** Epoch ms the current state was entered. */
+  state_since: number;
+  /** git COMMON dir — identical for a repo and all of its worktrees. */
+  repo_key: string | null;
+  repo_name: string | null;
+  /** Checkout this session sits in ("app-fix" for a worktree, == repo_name for
+   *  the main copy). */
+  checkout_name: string | null;
+  is_linked_worktree: boolean;
+  /** null for a detached / reftable HEAD. */
+  branch: string | null;
 }
 
 interface PastSession {
@@ -42,6 +61,14 @@ interface PastSession {
   preview: string | null;
   model: string | null;
   contextTokens: number | null;
+  // NOTE: camelCase on purpose — PastSession carries `#[serde(rename)]` for
+  // these (matching modifiedMs / contextTokens), while the live SessionInfo
+  // above has no renames and is genuinely snake_case. Optional here so an
+  // older backend simply falls back to cwd grouping.
+  repoKey?: string | null;
+  repoName?: string | null;
+  checkoutName?: string | null;
+  isLinkedWorktree?: boolean;
 }
 
 interface ConnInfo {
@@ -227,6 +254,84 @@ function relativeTime(ms: number): string {
   return new Date(ms).toLocaleDateString();
 }
 
+/** Compact age of a state change — "40s" / "2m" / "3h" / "5d". Empty string
+ *  when the timestamp is missing, so callers can drop the suffix entirely. */
+function relativeAge(ms: number): string {
+  if (!ms || ms <= 0) return "";
+  const diff = Date.now() - ms;
+  if (diff < 0) return "0s"; // clock skew
+  const sec = Math.floor(diff / 1000);
+  if (sec < 60) return `${sec}s`;
+  const min = Math.floor(sec / 60);
+  if (min < 60) return `${min}m`;
+  const h = Math.floor(min / 60);
+  if (h < 24) return `${h}h`;
+  return `${Math.floor(h / 24)}d`;
+}
+
+/** Dot color for a session. `ended` outranks the agent state — a finished
+ *  session is grey whatever it was doing when it stopped. */
+function stateColor(s: SessionInfo): string {
+  if (s.ended) return T.idle;
+  if (s.state === "blocked") return T.error;
+  if (s.state === "working") return T.running;
+  if (s.state === "idle") return T.success;
+  return T.idle; // unknown — hooks off, or a plain terminal
+}
+
+/** What the dot means, for its tooltip: "blocked · 2m". */
+function stateTitle(s: SessionInfo): string {
+  if (s.ended) return "ended";
+  if (s.is_terminal) return "terminal — no hook events";
+  if (s.state === "blocked" || s.state === "working") {
+    const age = relativeAge(s.state_since);
+    return age ? `${s.state} · ${age}` : s.state;
+  }
+  if (s.state === "idle") return "idle — waiting on you";
+  return "unknown — no hook events yet";
+}
+
+interface StateCounts {
+  blocked: number;
+  working: number;
+  idle: number;
+  unknown: number;
+  /** Every live session, terminals included — what the "N live" fallback counts. */
+  total: number;
+}
+
+/** Triage aggregate over live sessions. Ended sessions drop out; plain
+ *  terminals are counted in `total` but never in a state bucket — they receive
+ *  no hooks, so counting them would drown the numbers in "unknown". */
+function countStates(list: SessionInfo[]): StateCounts {
+  const c: StateCounts = { blocked: 0, working: 0, idle: 0, unknown: 0, total: 0 };
+  for (const s of list) {
+    if (s.ended) continue;
+    c.total++;
+    if (s.is_terminal) continue;
+    if (s.state === "blocked") c.blocked++;
+    else if (s.state === "working") c.working++;
+    else if (s.state === "idle") c.idle++;
+    else c.unknown++;
+  }
+  return c;
+}
+
+/** "2 blocked · 1 working" — falls back to "N live" when nothing wants you. */
+function stateSummary(c: StateCounts): string {
+  const parts: string[] = [];
+  if (c.blocked) parts.push(`${c.blocked} blocked`);
+  if (c.working) parts.push(`${c.working} working`);
+  return parts.length ? parts.join(" · ") : `${c.total} live`;
+}
+
+/** Most urgent state present: blocked > working > idle. */
+function summaryColor(c: StateCounts): string {
+  if (c.blocked) return T.error;
+  if (c.working) return T.running;
+  return T.success;
+}
+
 /** "claude-opus-4-8" / "claude-haiku-4-5-20251001" -> "opus 4.8" / "haiku 4.5" */
 function prettyModel(model: string): string {
   const parts = model.replace(/^claude-/, "").replace(/-\d{8}$/, "").split("-");
@@ -265,17 +370,22 @@ const TabPane = memo(function TabPane({
   token,
   cwd,
   isTerminal,
+  isVisible,
 }: {
   vid: string;
   port: string;
   token: string;
   cwd: string;
   isTerminal: boolean;
+  /** Whether this tab currently occupies a pane slot. Every tab shares one
+   *  document, so `document.hasFocus()` can't tell a background tab apart —
+   *  SessionWindow needs this to target completion notifications. */
+  isVisible: boolean;
 }) {
   return isTerminal ? (
     <TerminalWindow vid={vid} port={port} token={token} cwd={cwd} embedded />
   ) : (
-    <SessionWindow vid={vid} port={port} token={token} cwd={cwd} embedded />
+    <SessionWindow vid={vid} port={port} token={token} cwd={cwd} embedded isVisible={isVisible} />
   );
 });
 
@@ -330,6 +440,49 @@ function SectionRow({
       {pill}
       <div style={{ flex: 1, height: 1, background: T.divider }} />
       {right}
+    </div>
+  );
+}
+
+/** Header above a repo that holds more than one live session: the repo name
+ *  plus that repo's own triage aggregate, so a busy repo reads at a glance.
+ *  A lone session never gets one — a header per card is pure chrome. */
+function RepoHeader({
+  name,
+  counts,
+  title,
+}: {
+  name: string;
+  counts: StateCounts;
+  title?: string;
+}) {
+  return (
+    <div
+      title={title}
+      style={{ display: "flex", alignItems: "center", gap: 8, minWidth: 0, padding: "2px 2px 0" }}
+    >
+      <span
+        style={{
+          fontFamily: T.serif,
+          fontSize: 12.5,
+          fontWeight: 600,
+          color: T.textDim,
+          flexShrink: 0,
+        }}
+      >
+        {name}
+      </span>
+      <span
+        style={{
+          fontSize: 10.5,
+          color: summaryColor(counts),
+          whiteSpace: "nowrap",
+          flexShrink: 0,
+        }}
+      >
+        {stateSummary(counts)}
+      </span>
+      <div style={{ flex: 1, height: 1, background: T.divider }} />
     </div>
   );
 }
@@ -848,7 +1001,14 @@ export default function Launcher() {
     setHooksBusy(false);
   }
 
-  // Group past sessions by directory; groups ordered by most recent activity.
+  // Group past sessions by repo (a repo and all its worktrees share one
+  // `repo_key`), falling back to the raw cwd when the scanner didn't resolve
+  // one. Groups are ordered by most recent activity.
+  //
+  // The key is NOT a launchable path — `repo_key` is a .git common dir — so
+  // every consumer (`pageCounts`, `collapsedSections`, `handleGroupScroll`)
+  // keys off it, while the header's path/label/launch buttons use the group's
+  // most recent cwd instead.
   const grouped = useMemo(() => {
     // Sessions with no extractable prompt (empty or unlabeled transcripts)
     // aren't worth resuming — hide them.
@@ -864,9 +1024,10 @@ export default function Launcher() {
       : withPrompt;
     const map = new Map<string, PastSession[]>();
     for (const s of filtered) {
-      const list = map.get(s.cwd) ?? [];
+      const key = s.repoKey ?? s.cwd;
+      const list = map.get(key) ?? [];
       list.push(s);
-      map.set(s.cwd, list);
+      map.set(key, list);
     }
     // `past` is newest-first, so each group's first element is its newest
     // and insertion order ranks groups by recency.
@@ -878,15 +1039,32 @@ export default function Launcher() {
   }, [past, filter, sortBy]);
 
   const activeLive = sessions.filter((s) => !s.ended).length;
+  // Triage aggregate for the section pill — derived from `sessions` on every
+  // render rather than stored, so it can never drift from the 2s poll.
+  const liveCounts = useMemo(() => countStates(sessions), [sessions]);
+  // Live sessions bucketed by repo: four agents on four worktrees of one repo
+  // belong together, not scattered through a flat list of unrelated paths.
+  // Insertion order preserves the backend's sort both across and within groups.
+  const liveGroups = useMemo(() => {
+    const map = new Map<string, SessionInfo[]>();
+    for (const s of sessions) {
+      const key = s.repo_key ?? s.cwd;
+      const list = map.get(key) ?? [];
+      list.push(s);
+      map.set(key, list);
+    }
+    return [...map.entries()];
+  }, [sessions]);
   // Busiest repo's session count — used to scale each group's usage bar.
   const maxGroupCount = Math.max(1, ...grouped.map(([, l]) => l.length));
 
-  function handleGroupScroll(dir: string, total: number, el: HTMLDivElement) {
+  /** `key` is the group key from `grouped` (a repo_key or a cwd) — never a path. */
+  function handleGroupScroll(key: string, total: number, el: HTMLDivElement) {
     if (el.scrollTop + el.clientHeight >= el.scrollHeight - 40) {
       setPageCounts((prev) => {
-        const current = prev[dir] ?? PAGE_SIZE;
+        const current = prev[key] ?? PAGE_SIZE;
         if (current >= total) return prev;
-        return { ...prev, [dir]: current + PAGE_SIZE };
+        return { ...prev, [key]: current + PAGE_SIZE };
       });
     }
   }
@@ -926,6 +1104,100 @@ export default function Launcher() {
         lastPastJson.current = "";
       })
       .catch((err) => setDeleteError(`Couldn't delete session: ${String(err)}`));
+  }
+
+  /** One live-session card. Cards inside a repo group label themselves by
+   *  checkout instead of repeating the repo name that's already in the header. */
+  function liveCard(s: SessionInfo, inGroup: boolean) {
+    const selected = activeVid === s.viewer_id;
+    const label = (inGroup ? s.checkout_name : null) ?? repoName(s.cwd);
+    return (
+      <div
+        key={s.viewer_id}
+        className="cv-card"
+        onClick={() => handleFocus(s)}
+        title={embedMode ? "Open as a tab" : "Focus the session window"}
+        style={{
+          background: T.surface1,
+          border: `1px solid ${selected ? T.accentBorder : T.border}`,
+          borderRadius: 11,
+          padding: "13px 16px",
+          display: "flex",
+          alignItems: "center",
+          gap: 13,
+          cursor: "pointer",
+        }}
+      >
+        <span
+          title={stateTitle(s)}
+          style={{
+            width: 9,
+            height: 9,
+            borderRadius: "50%",
+            background: stateColor(s),
+            flexShrink: 0,
+            // One moving dot is a focus cue; ten would be noise — only the
+            // selected session pulses, exactly as before.
+            animation:
+              !s.ended && selected ? "pulseDot 1.6s ease-in-out infinite" : undefined,
+          }}
+        />
+        <div style={{ flex: 1, overflow: "hidden" }}>
+          <div style={{ display: "flex", alignItems: "center", gap: 7, minWidth: 0 }}>
+            <span
+              style={{
+                fontFamily: T.serif,
+                fontSize: 15,
+                fontWeight: 600,
+                color: T.text,
+                overflow: "hidden",
+                textOverflow: "ellipsis",
+                whiteSpace: "nowrap",
+              }}
+            >
+              {s.is_terminal && (
+                <span style={{ fontFamily: T.mono, fontSize: 12, color: T.path }}>
+                  ❯{" "}
+                </span>
+              )}
+              {label}
+            </span>
+            {/* Detached / reftable HEAD renders no chip at all — a "detached"
+                placeholder would be noise on every card that has one. */}
+            {s.branch && (
+              <span style={chipStyle} title={`On branch ${s.branch}`}>
+                ⑂ {s.branch}
+              </span>
+            )}
+            {s.is_linked_worktree && (
+              <span style={worktreeChipStyle} title="Linked git worktree">
+                worktree
+              </span>
+            )}
+          </div>
+          <div style={{ ...pathStyle, marginTop: 3 }} title={s.cwd}>
+            {prettyParent(s.cwd)}/{repoName(s.cwd)}
+            {s.session_id ? (
+              <span style={{ color: T.textFaint }}> · #{s.session_id.slice(0, 8)}</span>
+            ) : (
+              <span style={{ color: T.textFaint }}> · id pending</span>
+            )}
+            {s.ended && <span style={{ color: T.error }}> · ended</span>}
+          </div>
+        </div>
+        {!s.ended && (
+          <button
+            onClick={(e) => {
+              e.stopPropagation();
+              handleFocus(s);
+            }}
+            style={resumeBtnStyle}
+          >
+            {embedMode ? "Open" : "Focus"}
+          </button>
+        )}
+      </div>
+    );
   }
 
   const listColumn = (
@@ -1108,14 +1380,19 @@ export default function Launcher() {
             pill={
               activeLive > 0 ? (
                 <span
+                  title={
+                    `${liveCounts.total} live · ${liveCounts.blocked} blocked · ` +
+                    `${liveCounts.working} working · ${liveCounts.idle} idle` +
+                    (liveCounts.unknown ? ` · ${liveCounts.unknown} unknown` : "")
+                  }
                   style={{
                     display: "flex",
                     alignItems: "center",
                     gap: 5,
                     fontSize: 10.5,
-                    color: T.success,
-                    background: T.successSoft,
-                    border: `1px solid ${T.successBorder}`,
+                    color: summaryColor(liveCounts),
+                    background: tint(summaryColor(liveCounts), 0.1),
+                    border: `1px solid ${tint(summaryColor(liveCounts), 0.35)}`,
                     borderRadius: 999,
                     padding: "2px 9px",
                     whiteSpace: "nowrap",
@@ -1128,11 +1405,11 @@ export default function Launcher() {
                       width: 6,
                       height: 6,
                       borderRadius: "50%",
-                      background: T.success,
+                      background: summaryColor(liveCounts),
                       animation: "pulseDot 1.6s ease-in-out infinite",
                     }}
                   />
-                  {activeLive} live
+                  {stateSummary(liveCounts)}
                 </span>
               ) : undefined
             }
@@ -1152,78 +1429,25 @@ export default function Launcher() {
               </p>
             ) : (
               <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
-                {sessions.map((s) => {
-                  const selected = activeVid === s.viewer_id;
-                  return (
+                {/* Grouped by repo — a repo and all of its worktrees share one
+                    `repo_key`. A lone session renders flat, with no header. */}
+                {liveGroups.map(([key, list]) =>
+                  list.length < 2 ? (
+                    liveCard(list[0], false)
+                  ) : (
                     <div
-                      key={s.viewer_id}
-                      className="cv-card"
-                      onClick={() => handleFocus(s)}
-                      title={embedMode ? "Open as a tab" : "Focus the session window"}
-                      style={{
-                        background: T.surface1,
-                        border: `1px solid ${selected ? T.accentBorder : T.border}`,
-                        borderRadius: 11,
-                        padding: "13px 16px",
-                        display: "flex",
-                        alignItems: "center",
-                        gap: 13,
-                        cursor: "pointer",
-                      }}
+                      key={key}
+                      style={{ display: "flex", flexDirection: "column", gap: 7 }}
                     >
-                      <span
-                        style={{
-                          width: 9,
-                          height: 9,
-                          borderRadius: "50%",
-                          background: s.ended ? T.idle : T.success,
-                          flexShrink: 0,
-                          animation:
-                            !s.ended && selected
-                              ? "pulseDot 1.6s ease-in-out infinite"
-                              : undefined,
-                        }}
+                      <RepoHeader
+                        name={list[0].repo_name ?? repoName(key)}
+                        counts={countStates(list)}
+                        title={key}
                       />
-                      <div style={{ flex: 1, overflow: "hidden" }}>
-                        <div
-                          style={{
-                            fontFamily: T.serif,
-                            fontSize: 15,
-                            fontWeight: 600,
-                            color: T.text,
-                          }}
-                        >
-                          {s.is_terminal && (
-                            <span style={{ fontFamily: T.mono, fontSize: 12, color: T.path }}>
-                              ❯{" "}
-                            </span>
-                          )}
-                          {repoName(s.cwd)}
-                        </div>
-                        <div style={{ ...pathStyle, marginTop: 3 }} title={s.cwd}>
-                          {prettyParent(s.cwd)}/{repoName(s.cwd)}
-                          {s.session_id ? (
-                            <span style={{ color: T.textFaint }}> · #{s.session_id.slice(0, 8)}</span>
-                          ) : (
-                            <span style={{ color: T.textFaint }}> · id pending</span>
-                          )}
-                          {s.ended && <span style={{ color: T.error }}> · ended</span>}
-                        </div>
-                      </div>
-                      {!s.ended && (
-                        <button
-                          onClick={(e) => {
-                            e.stopPropagation();
-                            handleFocus(s);
-                          }}
-                          style={resumeBtnStyle}
-                        >
-                          {embedMode ? "Open" : "Focus"}
-                        </button>
-                      )}
+                      {list.map((s) => liveCard(s, true))}
                     </div>
-                  );
-                })}
+                  )
+                )}
               </div>
             ))}
         </div>
@@ -1288,15 +1512,24 @@ export default function Launcher() {
                 </p>
               ) : (
                 <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
-                  {grouped.map(([dir, list], rank) => {
-                    const shown = Math.min(pageCounts[dir] ?? PAGE_SIZE, list.length);
+                  {grouped.map(([key, list], rank) => {
+                    // `key` identifies the group (a repo_key, or a cwd when the
+                    // scanner couldn't resolve one) and keys pagination and
+                    // collapse state. `dir` is the group's most recent checkout
+                    // — the only member that is a real, launchable path.
+                    const dir = list[0].cwd;
+                    const label = list[0].repoName ?? repoName(dir);
+                    // Worktrees of one repo now share a group, so rows tag which
+                    // checkout they came from when a group spans more than one.
+                    const mixed = list.some((s) => s.cwd !== dir);
+                    const shown = Math.min(pageCounts[key] ?? PAGE_SIZE, list.length);
                     const visible = list.slice(0, shown);
-                    const dirOpen = !collapsedSections.has("dir:" + dir);
+                    const dirOpen = !collapsedSections.has("dir:" + key);
                     return (
-                      <div key={dir}>
+                      <div key={key}>
                         {/* Workspace group header */}
                         <div
-                          onClick={() => toggleSection("dir:" + dir)}
+                          onClick={() => toggleSection("dir:" + key)}
                           style={{
                             display: "flex",
                             alignItems: "center",
@@ -1324,7 +1557,7 @@ export default function Launcher() {
                               flexShrink: 0,
                             }}
                           >
-                            {repoName(dir)}
+                            {label}
                           </span>
                           <span
                             style={{
@@ -1414,7 +1647,7 @@ export default function Launcher() {
                         {dirOpen && (
                           <>
                             <div
-                              onScroll={(e) => handleGroupScroll(dir, list.length, e.currentTarget)}
+                              onScroll={(e) => handleGroupScroll(key, list.length, e.currentTarget)}
                               style={{
                                 display: "flex",
                                 flexDirection: "column",
@@ -1445,6 +1678,13 @@ export default function Launcher() {
                                   >
                                     {s.preview}
                                   </span>
+                                  {/* Which worktree this came from — only when the
+                                      repo group actually spans more than one. */}
+                                  {mixed && !narrow && (
+                                    <span style={chipStyle} title={s.cwd}>
+                                      {s.checkoutName ?? repoName(s.cwd)}
+                                    </span>
+                                  )}
                                   {/* "<synthetic>" marks injected stub messages, not a model */}
                                   {!narrow && s.model && !s.model.startsWith("<") && (
                                     <span
@@ -1674,7 +1914,9 @@ export default function Launcher() {
             </button>
             {tabs.map((t) => {
               const active = t.vid === activeVid;
-              const ended = sessions.find((s) => s.viewer_id === t.vid)?.ended ?? false;
+              // A tab restored from localStorage can outlive its session (or
+              // precede the first poll) — no info means the old plain-green dot.
+              const info = sessions.find((s) => s.viewer_id === t.vid);
               const name = repoName(t.cwd);
               return (
                 <div
@@ -1708,11 +1950,12 @@ export default function Launcher() {
                   }}
                 >
                   <span
+                    title={info ? stateTitle(info) : undefined}
                     style={{
                       width: 7,
                       height: 7,
                       borderRadius: "50%",
-                      background: ended ? T.idle : T.success,
+                      background: info ? stateColor(info) : T.success,
                       flexShrink: 0,
                     }}
                   />
@@ -1838,6 +2081,7 @@ export default function Launcher() {
                     token={conn.token}
                     cwd={t.cwd}
                     isTerminal={t.isTerminal}
+                    isVisible={visible}
                   />
                 </div>
               );
@@ -1910,6 +2154,31 @@ const pathStyle: React.CSSProperties = {
   overflow: "hidden",
   textOverflow: "ellipsis",
   whiteSpace: "nowrap",
+};
+
+/** Small mono metadata chip — branch, worktree marker, checkout tag. */
+const chipStyle: React.CSSProperties = {
+  fontFamily: T.mono,
+  fontSize: 9.5,
+  lineHeight: "15px",
+  color: T.textDim,
+  background: T.surface2,
+  border: `1px solid ${T.border}`,
+  borderRadius: 999,
+  padding: "0 7px",
+  flexShrink: 0,
+  maxWidth: 170,
+  overflow: "hidden",
+  textOverflow: "ellipsis",
+  whiteSpace: "nowrap",
+};
+
+/** A linked worktree reads accented — it's the thing you'd otherwise mistake
+ *  for the main checkout. */
+const worktreeChipStyle: React.CSSProperties = {
+  ...chipStyle,
+  color: T.accent,
+  border: `1px solid ${T.accentBorder}`,
 };
 
 const searchWrapStyle: React.CSSProperties = {

@@ -37,7 +37,25 @@ interface ExitMsg {
   code: number;
 }
 
-type ControlMsg = BoundMsg | TimelineSnapshotMsg | TimelineEventMsg | ExitMsg | { type: string };
+/** What the agent is doing, as reported by the backend's hook-driven state
+ *  machine. Broadcast only on a REAL transition, with a monotonic `seq`. */
+type AgentState = "unknown" | "idle" | "working" | "blocked";
+
+interface AgentStateMsg {
+  type: "agent_state";
+  state: AgentState;
+  reason?: string;
+  seq?: number;
+  since?: number;
+}
+
+type ControlMsg =
+  | BoundMsg
+  | TimelineSnapshotMsg
+  | TimelineEventMsg
+  | ExitMsg
+  | AgentStateMsg
+  | { type: string };
 
 function upsertEvent(events: TimelineEvent[], incoming: TimelineEvent): TimelineEvent[] {
   const idx = events.findIndex((e) => e.id === incoming.id);
@@ -69,6 +87,29 @@ function savedSidebarWidth(): number {
   return Number.isFinite(v) && v > 0 ? clamp(v, SIDEBAR_MIN, SIDEBAR_MAX) : SIDEBAR_DEFAULT;
 }
 
+/** Notification kinds, throttled independently — "Claude needs you" must never
+ *  be swallowed by a "Claude is done" that happened to land first. */
+type NotifyKind = "turn_done" | "attention" | "exit";
+
+/** Per-kind minimum gap between pings, so a burst of hook events can't stack dings. */
+const NOTIFY_THROTTLE_MS = 5000;
+/** How long a cancellable ping is held before it's delivered. Long enough to
+ *  catch "Stop, then you typed again"; short enough to still feel immediate. */
+const NOTIFY_DEFER_MS = 1000;
+
+/** A ping waiting out {@link NOTIFY_DEFER_MS}, still cancellable. */
+interface PendingNotify {
+  timer: ReturnType<typeof setTimeout>;
+  /** Agent-state seq when this was scheduled — only a LATER transition counts. */
+  seq: number;
+  /** The state this ping describes; a transition INTO it is the one that caused
+   *  it (Stop → Idle), not a reason to drop it. Anything else is. */
+  describes: AgentState;
+  title: string;
+  body: string;
+  sound: string;
+}
+
 interface SessionWindowProps {
   /** When set, connection details come from props (embedded in the launcher's
    *  split pane) instead of the window URL. */
@@ -77,6 +118,12 @@ interface SessionWindowProps {
   token?: string;
   cwd?: string;
   embedded?: boolean;
+  /** Is this session the pane the user can actually see? In tab mode every
+   *  session is mounted at once and the inactive ones are hidden with
+   *  `display: none`, so they all share one focused document — without this
+   *  a background tab's notifications would be silently suppressed. Defaults
+   *  to true, which is correct for a standalone session window. */
+  isVisible?: boolean;
 }
 
 export default function SessionWindow(props: SessionWindowProps = {}) {
@@ -86,10 +133,16 @@ export default function SessionWindow(props: SessionWindowProps = {}) {
   const token = props.token ?? params.get("token") ?? "";
   // URLSearchParams already percent-decodes values.
   const cwd = props.cwd ?? params.get("cwd") ?? "";
+  // A standalone window is always "the visible pane" — only the launcher's tab
+  // mode has hidden-but-mounted sessions, and it passes this explicitly.
+  const isVisible = props.isVisible ?? true;
 
   const [sessionId, setSessionId] = useState<string | null>(null);
   const [events, setEvents] = useState<TimelineEvent[]>([]);
   const [ended, setEnded] = useState(false);
+  // Hook-reported agent state (see AgentState). "unknown" until the first
+  // agent_state message — plain terminals and hook-less sessions stay there.
+  const [agentState, setAgentState] = useState<AgentState>("unknown");
   const [connStatus, setConnStatus] = useState<ConnectionStatus>("connecting");
   const [sidebarOpen, setSidebarOpen] = useState(true);
   // Committed width (used at mount); live width mutates the DOM directly
@@ -171,20 +224,93 @@ export default function SessionWindow(props: SessionWindowProps = {}) {
     setMenu(null);
   }
 
-  // "Claude is done" notifications: raised only when this window isn't
-  // focused (you're elsewhere — that's when a ping is useful), throttled so a
-  // burst of hook events can't stack dings.
-  const lastNotifyRef = useRef(0);
-  const notifyUser = useCallback(
-    (title: string, body: string, sound = "Glass") => {
-      if (document.hasFocus()) return;
+  // Notifications.
+  //
+  // Three rules, each one a bug that bit:
+  //
+  // 1. "Am I on screen?" is not "is the app focused?". In tab mode every
+  //    session is mounted in the same document, so document.hasFocus() is true
+  //    for a session buried three tabs deep — precisely the case where a ping
+  //    is the whole point. Suppress only when this pane is BOTH the visible one
+  //    and in a focused window.
+  // 2. Throttle per kind. A "done" must not swallow a "needs you" two seconds
+  //    later; blocked-on-a-prompt is the more urgent of the two. `attention`
+  //    also ignores the focus gate — you can be staring at a session and still
+  //    not notice it's waiting on you.
+  // 3. Hold and re-validate. Stop fires, you type your next prompt 400ms later,
+  //    and "Claude is done" lands for a session that's already working again.
+  //    So turn_done/attention wait out NOTIFY_DEFER_MS and are dropped if the
+  //    backend reports the session moved on. `exit` is terminal — nothing can
+  //    invalidate it, so it goes straight out.
+  const isVisibleRef = useRef(isVisible);
+  useEffect(() => {
+    isVisibleRef.current = isVisible;
+  }, [isVisible]);
+
+  const lastNotifyRef = useRef<Record<NotifyKind, number>>({
+    turn_done: 0,
+    attention: 0,
+    exit: 0,
+  });
+  const pendingNotifyRef = useRef<Partial<Record<NotifyKind, PendingNotify>>>({});
+  // Latest agent-state seq, so a deferred ping knows which transitions came
+  // after it. Kept in a ref (not state) — handleControl must read it live.
+  const agentSeqRef = useRef(0);
+
+  /** Actually raise the ping, applying the focus gate and the per-kind throttle.
+   *  Evaluated at DELIVERY time, so switching tabs during the hold counts. */
+  const deliverNotify = useCallback(
+    (kind: NotifyKind, title: string, body: string, sound: string) => {
+      if (kind !== "attention" && document.hasFocus() && isVisibleRef.current) return;
       const now = Date.now();
-      if (now - lastNotifyRef.current < 5000) return;
-      lastNotifyRef.current = now;
+      if (now - lastNotifyRef.current[kind] < NOTIFY_THROTTLE_MS) return;
+      lastNotifyRef.current[kind] = now;
       invoke("notify", { title, body, sound }).catch(() => {});
     },
     []
   );
+
+  const clearPending = useCallback((kind: NotifyKind) => {
+    const p = pendingNotifyRef.current[kind];
+    if (!p) return;
+    clearTimeout(p.timer);
+    delete pendingNotifyRef.current[kind];
+  }, []);
+
+  /** Schedule a ping an agent-state transition can still cancel. At most one
+   *  per kind is in flight; a fresh event replaces the one it supersedes. */
+  const notifyDeferred = useCallback(
+    (
+      kind: "turn_done" | "attention",
+      describes: AgentState,
+      title: string,
+      body: string,
+      sound: string
+    ) => {
+      clearPending(kind);
+      const timer = setTimeout(() => {
+        delete pendingNotifyRef.current[kind];
+        deliverNotify(kind, title, body, sound);
+      }, NOTIFY_DEFER_MS);
+      pendingNotifyRef.current[kind] = {
+        timer,
+        seq: agentSeqRef.current,
+        describes,
+        title,
+        body,
+        sound,
+      };
+    },
+    [clearPending, deliverNotify]
+  );
+
+  // Never leave a timer running past unmount (closing a tab mid-hold).
+  useEffect(() => {
+    const pending = pendingNotifyRef.current;
+    return () => {
+      for (const p of Object.values(pending)) clearTimeout(p.timer);
+    };
+  }, []);
 
   // Stable — Terminal keeps latest via a ref, but a stable identity avoids
   // needless prop churn on every render.
@@ -214,13 +340,41 @@ export default function SessionWindow(props: SessionWindowProps = {}) {
         setUsage({ input: u.input ?? 0, output: u.output ?? 0 });
         break;
       }
-      // Claude finished its turn — it's waiting on you now.
+      // Ground-truth state transition from the agent's own hooks. Also the
+      // cancel signal for a ping still waiting out its hold.
+      case "agent_state": {
+        const m = msg as AgentStateMsg;
+        const next = m.state ?? "unknown";
+        const seq = m.seq ?? 0;
+        setAgentState(next);
+        // A transition that landed AFTER a ping was scheduled and that moves
+        // somewhere OTHER than the state that ping describes means the
+        // situation changed under it — drop it. The Stop → Idle transition
+        // that caused a turn_done arrives around the same time and must not
+        // count; a later Idle → Working is exactly what should.
+        for (const kind of ["turn_done", "attention"] as const) {
+          const p = pendingNotifyRef.current[kind];
+          if (p && seq > p.seq && next !== p.describes) clearPending(kind);
+        }
+        agentSeqRef.current = Math.max(agentSeqRef.current, seq);
+        break;
+      }
+      // Claude finished its turn — it's waiting on you now. Held for a beat:
+      // if you're already typing the next prompt, this never fires.
       case "turn_done":
-        notifyUser("Claude is done", `${repo} — waiting for your input`);
+        notifyDeferred(
+          "turn_done",
+          "idle",
+          "Claude is done",
+          `${repo} — waiting for your input`,
+          "Glass"
+        );
         break;
       // Claude is blocked on a permission prompt / has been idle.
       case "attention":
-        notifyUser(
+        notifyDeferred(
+          "attention",
+          "blocked",
           "Claude needs attention",
           `${repo} — ${(msg as { message?: string }).message ?? "waiting on you"}`,
           "Ping"
@@ -228,20 +382,32 @@ export default function SessionWindow(props: SessionWindowProps = {}) {
         break;
       case "exit":
         setEnded(true);
-        notifyUser("Session ended", repo, "Submarine");
+        // Whatever was pending is moot now; the session ending supersedes it.
+        clearPending("turn_done");
+        clearPending("attention");
+        deliverNotify("exit", "Session ended", repo, "Submarine");
         break;
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [cwd, notifyUser]);
+  }, [cwd, clearPending, deliverNotify, notifyDeferred]);
 
   // One merged connection/liveness state (replaces the scattered dots + badge).
+  // Ended and connection trouble outrank the agent state — a "working" badge on
+  // a dead socket would be a lie. With hooks off the state stays "unknown" and
+  // this reads "Live", exactly as it did before.
   const live = ended
     ? { color: T.idle, label: "ended", pulse: false }
-    : connStatus === "open"
-    ? { color: T.success, label: "Live", pulse: true }
     : connStatus === "connecting"
     ? { color: T.running, label: "connecting…", pulse: false }
-    : { color: T.error, label: "disconnected", pulse: false };
+    : connStatus !== "open"
+    ? { color: T.error, label: "disconnected", pulse: false }
+    : agentState === "working"
+    ? { color: T.running, label: "working", pulse: true }
+    : agentState === "blocked"
+    ? { color: T.error, label: "blocked", pulse: true }
+    : agentState === "idle"
+    ? { color: T.success, label: "idle", pulse: false }
+    : { color: T.success, label: "Live", pulse: true };
 
   const crumb = breadcrumb(cwd);
 
