@@ -760,6 +760,69 @@ mod tests {
         );
     }
 
+    /// End-to-end against this machine's real `~/.claude/projects` layout.
+    /// Skips silently when no session on this box has spawned a subagent — the
+    /// fixture tests above already cover the logic; this one guards against the
+    /// on-disk layout drifting out from under us, which is exactly how the
+    /// previous `agent-*` skip became dead code without anyone noticing.
+    #[test]
+    fn finds_real_subagents_on_this_machine() {
+        let Some(projects) = dirs::home_dir().map(|h| h.join(".claude/projects")) else {
+            return;
+        };
+        let Ok(slugs) = fs::read_dir(&projects) else {
+            return;
+        };
+        let mut checked = 0;
+        for slug in slugs.flatten() {
+            let Ok(files) = fs::read_dir(slug.path()) else {
+                continue;
+            };
+            for f in files.flatten() {
+                let path = f.path();
+                if path.extension().and_then(|e| e.to_str()) != Some("jsonl") {
+                    continue;
+                }
+                if !subagent_dir(&path).is_dir() {
+                    continue;
+                }
+                let found = subagents_for(&path);
+                let on_disk = fs::read_dir(subagent_dir(&path))
+                    .map(|d| {
+                        d.flatten()
+                            .filter(|e| {
+                                e.path().extension().and_then(|x| x.to_str()) == Some("jsonl")
+                            })
+                            .count()
+                    })
+                    .unwrap_or(0);
+                eprintln!(
+                    "{}: {} subagent transcripts on disk, {} adopted",
+                    path.file_name().unwrap().to_string_lossy(),
+                    on_disk,
+                    found.len()
+                );
+                // Every real child must pass the checks; a rejection here means
+                // the layout or the validation drifted.
+                assert_eq!(
+                    found.len(),
+                    on_disk,
+                    "adopted fewer children than exist on disk"
+                );
+                for s in &found {
+                    assert!(!s.agent_id.is_empty());
+                    assert!(
+                        s.tool_use_id.is_some(),
+                        "sidecar should link {} to its spawning tool call",
+                        s.agent_id
+                    );
+                }
+                checked += found.len();
+            }
+        }
+        eprintln!("verified {checked} real subagent transcripts");
+    }
+
     #[test]
     fn iso_parse() {
         let ms = parse_iso_ms("2026-07-10T17:34:34.014Z").unwrap();
