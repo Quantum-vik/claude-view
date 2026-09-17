@@ -1,0 +1,232 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>claude-view — panel-first prototype</title>
+<style>
+:root{
+  --bg:#14110d; --s1:#1a1712; --s2:#211c15; --sidebar:#12100c;
+  --border:#2e2820; --text:#e8e2d5; --dim:#a89f8d; --faint:#6f675a;
+  --accent:#d4a55e; --success:#8aab7a; --running:#d4b36a; --error:#c97b6f;
+  --idle:#5c554a; --violet:#c9a2c0;
+  --bash:#b8905a; --edit:#c9a2c0; --read:#7a9a8a; --grep:#8fb0a0; --web:#b0a37e; --task:#b9a2c9;
+  --mono:'IBM Plex Mono',ui-monospace,Menlo,monospace;
+  --serif:'Lora',Georgia,serif;
+}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--text);font:13px/1.55 var(--mono)}
+header{display:flex;align-items:center;gap:14px;padding:9px 14px;background:var(--s1);
+  border-bottom:1px solid var(--border);flex-wrap:wrap;position:sticky;top:0;z-index:5}
+.sep{width:1px;height:18px;background:var(--border);flex:0 0 auto}
+.chip{font-size:11px;padding:2px 7px;border-radius:999px;background:var(--s2);color:var(--dim);white-space:nowrap}
+.chip.model{color:var(--violet);border:1px solid color-mix(in srgb,var(--violet) 35%,transparent)}
+.meter{width:60px;height:4px;background:var(--s2);border-radius:99px;overflow:hidden}
+.meter>span{display:block;height:100%;border-radius:99px}
+.hero{margin-left:auto;display:flex;gap:18px;align-items:center}
+.stat{text-align:right;line-height:1.25}
+.stat b{display:block;font:600 16px/1.2 var(--serif);color:var(--text)}
+.stat i{font-style:normal;font-size:10px;color:var(--faint);text-transform:uppercase;letter-spacing:.08em}
+.stat.alert b{color:var(--running)}
+main{display:flex;min-height:calc(100vh - 47px)}
+#rail{width:34px;flex:0 0 34px;background:var(--sidebar);border-right:1px solid var(--border);
+  display:flex;flex-direction:column;align-items:center;padding-top:10px;gap:8px;cursor:pointer}
+#rail span{writing-mode:vertical-rl;font-size:10px;color:var(--faint);letter-spacing:.14em;text-transform:uppercase}
+#term{display:none;width:44%;flex:0 0 44%;background:#000;border-right:1px solid var(--border);
+  padding:10px;color:#cfc7b6;white-space:pre-wrap;overflow:auto;font-size:12px}
+body.term-open #term{display:block}
+body.term-open #rail{display:none}
+#panel{flex:1;min-width:0;display:flex;flex-direction:column}
+#bar{display:flex;gap:8px;align-items:center;padding:7px 14px;border-bottom:1px solid var(--border);
+  background:var(--sidebar);position:sticky;top:47px;z-index:4}
+.tab{font-size:11px;padding:3px 9px;border-radius:999px;background:transparent;color:var(--dim);
+  border:1px solid transparent;cursor:pointer}
+.tab[data-on=1]{background:color-mix(in srgb,var(--accent) 15%,transparent);color:var(--accent);
+  border-color:color-mix(in srgb,var(--accent) 40%,transparent)}
+#q{flex:1;max-width:340px;background:var(--s2);border:1px solid var(--border);color:var(--text);
+  border-radius:5px;padding:4px 9px;font:12px var(--mono)}
+#log{padding:6px 0 60px}
+.turn{border-top:1px solid color-mix(in srgb,var(--border) 70%,transparent);padding:2px 0}
+.turn:first-child{border-top:none}
+.turnhead{display:flex;gap:10px;align-items:baseline;padding:7px 14px 3px;font-size:10.5px;color:var(--faint)}
+.turnhead .cost{margin-left:auto;font-variant-numeric:tabular-nums;color:var(--dim)}
+.turnhead .cost b{color:var(--accent);font-weight:600}
+.e{display:flex;gap:9px;padding:3px 14px;align-items:baseline}
+.e:hover{background:color-mix(in srgb,var(--accent) 5%,transparent)}
+.g{width:12px;flex:0 0 12px;text-align:center;color:var(--faint);font-size:11px}
+.body{flex:1;min-width:0}
+.ts{font-size:10px;color:var(--faint);flex:0 0 58px;font-variant-numeric:tabular-nums}
+.k-prompt .body{color:var(--text);font:italic 13px/1.6 var(--serif);
+  border-left:2px solid var(--accent);padding-left:10px;margin:5px 0}
+.k-assistant .body{color:var(--text);font:13.5px/1.68 var(--serif);max-width:74ch;white-space:pre-wrap}
+.k-thinking .body{color:var(--faint);font:italic 12.5px/1.6 var(--serif);max-width:80ch;white-space:pre-wrap}
+.k-thinking summary{cursor:pointer;color:var(--faint);font:11px var(--mono);list-style:none}
+.k-thinking summary::-webkit-details-marker{display:none}
+.tool .cmd{color:var(--text);white-space:pre-wrap;word-break:break-word}
+.tool .name{font-weight:600}
+.out{margin:4px 0 6px;padding:7px 10px;background:var(--s1);border-left:2px solid var(--border);
+  color:var(--dim);white-space:pre-wrap;font-size:12px;max-height:230px;overflow:auto}
+.out.err{background:color-mix(in srgb,var(--error) 7%,transparent);border-left-color:var(--error);color:#e8bdb4}
+.sub{margin:4px 0 8px 22px;border-left:2px solid var(--task);padding-left:12px;background:color-mix(in srgb,var(--task) 4%,transparent)}
+.subhead{display:flex;gap:9px;align-items:baseline;padding:6px 0 4px;font-size:11px;color:var(--task)}
+.subhead .cost{margin-left:auto;color:var(--dim);font-variant-numeric:tabular-nums}
+.fold{padding:3px 14px;color:var(--faint);font-size:11.5px;cursor:pointer}
+.fold:hover{color:var(--dim)}
+table.mix{border-collapse:collapse;font-size:11px;margin:2px 0 6px}
+table.mix td{padding:1px 12px 1px 0;color:var(--dim)}
+table.mix td.n{text-align:right;font-variant-numeric:tabular-nums;color:var(--text)}
+table.mix td.c{text-align:right;font-variant-numeric:tabular-nums;color:var(--faint)}
+.note{padding:10px 14px;color:var(--faint);font-size:11.5px;border-top:1px solid var(--border);margin-top:20px}
+.badge{font-size:10px;padding:1px 6px;border-radius:3px;background:var(--s2);color:var(--faint)}
+</style>
+
+<header>
+  <b style="font:600 13px var(--serif)">claude-view</b>
+  <span class="chip">~/WorkPersonal/claude-view</span>
+  <span class="sep"></span>
+  <span class="chip model">● Opus 5</span>
+  <span class="sep"></span>
+  <span style="display:flex;align-items:center;gap:7px">
+    <span class="meter"><span id="mfill"></span></span>
+    <span style="font-size:10.5px;color:var(--faint)" id="mtext"></span>
+  </span>
+  <div class="hero">
+    <div class="stat"><b id="tok"></b><i>tokens</i></div>
+    <div class="stat"><b id="turns"></b><i>turns</i></div>
+    <div class="stat alert"><b id="subshare"></b><i>in subagents</i></div>
+    <div class="stat"><b id="cost"></b><i>session cost*</i></div>
+  </div>
+</header>
+
+<main>
+  <div id="rail" onclick="document.body.classList.add('term-open')" title="Show the terminal">
+    <span>▸ terminal</span>
+  </div>
+  <div id="term">$ claude --dangerously-skip-permissions
+<span style="color:#6f675a">› the terminal is still here, still interactive, still the only place
+  you can type — and the only place a foreground build scrolls live.</span>
+<span style="color:#8aab7a">▌</span>
+    <div style="margin-top:14px"><button onclick="document.body.classList.remove('term-open')"
+      style="background:var(--s2);border:1px solid var(--border);color:var(--text);padding:4px 9px;border-radius:5px;cursor:pointer;font:11px var(--mono)">◂ collapse</button></div>
+  </div>
+
+  <div id="panel">
+    <div id="bar">
+      <span class="tab" data-f="all" data-on="1">all</span>
+      <span class="tab" data-f="tool">tools</span>
+      <span class="tab" data-f="assistant">replies</span>
+      <span class="tab" data-f="thinking">thinking</span>
+      <span class="tab" data-f="error">errors</span>
+      <input id="q" placeholder="search the whole trace…">
+      <span style="margin-left:auto;font-size:11px;color:var(--faint)" id="count"></span>
+    </div>
+    <div id="log"></div>
+    <div class="note">
+      * Notional. On a Pro/Max subscription you are not billed per token — this is what the
+      session would have cost at API list prices, as of 2026-09-18.<br>
+      Token mix is a table, not a stacked bar: one kind is ~97% of the total, so four of the five
+      segments would be invisible slivers — and this theme cannot supply a categorical palette that
+      passes the contrast floor (measured, not guessed).
+    </div>
+  </div>
+</main>
+
+<script>
+const DATA = /*__FIXTURE__*/null;
+const PRICE = {input:5, cacheRead:0.5, cacheWrite5m:6.25, cacheWrite1h:10, output:25}; // opus-5 $/MTok
+const KINDS = {prompt:'▍', assistant:'✻', thinking:'◦', tool:'›'};
+const TOOLC = t => /bash|shell/i.test(t)?'var(--bash)':/edit|write|multiedit/i.test(t)?'var(--edit)'
+  :/^read$/i.test(t)?'var(--read)':/grep|glob/i.test(t)?'var(--grep)'
+  :/web/i.test(t)?'var(--web)':/task|agent/i.test(t)?'var(--task)':'var(--dim)';
+const GLYPH = t => /bash|shell/i.test(t)?'$':/edit|write|multiedit/i.test(t)?'✎'
+  :/^read$/i.test(t)?'▤':/grep|glob/i.test(t)?'⌕':/web/i.test(t)?'⇅':/task|agent/i.test(t)?'»':'›';
+
+const costOf = u => (u.input*PRICE.input + u.cacheRead*PRICE.cacheRead + u.cacheWrite5m*PRICE.cacheWrite5m
+  + u.cacheWrite1h*PRICE.cacheWrite1h + u.output*PRICE.output)/1e6;
+const tot = u => u.input+u.cacheRead+u.cacheWrite5m+u.cacheWrite1h;
+const fmtTok = n => n>=1e6?(n/1e6).toFixed(1)+'M':n>=1e3?Math.round(n/1e3)+'K':''+n;
+const fmtUsd = n => n>=1?'$'+n.toFixed(2):'¢'+(n*100).toFixed(1);
+const esc = s => (s||'').replace(/[&<>]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]));
+const hhmm = t => t?new Date(t).toTimeString().slice(0,8):'';
+
+const turnById = {}; DATA.turns.forEach(t=>turnById[t.turnId]=t);
+let sessTok=0, sessCost=0, subTok=0;
+DATA.turns.forEach(t=>{ const k=tot(t.usage)+t.usage.output; sessTok+=k; sessCost+=costOf(t.usage); if(t.agent) subTok+=k; });
+const last = DATA.turns.filter(t=>!t.agent).slice(-1)[0];
+const occ = last?tot(last.usage):0, WIN=1e6, pct=Math.min(1,occ/WIN);
+mfill.style.width=Math.max(3,pct*100)+'%';
+mfill.style.background = pct>=.85?'var(--error)':pct>=.6?'var(--running)':'var(--success)';
+mtext.textContent = fmtTok(occ)+' · '+Math.round(pct*100)+'%';
+tok.textContent=fmtTok(sessTok); turns.textContent=DATA.turns.length;
+subshare.textContent=Math.round(subTok/sessTok*100)+'%'; cost.textContent=fmtUsd(sessCost);
+
+function mixTable(u){
+  const rows=[['uncached input',u.input,u.input*PRICE.input],['cache read',u.cacheRead,u.cacheRead*PRICE.cacheRead],
+    ['cache write 5m',u.cacheWrite5m,u.cacheWrite5m*PRICE.cacheWrite5m],
+    ['cache write 1h',u.cacheWrite1h,u.cacheWrite1h*PRICE.cacheWrite1h],
+    ['output',u.output,u.output*PRICE.output]].filter(r=>r[1]>0);
+  return '<table class="mix">'+rows.map(r=>`<tr><td>${r[0]}</td><td class="n">${r[1].toLocaleString()}</td><td class="c">${fmtUsd(r[2]/1e6)}</td></tr>`).join('')+'</table>';
+}
+
+let filter='all', query='';
+function render(){
+  const es = DATA.entries.filter(e=>{
+    if(filter==='error') { if(e.status!=='error') return false; }
+    else if(filter!=='all' && e.kind!==filter) return false;
+    if(query){ const h=(e.text||'')+(e.input||'')+(e.output||'')+(e.tool||''); if(!h.toLowerCase().includes(query)) return false; }
+    return true;
+  });
+  count.textContent = es.length+' of '+DATA.entries.length+' entries';
+  let html='', curTurn=null, curAgent=null, i=0;
+  while(i<es.length){
+    const e=es[i];
+    const agentKey = e.agent?e.agent.agentId:null;
+    if(agentKey!==curAgent){
+      if(curAgent) html+='</div>';
+      curAgent=agentKey;
+      if(agentKey){
+        const at=DATA.turns.filter(t=>t.agent&&t.agent.agentId===agentKey);
+        const c=at.reduce((a,t)=>a+costOf(t.usage),0), k=at.reduce((a,t)=>a+tot(t.usage)+t.usage.output,0);
+        html+=`<div class="sub"><div class="subhead">» subagent <b>${esc(e.agent.agentType||'agent')}</b>
+          <span class="badge">${esc((e.agent.description||'').slice(0,60))}</span>
+          <span class="cost">${fmtTok(k)} · <b style="color:var(--accent)">${fmtUsd(c)}</b> — measured, not amortized</span></div>`;
+      }
+    }
+    if(e.turnId!==curTurn && !agentKey){
+      curTurn=e.turnId; const t=turnById[e.turnId];
+      if(t) html+=`<div class="turnhead">turn <span style="color:var(--dim)">${String(e.turnId).slice(0,14)}…</span>
+        <span class="cost">${fmtTok(tot(t.usage)+t.usage.output)} tokens · <b>${fmtUsd(costOf(t.usage))}</b></span></div>`;
+    }
+    // fold consecutive same-tool successes
+    if(e.kind==='tool'&&e.status==='success'){
+      let j=i; while(j+1<es.length&&es[j+1].kind==='tool'&&es[j+1].tool===e.tool&&es[j+1].status==='success'&&(es[j+1].agent?es[j+1].agent.agentId:null)===agentKey) j++;
+      if(j-i>=2){
+        html+=`<div class="fold">⌄ ${j-i+1} × <span style="color:${TOOLC(e.tool)}">${GLYPH(e.tool)} ${esc(e.tool)}</span> — all succeeded</div>`;
+        i=j+1; continue;
+      }
+    }
+    html+=entryHtml(e);
+    i++;
+  }
+  if(curAgent) html+='</div>';
+  log.innerHTML=html||'<div class="note">Nothing matches.</div>';
+}
+function entryHtml(e){
+  const ts=`<span class="ts">${hhmm(e.ts)}</span>`;
+  if(e.kind==='prompt') return `<div class="e k-prompt">${ts}<span class="g" style="color:var(--accent)">▍</span><div class="body">${esc(e.text)}</div></div>`;
+  if(e.kind==='assistant') return `<div class="e k-assistant">${ts}<span class="g" style="color:var(--violet)">✻</span><div class="body">${esc(e.text)}</div></div>`;
+  if(e.kind==='thinking') return `<div class="e k-thinking">${ts}<span class="g">◦</span><div class="body"><details><summary>thinking — ${(e.text||'').length} chars</summary>${esc(e.text)}</details></div></div>`;
+  const col=TOOLC(e.tool), mark=e.status==='error'?'✗':'✓';
+  const markc=e.status==='error'?'var(--error)':'var(--success)';
+  let out='';
+  if(e.output) out=`<div class="out ${e.status==='error'?'err':''}">${esc(e.output)}</div>`;
+  return `<div class="e tool">${ts}<span class="g" style="color:${markc}">${mark}</span>
+    <div class="body"><span class="name" style="color:${col}">${GLYPH(e.tool)} ${esc(e.tool)}</span>
+    <span class="cmd"> ${esc(e.input)}</span>
+    ${e.status==='error'?' <span class="badge" style="color:var(--error)">error</span>':''}
+    ${out}</div></div>`;
+}
+document.querySelectorAll('.tab').forEach(t=>t.onclick=()=>{
+  document.querySelectorAll('.tab').forEach(x=>x.dataset.on='0');
+  t.dataset.on='1'; filter=t.dataset.f; render();
+});
+q.oninput=()=>{query=q.value.trim().toLowerCase(); render();};
+render();
+</script>
