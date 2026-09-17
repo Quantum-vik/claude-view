@@ -1,5 +1,5 @@
 import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { T, statusColor, toolFamily } from "./tokens";
+import { T, statusColor, tint, toolFamily } from "./tokens";
 
 export interface TimelineEvent {
   id: string;
@@ -10,6 +10,11 @@ export interface TimelineEvent {
   durationMs: number | null;
   ts: number;
   output: string | null;
+  /** Mirrors `TimelineEvent.agent_id` in src-tauri/src/session.rs — omitted for
+   *  the parent session, set to the subagent id for a child's tool call.
+   *  Subagents can be the majority of a session's work, so an unlabelled card
+   *  would silently read as the parent's. */
+  agentId?: string;
 }
 
 interface TimelineProps {
@@ -512,6 +517,22 @@ const SingleLine = memo(function SingleLine({
             {ev.tool}
           </span>
           <span style={{ color: fam.color, opacity: 0.65, flexShrink: 0 }}>{fam.glyph}</span>
+          {ev.agentId && (
+            <span
+              title={`Run by subagent ${ev.agentId}`}
+              style={{
+                color: "var(--cv-tool-task)",
+                background: tint("var(--cv-tool-task)", 0.14),
+                fontSize: 9.5,
+                padding: "0 4px",
+                borderRadius: 3,
+                flexShrink: 0,
+                letterSpacing: "0.04em",
+              }}
+            >
+              » agent
+            </span>
+          )}
           {ev.command && (
             <span
               title={ev.command}
