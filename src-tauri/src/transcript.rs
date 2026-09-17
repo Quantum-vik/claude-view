@@ -304,6 +304,123 @@ fn describe_input(tool: &str, input: &Value) -> Option<String> {
     None
 }
 
+/// One subagent transcript found beneath a parent session, with the sidecar
+/// metadata that ties it to the tool call that spawned it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SubagentFile {
+    pub path: PathBuf,
+    /// Filename stem minus the `agent-` prefix.
+    pub agent_id: String,
+    /// The parent `Task`/`Agent` tool-use id this run belongs to. Present in
+    /// practice; `None` only if the sidecar is missing or malformed, in which
+    /// case the run can still be shown, just not nested under its tool call.
+    pub tool_use_id: Option<String>,
+    /// Set at depth >= 2. The chain lives here, NOT in the path — subagent
+    /// files stay flat under the root session however deep the nesting goes.
+    pub parent_agent_id: Option<String>,
+    pub agent_type: Option<String>,
+    pub description: Option<String>,
+}
+
+/// The directory holding a session's subagent transcripts.
+///
+/// `<projects>/<slug>/<session-id>.jsonl` -> `<projects>/<slug>/<session-id>/subagents/`
+fn subagent_dir(parent: &Path) -> PathBuf {
+    parent.with_extension("").join("subagents")
+}
+
+/// Find the subagent transcripts belonging to an already-adopted parent.
+///
+/// PRIVACY-CRITICAL, and deliberately weaker than it looks: this performs **no
+/// search and no guess**. The directory is derived by string construction from
+/// the parent path that [`locate`] already vetted, so this inherits that
+/// attribution decision wholesale rather than re-deriving it. If `locate`
+/// adopted nothing, there is nothing to call this with.
+///
+/// Note what is NOT checked: subagents are not gated on cwd (a worktree agent
+/// legitimately runs elsewhere) nor on start time (a backgrounded agent can
+/// outlive the turn that spawned it). Gating on either would silently drop real
+/// children. The parent's gate is the one that matters.
+pub fn subagents_for(parent: &Path) -> Vec<SubagentFile> {
+    let dir = subagent_dir(parent);
+    let Ok(entries) = fs::read_dir(&dir) else {
+        return Vec::new(); // no subagents ran, or none yet
+    };
+    // The directory is named for the session; a child must agree.
+    let session_dir_name = dir
+        .parent()
+        .and_then(|p| p.file_name())
+        .and_then(|s| s.to_str())
+        .unwrap_or_default()
+        .to_string();
+
+    let mut out = Vec::new();
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.extension().and_then(|e| e.to_str()) != Some("jsonl") {
+            continue; // skips the .meta.json sidecars
+        }
+        let Some(stem) = path.file_stem().and_then(|s| s.to_str()) else {
+            continue;
+        };
+        let Some(agent_id) = stem.strip_prefix("agent-") else {
+            continue;
+        };
+        if !is_this_sessions_child(&path, &session_dir_name, agent_id) {
+            continue;
+        }
+        let meta = read_meta(&path);
+        out.push(SubagentFile {
+            agent_id: agent_id.to_string(),
+            tool_use_id: meta.as_ref().and_then(|m| str_field(m, "toolUseId")),
+            parent_agent_id: meta.as_ref().and_then(|m| str_field(m, "parentAgentId")),
+            agent_type: meta.as_ref().and_then(|m| str_field(m, "agentType")),
+            description: meta.as_ref().and_then(|m| str_field(m, "description")),
+            path,
+        });
+    }
+    out.sort_by(|a, b| a.agent_id.cmp(&b.agent_id));
+    out
+}
+
+fn str_field(v: &Value, key: &str) -> Option<String> {
+    v[key].as_str().map(str::to_string)
+}
+
+/// The sidecar is written at spawn — ~33ms before the child's first transcript
+/// line — so a subagent node can render the moment its tool call appears.
+fn read_meta(jsonl: &Path) -> Option<Value> {
+    let meta = jsonl.with_extension("meta.json");
+    serde_json::from_str(&fs::read_to_string(meta).ok()?).ok()
+}
+
+/// Defence in depth on top of the inherited gate: the file must declare itself
+/// a sidechain, name this session, and agree with its own filename.
+fn is_this_sessions_child(path: &Path, session_dir_name: &str, agent_id: &str) -> bool {
+    let Ok(file) = fs::File::open(path) else {
+        return false;
+    };
+    let mut line = String::new();
+    if BufReader::new(file).read_line(&mut line).is_err() {
+        return false;
+    }
+    let Ok(v) = serde_json::from_str::<Value>(&line) else {
+        return false;
+    };
+    if v["isSidechain"].as_bool() != Some(true) {
+        return false;
+    }
+    if let Some(sid) = v["sessionId"].as_str() {
+        if sid != session_dir_name {
+            return false;
+        }
+    }
+    match v["agentId"].as_str() {
+        Some(a) => a == agent_id,
+        None => true, // older writes omit it; the filename already carried it
+    }
+}
+
 /// Small tolerance (ms) for the "started after we spawned" check, absorbing
 /// clock jitter between our spawn timestamp and Claude's first transcript write.
 const START_SLACK_MS: u64 = 3_000;
@@ -535,6 +652,111 @@ mod tests {
                 Some("req_abc".into()),
                 Some("claude-opus-5".into())
             ))
+        );
+    }
+
+    /// Build `<tmp>/<uniq>/<slug>/<sid>.jsonl` plus a `subagents/` dir, and
+    /// return the parent transcript path. No tempfile crate in this project, so
+    /// uniqueness comes from the test name + pid.
+    fn scratch(tag: &str) -> (PathBuf, PathBuf) {
+        let root = std::env::temp_dir().join(format!("cv-test-{tag}-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        let slug = root.join("slug");
+        let sid = "44d945fe-203a-46dd-9f3d-e248cc3108ae";
+        let subs = slug.join(sid).join("subagents");
+        fs::create_dir_all(&subs).unwrap();
+        let parent = slug.join(format!("{sid}.jsonl"));
+        fs::write(&parent, "{}\n").unwrap();
+        (parent, subs)
+    }
+
+    fn write_child(subs: &Path, agent_id: &str, session_id: &str, sidechain: bool, tool_use: &str) {
+        let line = serde_json::json!({
+            "isSidechain": sidechain,
+            "sessionId": session_id,
+            "agentId": agent_id,
+            "type": "assistant"
+        });
+        fs::write(
+            subs.join(format!("agent-{agent_id}.jsonl")),
+            format!("{line}\n"),
+        )
+        .unwrap();
+        fs::write(
+            subs.join(format!("agent-{agent_id}.meta.json")),
+            serde_json::json!({
+                "toolUseId": tool_use,
+                "agentType": "general-purpose",
+                "description": "Research pricing"
+            })
+            .to_string(),
+        )
+        .unwrap();
+    }
+
+    const SID: &str = "44d945fe-203a-46dd-9f3d-e248cc3108ae";
+
+    #[test]
+    fn finds_subagents_and_their_parent_tool_call() {
+        let (parent, subs) = scratch("find");
+        write_child(&subs, "a1705fdcf7a898a7e", SID, true, "toolu_01ABC");
+        let found = subagents_for(&parent);
+        assert_eq!(found.len(), 1, "expected exactly one subagent");
+        assert_eq!(found[0].agent_id, "a1705fdcf7a898a7e");
+        // The linkage that lets a subagent nest under the call that spawned it.
+        assert_eq!(found[0].tool_use_id.as_deref(), Some("toolu_01ABC"));
+        assert_eq!(found[0].agent_type.as_deref(), Some("general-purpose"));
+        let _ = fs::remove_dir_all(parent.parent().unwrap().parent().unwrap());
+    }
+
+    /// The sidecars sit in the same directory and must never be mistaken for
+    /// transcripts — `.meta.json` is not `.jsonl`.
+    #[test]
+    fn meta_sidecars_are_not_mistaken_for_transcripts() {
+        let (parent, subs) = scratch("meta");
+        write_child(&subs, "abc123", SID, true, "toolu_1");
+        assert_eq!(fs::read_dir(&subs).unwrap().count(), 2, "fixture writes both files");
+        assert_eq!(subagents_for(&parent).len(), 1);
+        let _ = fs::remove_dir_all(parent.parent().unwrap().parent().unwrap());
+    }
+
+    /// Defence in depth. A file that names a DIFFERENT session must be refused
+    /// even though it sits in this session's directory — mis-attribution would
+    /// leak another session's commands into this window.
+    #[test]
+    fn a_child_naming_another_session_is_refused() {
+        let (parent, subs) = scratch("wrongsid");
+        write_child(&subs, "abc123", "11111111-2222-3333-4444-555555555555", true, "toolu_1");
+        assert!(subagents_for(&parent).is_empty());
+        let _ = fs::remove_dir_all(parent.parent().unwrap().parent().unwrap());
+    }
+
+    /// A subagent transcript declares itself a sidechain. Anything that does not
+    /// is not a subagent, whatever its filename says.
+    #[test]
+    fn a_non_sidechain_file_is_refused() {
+        let (parent, subs) = scratch("nosc");
+        write_child(&subs, "abc123", SID, false, "toolu_1");
+        assert!(subagents_for(&parent).is_empty());
+        let _ = fs::remove_dir_all(parent.parent().unwrap().parent().unwrap());
+    }
+
+    /// No subagents ran: absence is normal, not an error.
+    #[test]
+    fn a_session_with_no_subagents_yields_none() {
+        let (parent, _subs) = scratch("empty");
+        assert!(subagents_for(&parent).is_empty());
+        let _ = fs::remove_dir_all(parent.parent().unwrap().parent().unwrap());
+    }
+
+    /// The directory is derived by string construction from the already-vetted
+    /// parent path — no search, so no new attribution guess is introduced.
+    #[test]
+    fn subagent_dir_is_derived_from_the_parent_path() {
+        let p = Path::new("/home/u/.claude/projects/slug/abc-123.jsonl");
+        assert_eq!(
+            subagent_dir(p),
+            Path::new("/home/u/.claude/projects/slug/abc-123/subagents")
         );
     }
 
