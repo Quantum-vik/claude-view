@@ -1,0 +1,471 @@
+[] sleeper pid=97747 ppid=95353 ppcmd=quickshell -n -p /usr/share/omarchy/shell
+[]   fds(ppid): 
+[] sleeper pid=2506107 ppid=97747 ppcmd=/usr/bin/bash -c ppid=$PPID; prev=''; while :; do kill -0 $ppid 2>/dev/null || exit 0; cur=$(omarchy-shell lock isLocked
+[]   fds(ppid): 
+[] DISK HITS:
+    /home/quantumvik/.claude/projects/-home-quantumvik-WorkPersonal-claude-view/ca79a6f4-1702-4446-ad43-2d954f07e92f/subagents/agent-af0b4a9aaa314d555.jsonl
+[] sleeper pid=97747 ppid=95353 ppcmd=quickshell -n -p /usr/share/omarchy/shell
+[]   fds(ppid): 
+[] sleeper pid=2506107 ppid=97747 ppcmd=/usr/bin/bash -c ppid=$PPID; prev=''; while :; do kill -0 $ppid 2>/dev/null || exit 0; cur=$(omarchy-shell lock isLocked
+[]   fds(ppid): 
+[] DISK HITS:
+    /home/quantumvik/.claude/projects/-home-quantumvik-WorkPersonal-claude-view/ca79a6f4-1702-4446-ad43-2d954f07e92f/subagents/agent-af0b4a9aaa314d555.jsonl
+[] sleeper pid=97747 ppid=95353 ppcmd=quickshell -n -p /usr/share/omarchy/shell
+[]   fds(ppid): 
+[] sleeper pid=2506107 ppid=97747 ppcmd=/usr/bin/bash -c ppid=$PPID; prev=''; while :; do kill -0 $ppid 2>/dev/null || exit 0; cur=$(omarchy-shell lock isLocked
+[]   fds(ppid): 
+[] DISK HITS:
+    /home/quantumvik/.claude/projects/-home-quantumvik-WorkPersonal-claude-view/ca79a6f4-1702-4446-ad43-2d954f07e92f/subagents/agent-af0b4a9aaa314d555.jsonl
+[] sleeper pid=97747 ppid=95353 ppcmd=quickshell -n -p /usr/share/omarchy/shell
+[]   fds(ppid): 
+[] sleeper pid=2506107 ppid=97747 ppcmd=/usr/bin/bash -c ppid=$PPID; prev=''; while :; do kill -0 $ppid 2>/dev/null || exit 0; cur=$(omarchy-shell lock isLocked
+[]   fds(ppid): 
+[] DISK HITS:
+    /home/quantumvik/.claude/projects/-home-quantumvik-WorkPersonal-claude-view/ca79a6f4-1702-4446-ad43-2d954f07e92f/subagents/agent-af0b4a9aaa314d555.jsonl
+[] sleeper pid=97747 ppid=95353 ppcmd=quickshell -n -p /usr/share/omarchy/shell
+[]   fds(ppid): 
+[] sleeper pid=2506107 ppid=97747 ppcmd=/usr/bin/bash -c ppid=$PPID; prev=''; while :; do kill -0 $ppid 2>/dev/null || exit 0; cur=$(omarchy-shell lock isLocked
+[]   fds(ppid): 
+[] DISK HITS:
+    /home/quantumvik/.claude/projects/-home-quantumvik-WorkPersonal-claude-view/ca79a6f4-1702-4446-ad43-2d954f07e92f/subagents/agent-af0b4a9aaa314d555.jsonl
+[] sleeper pid=97747 ppid=95353 ppcmd=quickshell -n -p /usr/share/omarchy/shell
+[]   fds(ppid): 
+[] sleeper pid=2506107 ppid=97747 ppcmd=/usr/bin/bash -c ppid=$PPID; prev=''; while :; do kill -0 $ppid 2>/dev/null || exit 0; cur=$(omarchy-shell lock isLocked
+[]   fds(ppid): 
+[] DISK HITS:
+    /home/quantumvik/.claude/projects/-home-quantumvik-WorkPersonal-claude-view/ca79a6f4-1702-4446-ad43-2d954f07e92f/subagents/agent-af0b4a9aaa314d555.jsonl
+    /tmp/claude-1000/-home-quantumvik-WorkPersonal-claude-view/ca79a6f4-1702-4446-ad43-2d954f07e92f/scratchpad/exp/e3_pty.bin
+[] sleeper pid=97747 ppid=95353 ppcmd=quickshell -n -p /usr/share/omarchy/shell
+[]   fds(ppid): 
+[] sleeper pid=2506107 ppid=97747 ppcmd=/usr/bin/bash -c ppid=$PPID; prev=''; while :; do kill -0 $ppid 2>/dev/null || exit 0; cur=$(omarchy-shell lock isLocked
+[]   fds(ppid): 
+[] DISK HITS:
+    /home/quantumvik/.claude/projects/-home-quantumvik-WorkPersonal-claude-view/ca79a6f4-1702-4446-ad43-2d954f07e92f/subagents/agent-af0b4a9aaa314d555.jsonl
+    /tmp/claude-1000/-home-quantumvik-WorkPersonal-claude-view/ca79a6f4-1702-4446-ad43-2d954f07e92f/scratchpad/exp/e3_pty.bin
+[] sleeper pid=97747 ppid=95353 ppcmd=quickshell -n -p /usr/share/omarchy/shell
+[]   fds(ppid): 
+[] sleeper pid=2510748 ppid=97747 ppcmd=/usr/bin/bash -c ppid=$PPID; prev=''; while :; do kill -0 $ppid 2>/dev/null || exit 0; cur=$(omarchy-shell lock isLocked
+[]   fds(ppid): 
+[] DISK HITS:
+    /home/quantumvik/.claude/projects/-home-quantumvik-WorkPersonal-claude-view/ca79a6f4-1702-4446-ad43-2d954f07e92f/subagents/agent-af0b4a9aaa314d555.jsonl
+    /tmp/claude-1000/-home-quantumvik-WorkPersonal-claude-view/ca79a6f4-1702-4446-ad43-2d954f07e92f/scratchpad/exp/e3_pty.bin
+[] sleeper pid=97747 ppid=95353 ppcmd=quickshell -n -p /usr/share/omarchy/shell
+[]   fds(ppid): 
+[] sleeper pid=2510748 ppid=97747 ppcmd=/usr/bin/bash -c ppid=$PPID; prev=''; while :; do kill -0 $ppid 2>/dev/null || exit 0; cur=$(omarchy-shell lock isLocked
+[]   fds(ppid): 
+[] DISK HITS:
+    /home/quantumvik/.claude/projects/-home-quantumvik-WorkPersonal-claude-view/ca79a6f4-1702-4446-ad43-2d954f07e92f/subagents/agent-af0b4a9aaa314d555.jsonl
+    /tmp/claude-1000/-home-quantumvik-WorkPersonal-claude-view/ca79a6f4-1702-4446-ad43-2d954f07e92f/scratchpad/exp/e3_pty.bin
+[] sleeper pid=97747 ppid=95353 ppcmd=quickshell -n -p /usr/share/omarchy/shell
+[]   fds(ppid): 
+[] sleeper pid=2510748 ppid=97747 ppcmd=/usr/bin/bash -c ppid=$PPID; prev=''; while :; do kill -0 $ppid 2>/dev/null || exit 0; cur=$(omarchy-shell lock isLocked
+[]   fds(ppid): 
+[] DISK HITS:
+    /home/quantumvik/.claude/projects/-home-quantumvik-WorkPersonal-claude-view/ca79a6f4-1702-4446-ad43-2d954f07e92f/subagents/agent-af0b4a9aaa314d555.jsonl
+    /tmp/claude-1000/-home-quantumvik-WorkPersonal-claude-view/6d16d063-7f64-49d5-bbd6-923aa892ba1e/tasks/b8wu0nran.output
+    /tmp/claude-1000/-home-quantumvik-WorkPersonal-claude-view/ca79a6f4-1702-4446-ad43-2d954f07e92f/scratchpad/exp/e3_pty.bin
+[] sleeper pid=97747 ppid=95353 ppcmd=quickshell -n -p /usr/share/omarchy/shell
+[]   fds(ppid): 
+[] sleeper pid=2510748 ppid=97747 ppcmd=/usr/bin/bash -c ppid=$PPID; prev=''; while :; do kill -0 $ppid 2>/dev/null || exit 0; cur=$(omarchy-shell lock isLocked
+[]   fds(ppid): 
+[] DISK HITS:
+    /home/quantumvik/.claude/projects/-home-quantumvik-WorkPersonal-claude-view/ca79a6f4-1702-4446-ad43-2d954f07e92f/subagents/agent-af0b4a9aaa314d555.jsonl
+    /tmp/claude-1000/-home-quantumvik-WorkPersonal-claude-view/6d16d063-7f64-49d5-bbd6-923aa892ba1e/tasks/b8wu0nran.output
+    /tmp/claude-1000/-home-quantumvik-WorkPersonal-claude-view/ca79a6f4-1702-4446-ad43-2d954f07e92f/scratchpad/exp/e3_pty.bin
+[] sleeper pid=97747 ppid=95353 ppcmd=quickshell -n -p /usr/share/omarchy/shell
+[]   fds(ppid): 
+[] sleeper pid=2510748 ppid=97747 ppcmd=/usr/bin/bash -c ppid=$PPID; prev=''; while :; do kill -0 $ppid 2>/dev/null || exit 0; cur=$(omarchy-shell lock isLocked
+[]   fds(ppid): 
+[] DISK HITS:
+    /home/quantumvik/.claude/projects/-home-quantumvik-WorkPersonal-claude-view/ca79a6f4-1702-4446-ad43-2d954f07e92f/subagents/agent-af0b4a9aaa314d555.jsonl
+    /tmp/claude-1000/-home-quantumvik-WorkPersonal-claude-view/6d16d063-7f64-49d5-bbd6-923aa892ba1e/tasks/b8wu0nran.output
+    /tmp/claude-1000/-home-quantumvik-WorkPersonal-claude-view/ca79a6f4-1702-4446-ad43-2d954f07e92f/scratchpad/exp/e3_pty.bin
+[] sleeper pid=97747 ppid=95353 ppcmd=quickshell -n -p /usr/share/omarchy/shell
+[]   fds(ppid): 
+[] sleeper pid=2510748 ppid=97747 ppcmd=/usr/bin/bash -c ppid=$PPID; prev=''; while :; do kill -0 $ppid 2>/dev/null || exit 0; cur=$(omarchy-shell lock isLocked
+[]   fds(ppid): 
+[] DISK HITS:
+    /home/quantumvik/.claude/projects/-home-quantumvik-WorkPersonal-claude-view/ca79a6f4-1702-4446-ad43-2d954f07e92f/subagents/agent-af0b4a9aaa314d555.jsonl
+    /tmp/claude-1000/-home-quantumvik-WorkPersonal-claude-view/6d16d063-7f64-49d5-bbd6-923aa892ba1e/tasks/b8wu0nran.output
+    /tmp/claude-1000/-home-quantumvik-WorkPersonal-claude-view/ca79a6f4-1702-4446-ad43-2d954f07e92f/scratchpad/exp/e3_pty.bin
+[] sleeper pid=97747 ppid=95353 ppcmd=quickshell -n -p /usr/share/omarchy/shell
+[]   fds(ppid): 
+[] sleeper pid=2510748 ppid=97747 ppcmd=/usr/bin/bash -c ppid=$PPID; prev=''; while :; do kill -0 $ppid 2>/dev/null || exit 0; cur=$(omarchy-shell lock isLocked
+[]   fds(ppid): 
+[] DISK HITS:
+    /home/quantumvik/.claude/projects/-home-quantumvik-WorkPersonal-claude-view/ca79a6f4-1702-4446-ad43-2d954f07e92f/subagents/agent-af0b4a9aaa314d555.jsonl
+    /tmp/claude-1000/-home-quantumvik-WorkPersonal-claude-view/6d16d063-7f64-49d5-bbd6-923aa892ba1e/tasks/b8wu0nran.output
+    /tmp/claude-1000/-home-quantumvik-WorkPersonal-claude-view/ca79a6f4-1702-4446-ad43-2d954f07e92f/scratchpad/exp/e3_pty.bin
+[] sleeper pid=97747 ppid=95353 ppcmd=quickshell -n -p /usr/share/omarchy/shell
+[]   fds(ppid): 
+[] sleeper pid=2510748 ppid=97747 ppcmd=/usr/bin/bash -c ppid=$PPID; prev=''; while :; do kill -0 $ppid 2>/dev/null || exit 0; cur=$(omarchy-shell lock isLocked
+[]   fds(ppid): 
+[] DISK HITS:
+    /home/quantumvik/.claude/projects/-home-quantumvik-WorkPersonal-claude-view/ca79a6f4-1702-4446-ad43-2d954f07e92f/subagents/agent-af0b4a9aaa314d555.jsonl
+    /tmp/claude-1000/-home-quantumvik-WorkPersonal-claude-view/6d16d063-7f64-49d5-bbd6-923aa892ba1e/tasks/b8wu0nran.output
+    /tmp/claude-1000/-home-quantumvik-WorkPersonal-claude-view/ca79a6f4-1702-4446-ad43-2d954f07e92f/scratchpad/exp/e3_pty.bin
+[] sleeper pid=97747 ppid=95353 ppcmd=quickshell -n -p /usr/share/omarchy/shell
+[]   fds(ppid): 
+[] sleeper pid=2510748 ppid=97747 ppcmd=/usr/bin/bash -c ppid=$PPID; prev=''; while :; do kill -0 $ppid 2>/dev/null || exit 0; cur=$(omarchy-shell lock isLocked
+[]   fds(ppid): 
+[] DISK HITS:
+    /home/quantumvik/.claude/projects/-home-quantumvik-WorkPersonal-claude-view/ca79a6f4-1702-4446-ad43-2d954f07e92f/subagents/agent-af0b4a9aaa314d555.jsonl
+    /tmp/claude-1000/-home-quantumvik-WorkPersonal-claude-view/6d16d063-7f64-49d5-bbd6-923aa892ba1e/tasks/b8wu0nran.output
+    /tmp/claude-1000/-home-quantumvik-WorkPersonal-claude-view/ca79a6f4-1702-4446-ad43-2d954f07e92f/scratchpad/exp/e3_pty.bin
+[] sleeper pid=97747 ppid=95353 ppcmd=quickshell -n -p /usr/share/omarchy/shell
+[]   fds(ppid): 
+[] sleeper pid=2514597 ppid=97747 ppcmd=/usr/bin/bash -c ppid=$PPID; prev=''; while :; do kill -0 $ppid 2>/dev/null || exit 0; cur=$(omarchy-shell lock isLocked
+[]   fds(ppid): 
+[] DISK HITS:
+    /home/quantumvik/.claude/projects/-home-quantumvik-WorkPersonal-claude-view/ca79a6f4-1702-4446-ad43-2d954f07e92f/subagents/agent-af0b4a9aaa314d555.jsonl
+    /tmp/claude-1000/-home-quantumvik-WorkPersonal-claude-view/6d16d063-7f64-49d5-bbd6-923aa892ba1e/tasks/b8wu0nran.output
+    /tmp/claude-1000/-home-quantumvik-WorkPersonal-claude-view/ca79a6f4-1702-4446-ad43-2d954f07e92f/scratchpad/exp/e3_pty.bin
+[] sleeper pid=97747 ppid=95353 ppcmd=quickshell -n -p /usr/share/omarchy/shell
+[]   fds(ppid): 
+[] sleeper pid=2514597 ppid=97747 ppcmd=/usr/bin/bash -c ppid=$PPID; prev=''; while :; do kill -0 $ppid 2>/dev/null || exit 0; cur=$(omarchy-shell lock isLocked
+[]   fds(ppid): 
+[] DISK HITS:
+    /home/quantumvik/.claude/projects/-home-quantumvik-WorkPersonal-claude-view/ca79a6f4-1702-4446-ad43-2d954f07e92f/subagents/agent-af0b4a9aaa314d555.jsonl
+    /tmp/claude-1000/-home-quantumvik-WorkPersonal-claude-view/6d16d063-7f64-49d5-bbd6-923aa892ba1e/tasks/b8wu0nran.output
+    /tmp/claude-1000/-home-quantumvik-WorkPersonal-claude-view/ca79a6f4-1702-4446-ad43-2d954f07e92f/scratchpad/exp/e3_pty.bin
+[] sleeper pid=97747 ppid=95353 ppcmd=quickshell -n -p /usr/share/omarchy/shell
+[]   fds(ppid): 
+[] sleeper pid=2514597 ppid=97747 ppcmd=/usr/bin/bash -c ppid=$PPID; prev=''; while :; do kill -0 $ppid 2>/dev/null || exit 0; cur=$(omarchy-shell lock isLocked
+[]   fds(ppid): 
+[] DISK HITS:
+    /home/quantumvik/.claude/projects/-home-quantumvik-WorkPersonal-claude-view/ca79a6f4-1702-4446-ad43-2d954f07e92f/subagents/agent-af0b4a9aaa314d555.jsonl
+    /tmp/claude-1000/-home-quantumvik-WorkPersonal-claude-view/6d16d063-7f64-49d5-bbd6-923aa892ba1e/tasks/b8wu0nran.output
+    /tmp/claude-1000/-home-quantumvik-WorkPersonal-claude-view/ca79a6f4-1702-4446-ad43-2d954f07e92f/scratchpad/exp/e3_pty.bin
+[] sleeper pid=97747 ppid=95353 ppcmd=quickshell -n -p /usr/share/omarchy/shell
+[]   fds(ppid): 
+[] sleeper pid=2514597 ppid=97747 ppcmd=/usr/bin/bash -c ppid=$PPID; prev=''; while :; do kill -0 $ppid 2>/dev/null || exit 0; cur=$(omarchy-shell lock isLocked
+[]   fds(ppid): 
+[] DISK HITS:
+    /home/quantumvik/.claude/projects/-home-quantumvik-WorkPersonal-claude-view/ca79a6f4-1702-4446-ad43-2d954f07e92f/subagents/agent-af0b4a9aaa314d555.jsonl
+    /tmp/claude-1000/-home-quantumvik-WorkPersonal-claude-view/ca79a6f4-1702-4446-ad43-2d954f07e92f/scratchpad/exp/e3_pty.bin
+[] sleeper pid=97747 ppid=95353 ppcmd=quickshell -n -p /usr/share/omarchy/shell
+[]   fds(ppid): 
+[] sleeper pid=2514597 ppid=97747 ppcmd=/usr/bin/bash -c ppid=$PPID; prev=''; while :; do kill -0 $ppid 2>/dev/null || exit 0; cur=$(omarchy-shell lock isLocked
+[]   fds(ppid): 
+[] DISK HITS:
+    /home/quantumvik/.claude/projects/-home-quantumvik-WorkPersonal-claude-view/ca79a6f4-1702-4446-ad43-2d954f07e92f/subagents/agent-af0b4a9aaa314d555.jsonl
+    /tmp/claude-1000/-home-quantumvik-WorkPersonal-claude-view/ca79a6f4-1702-4446-ad43-2d954f07e92f/scratchpad/exp/e3_pty.bin
+[] sleeper pid=97747 ppid=95353 ppcmd=quickshell -n -p /usr/share/omarchy/shell
+[]   fds(ppid): 
+[] sleeper pid=2514597 ppid=97747 ppcmd=/usr/bin/bash -c ppid=$PPID; prev=''; while :; do kill -0 $ppid 2>/dev/null || exit 0; cur=$(omarchy-shell lock isLocked
+[]   fds(ppid): 
+[] DISK HITS:
+    /home/quantumvik/.claude/projects/-home-quantumvik-WorkPersonal-claude-view/ca79a6f4-1702-4446-ad43-2d954f07e92f/subagents/agent-af0b4a9aaa314d555.jsonl
+    /tmp/claude-1000/-home-quantumvik-WorkPersonal-claude-view/ca79a6f4-1702-4446-ad43-2d954f07e92f/scratchpad/exp/e3_pty.bin
+[] sleeper pid=97747 ppid=95353 ppcmd=quickshell -n -p /usr/share/omarchy/shell
+[]   fds(ppid): 
+[] sleeper pid=2514597 ppid=97747 ppcmd=/usr/bin/bash -c ppid=$PPID; prev=''; while :; do kill -0 $ppid 2>/dev/null || exit 0; cur=$(omarchy-shell lock isLocked
+[]   fds(ppid): 
+[] DISK HITS:
+    /home/quantumvik/.claude/projects/-home-quantumvik-WorkPersonal-claude-view/ca79a6f4-1702-4446-ad43-2d954f07e92f/subagents/agent-af0b4a9aaa314d555.jsonl
+    /tmp/claude-1000/-home-quantumvik-WorkPersonal-claude-view/ca79a6f4-1702-4446-ad43-2d954f07e92f/scratchpad/exp/e3_pty.bin
+[] sleeper pid=97747 ppid=95353 ppcmd=quickshell -n -p /usr/share/omarchy/shell
+[]   fds(ppid): 
+[] sleeper pid=2514597 ppid=97747 ppcmd=/usr/bin/bash -c ppid=$PPID; prev=''; while :; do kill -0 $ppid 2>/dev/null || exit 0; cur=$(omarchy-shell lock isLocked
+[]   fds(ppid): 
+[] DISK HITS:
+    /home/quantumvik/.claude/projects/-home-quantumvik-WorkPersonal-claude-view/ca79a6f4-1702-4446-ad43-2d954f07e92f/subagents/agent-af0b4a9aaa314d555.jsonl
+    /tmp/claude-1000/-home-quantumvik-WorkPersonal-claude-view/ca79a6f4-1702-4446-ad43-2d954f07e92f/scratchpad/exp/e3_pty.bin
+[] sleeper pid=97747 ppid=95353 ppcmd=quickshell -n -p /usr/share/omarchy/shell
+[]   fds(ppid): 
+[] sleeper pid=2514597 ppid=97747 ppcmd=/usr/bin/bash -c ppid=$PPID; prev=''; while :; do kill -0 $ppid 2>/dev/null || exit 0; cur=$(omarchy-shell lock isLocked
+[]   fds(ppid): 
+[] DISK HITS:
+    /home/quantumvik/.claude/projects/-home-quantumvik-WorkPersonal-claude-view/ca79a6f4-1702-4446-ad43-2d954f07e92f/subagents/agent-af0b4a9aaa314d555.jsonl
+    /tmp/claude-1000/-home-quantumvik-WorkPersonal-claude-view/ca79a6f4-1702-4446-ad43-2d954f07e92f/scratchpad/exp/e3_pty.bin
+[] sleeper pid=97747 ppid=95353 ppcmd=quickshell -n -p /usr/share/omarchy/shell
+[]   fds(ppid): 
+[] sleeper pid=2518277 ppid=97747 ppcmd=/usr/bin/bash -c ppid=$PPID; prev=''; while :; do kill -0 $ppid 2>/dev/null || exit 0; cur=$(omarchy-shell lock isLocked
+[]   fds(ppid): 
+[] DISK HITS:
+    /home/quantumvik/.claude/projects/-home-quantumvik-WorkPersonal-claude-view/ca79a6f4-1702-4446-ad43-2d954f07e92f/subagents/agent-af0b4a9aaa314d555.jsonl
+    /tmp/claude-1000/-home-quantumvik-WorkPersonal-claude-view/ca79a6f4-1702-4446-ad43-2d954f07e92f/scratchpad/exp/e3_pty.bin
+[] sleeper pid=97747 ppid=95353 ppcmd=quickshell -n -p /usr/share/omarchy/shell
+[]   fds(ppid): 
+[] sleeper pid=2518277 ppid=97747 ppcmd=/usr/bin/bash -c ppid=$PPID; prev=''; while :; do kill -0 $ppid 2>/dev/null || exit 0; cur=$(omarchy-shell lock isLocked
+[]   fds(ppid): 
+[] DISK HITS:
+    /home/quantumvik/.claude/projects/-home-quantumvik-WorkPersonal-claude-view/ca79a6f4-1702-4446-ad43-2d954f07e92f/subagents/agent-af0b4a9aaa314d555.jsonl
+    /tmp/claude-1000/-home-quantumvik-WorkPersonal-claude-view/ca79a6f4-1702-4446-ad43-2d954f07e92f/scratchpad/exp/e3_pty.bin
+[] sleeper pid=97747 ppid=95353 ppcmd=quickshell -n -p /usr/share/omarchy/shell
+[]   fds(ppid): 
+[] sleeper pid=2518277 ppid=97747 ppcmd=/usr/bin/bash -c ppid=$PPID; prev=''; while :; do kill -0 $ppid 2>/dev/null || exit 0; cur=$(omarchy-shell lock isLocked
+[]   fds(ppid): 
+[] DISK HITS:
+    /home/quantumvik/.claude/projects/-home-quantumvik-WorkPersonal-claude-view/ca79a6f4-1702-4446-ad43-2d954f07e92f/subagents/agent-af0b4a9aaa314d555.jsonl
+    /tmp/claude-1000/-home-quantumvik-WorkPersonal-claude-view/ca79a6f4-1702-4446-ad43-2d954f07e92f/scratchpad/exp/e3_pty.bin
+[] sleeper pid=97747 ppid=95353 ppcmd=quickshell -n -p /usr/share/omarchy/shell
+[]   fds(ppid): 
+[] sleeper pid=2518277 ppid=97747 ppcmd=/usr/bin/bash -c ppid=$PPID; prev=''; while :; do kill -0 $ppid 2>/dev/null || exit 0; cur=$(omarchy-shell lock isLocked
+[]   fds(ppid): 
+[] DISK HITS:
+    /home/quantumvik/.claude/projects/-home-quantumvik-WorkPersonal-claude-view/ca79a6f4-1702-4446-ad43-2d954f07e92f/subagents/agent-af0b4a9aaa314d555.jsonl
+    /tmp/claude-1000/-home-quantumvik-WorkPersonal-claude-view/ca79a6f4-1702-4446-ad43-2d954f07e92f/scratchpad/exp/e3_pty.bin
+[] sleeper pid=97747 ppid=95353 ppcmd=quickshell -n -p /usr/share/omarchy/shell
+[]   fds(ppid): 
+[] sleeper pid=2518277 ppid=97747 ppcmd=/usr/bin/bash -c ppid=$PPID; prev=''; while :; do kill -0 $ppid 2>/dev/null || exit 0; cur=$(omarchy-shell lock isLocked
+[]   fds(ppid): 
+[] DISK HITS:
+    /home/quantumvik/.claude/projects/-home-quantumvik-WorkPersonal-claude-view/ca79a6f4-1702-4446-ad43-2d954f07e92f/subagents/agent-af0b4a9aaa314d555.jsonl
+    /tmp/claude-1000/-home-quantumvik-WorkPersonal-claude-view/ca79a6f4-1702-4446-ad43-2d954f07e92f/scratchpad/exp/e3_pty.bin
+[] sleeper pid=97747 ppid=95353 ppcmd=quickshell -n -p /usr/share/omarchy/shell
+[]   fds(ppid): 
+[] sleeper pid=2518277 ppid=97747 ppcmd=/usr/bin/bash -c ppid=$PPID; prev=''; while :; do kill -0 $ppid 2>/dev/null || exit 0; cur=$(omarchy-shell lock isLocked
+[]   fds(ppid): 
+[] DISK HITS:
+    /home/quantumvik/.claude/projects/-home-quantumvik-WorkPersonal-claude-view/ca79a6f4-1702-4446-ad43-2d954f07e92f/subagents/agent-af0b4a9aaa314d555.jsonl
+    /tmp/claude-1000/-home-quantumvik-WorkPersonal-claude-view/ca79a6f4-1702-4446-ad43-2d954f07e92f/scratchpad/exp/e3_pty.bin
+[] sleeper pid=97747 ppid=95353 ppcmd=quickshell -n -p /usr/share/omarchy/shell
+[]   fds(ppid): 
+[] sleeper pid=2518277 ppid=97747 ppcmd=/usr/bin/bash -c ppid=$PPID; prev=''; while :; do kill -0 $ppid 2>/dev/null || exit 0; cur=$(omarchy-shell lock isLocked
+[]   fds(ppid): 
+[] DISK HITS:
+    /home/quantumvik/.claude/projects/-home-quantumvik-WorkPersonal-claude-view/ca79a6f4-1702-4446-ad43-2d954f07e92f/subagents/agent-af0b4a9aaa314d555.jsonl
+    /tmp/claude-1000/-home-quantumvik-WorkPersonal-claude-view/ca79a6f4-1702-4446-ad43-2d954f07e92f/scratchpad/exp/e3_pty.bin
+[] sleeper pid=97747 ppid=95353 ppcmd=quickshell -n -p /usr/share/omarchy/shell
+[]   fds(ppid): 
+[] sleeper pid=2518277 ppid=97747 ppcmd=/usr/bin/bash -c ppid=$PPID; prev=''; while :; do kill -0 $ppid 2>/dev/null || exit 0; cur=$(omarchy-shell lock isLocked
+[]   fds(ppid): 
+[] DISK HITS:
+    /home/quantumvik/.claude/projects/-home-quantumvik-WorkPersonal-claude-view/ca79a6f4-1702-4446-ad43-2d954f07e92f/subagents/agent-af0b4a9aaa314d555.jsonl
+    /tmp/claude-1000/-home-quantumvik-WorkPersonal-claude-view/ca79a6f4-1702-4446-ad43-2d954f07e92f/scratchpad/exp/e3_pty.bin
+[] sleeper pid=97747 ppid=95353 ppcmd=quickshell -n -p /usr/share/omarchy/shell
+[]   fds(ppid): 
+[] sleeper pid=2518277 ppid=97747 ppcmd=/usr/bin/bash -c ppid=$PPID; prev=''; while :; do kill -0 $ppid 2>/dev/null || exit 0; cur=$(omarchy-shell lock isLocked
+[]   fds(ppid): 
+[] DISK HITS:
+    /home/quantumvik/.claude/projects/-home-quantumvik-WorkPersonal-claude-view/ca79a6f4-1702-4446-ad43-2d954f07e92f/subagents/agent-af0b4a9aaa314d555.jsonl
+    /tmp/claude-1000/-home-quantumvik-WorkPersonal-claude-view/ca79a6f4-1702-4446-ad43-2d954f07e92f/scratchpad/exp/e3_pty.bin
+[] sleeper pid=97747 ppid=95353 ppcmd=quickshell -n -p /usr/share/omarchy/shell
+[]   fds(ppid): 
+[] sleeper pid=2521726 ppid=97747 ppcmd=/usr/bin/bash -c ppid=$PPID; prev=''; while :; do kill -0 $ppid 2>/dev/null || exit 0; cur=$(omarchy-shell lock isLocked
+[]   fds(ppid): 
+[] DISK HITS:
+    /home/quantumvik/.claude/projects/-home-quantumvik-WorkPersonal-claude-view/ca79a6f4-1702-4446-ad43-2d954f07e92f/subagents/agent-af0b4a9aaa314d555.jsonl
+    /tmp/claude-1000/-home-quantumvik-WorkPersonal-claude-view/ca79a6f4-1702-4446-ad43-2d954f07e92f/scratchpad/exp/e3_pty.bin
+[] sleeper pid=97747 ppid=95353 ppcmd=quickshell -n -p /usr/share/omarchy/shell
+[]   fds(ppid): 
+[] sleeper pid=2521726 ppid=97747 ppcmd=/usr/bin/bash -c ppid=$PPID; prev=''; while :; do kill -0 $ppid 2>/dev/null || exit 0; cur=$(omarchy-shell lock isLocked
+[]   fds(ppid): 
+[] DISK HITS:
+    /home/quantumvik/.claude/projects/-home-quantumvik-WorkPersonal-claude-view/ca79a6f4-1702-4446-ad43-2d954f07e92f/subagents/agent-af0b4a9aaa314d555.jsonl
+    /tmp/claude-1000/-home-quantumvik-WorkPersonal-claude-view/ca79a6f4-1702-4446-ad43-2d954f07e92f/scratchpad/exp/e3_pty.bin
+[] sleeper pid=97747 ppid=95353 ppcmd=quickshell -n -p /usr/share/omarchy/shell
+[]   fds(ppid): 
+[] sleeper pid=2521726 ppid=97747 ppcmd=/usr/bin/bash -c ppid=$PPID; prev=''; while :; do kill -0 $ppid 2>/dev/null || exit 0; cur=$(omarchy-shell lock isLocked
+[]   fds(ppid): 
+[] DISK HITS:
+    /home/quantumvik/.claude/projects/-home-quantumvik-WorkPersonal-claude-view/ca79a6f4-1702-4446-ad43-2d954f07e92f/subagents/agent-af0b4a9aaa314d555.jsonl
+    /tmp/claude-1000/-home-quantumvik-WorkPersonal-claude-view/ca79a6f4-1702-4446-ad43-2d954f07e92f/scratchpad/exp/e3_pty.bin
+[] sleeper pid=97747 ppid=95353 ppcmd=quickshell -n -p /usr/share/omarchy/shell
+[]   fds(ppid): 
+[] sleeper pid=2521726 ppid=97747 ppcmd=/usr/bin/bash -c ppid=$PPID; prev=''; while :; do kill -0 $ppid 2>/dev/null || exit 0; cur=$(omarchy-shell lock isLocked
+[]   fds(ppid): 
+[] DISK HITS:
+    /home/quantumvik/.claude/projects/-home-quantumvik-WorkPersonal-claude-view/ca79a6f4-1702-4446-ad43-2d954f07e92f/subagents/agent-af0b4a9aaa314d555.jsonl
+    /tmp/claude-1000/-home-quantumvik-WorkPersonal-claude-view/ca79a6f4-1702-4446-ad43-2d954f07e92f/scratchpad/exp/e3_pty.bin
+[] sleeper pid=97747 ppid=95353 ppcmd=quickshell -n -p /usr/share/omarchy/shell
+[]   fds(ppid): 
+[] sleeper pid=2521726 ppid=97747 ppcmd=/usr/bin/bash -c ppid=$PPID; prev=''; while :; do kill -0 $ppid 2>/dev/null || exit 0; cur=$(omarchy-shell lock isLocked
+[]   fds(ppid): 
+[] DISK HITS:
+    /home/quantumvik/.claude/projects/-home-quantumvik-WorkPersonal-claude-view/ca79a6f4-1702-4446-ad43-2d954f07e92f/subagents/agent-af0b4a9aaa314d555.jsonl
+    /tmp/claude-1000/-home-quantumvik-WorkPersonal-claude-view/ca79a6f4-1702-4446-ad43-2d954f07e92f/scratchpad/exp/e3_pty.bin
+[] sleeper pid=97747 ppid=95353 ppcmd=quickshell -n -p /usr/share/omarchy/shell
+[]   fds(ppid): 
+[] sleeper pid=2521726 ppid=97747 ppcmd=/usr/bin/bash -c ppid=$PPID; prev=''; while :; do kill -0 $ppid 2>/dev/null || exit 0; cur=$(omarchy-shell lock isLocked
+[]   fds(ppid): 
+[] DISK HITS:
+    /home/quantumvik/.claude/projects/-home-quantumvik-WorkPersonal-claude-view/ca79a6f4-1702-4446-ad43-2d954f07e92f/subagents/agent-af0b4a9aaa314d555.jsonl
+    /tmp/claude-1000/-home-quantumvik-WorkPersonal-claude-view/ca79a6f4-1702-4446-ad43-2d954f07e92f/scratchpad/exp/e3_pty.bin
+[] sleeper pid=97747 ppid=95353 ppcmd=quickshell -n -p /usr/share/omarchy/shell
+[]   fds(ppid): 
+[] sleeper pid=2521726 ppid=97747 ppcmd=/usr/bin/bash -c ppid=$PPID; prev=''; while :; do kill -0 $ppid 2>/dev/null || exit 0; cur=$(omarchy-shell lock isLocked
+[]   fds(ppid): 
+[] DISK HITS:
+    /home/quantumvik/.claude/projects/-home-quantumvik-WorkPersonal-claude-view/ca79a6f4-1702-4446-ad43-2d954f07e92f/subagents/agent-af0b4a9aaa314d555.jsonl
+    /tmp/claude-1000/-home-quantumvik-WorkPersonal-claude-view/ca79a6f4-1702-4446-ad43-2d954f07e92f/scratchpad/exp/e3_pty.bin
+[] sleeper pid=97747 ppid=95353 ppcmd=quickshell -n -p /usr/share/omarchy/shell
+[]   fds(ppid): 
+[] sleeper pid=2521726 ppid=97747 ppcmd=/usr/bin/bash -c ppid=$PPID; prev=''; while :; do kill -0 $ppid 2>/dev/null || exit 0; cur=$(omarchy-shell lock isLocked
+[]   fds(ppid): 
+[] DISK HITS:
+    /home/quantumvik/.claude/projects/-home-quantumvik-WorkPersonal-claude-view/ca79a6f4-1702-4446-ad43-2d954f07e92f/subagents/agent-af0b4a9aaa314d555.jsonl
+    /tmp/claude-1000/-home-quantumvik-WorkPersonal-claude-view/ca79a6f4-1702-4446-ad43-2d954f07e92f/scratchpad/exp/e3_pty.bin
+[] sleeper pid=97747 ppid=95353 ppcmd=quickshell -n -p /usr/share/omarchy/shell
+[]   fds(ppid): 
+[] sleeper pid=2521726 ppid=97747 ppcmd=/usr/bin/bash -c ppid=$PPID; prev=''; while :; do kill -0 $ppid 2>/dev/null || exit 0; cur=$(omarchy-shell lock isLocked
+[]   fds(ppid): 
+[] DISK HITS:
+    /home/quantumvik/.claude/projects/-home-quantumvik-WorkPersonal-claude-view/ca79a6f4-1702-4446-ad43-2d954f07e92f/subagents/agent-af0b4a9aaa314d555.jsonl
+    /tmp/claude-1000/-home-quantumvik-WorkPersonal-claude-view/ca79a6f4-1702-4446-ad43-2d954f07e92f/scratchpad/exp/e3_pty.bin
+[] sleeper pid=97747 ppid=95353 ppcmd=quickshell -n -p /usr/share/omarchy/shell
+[]   fds(ppid): 
+[] sleeper pid=2524922 ppid=97747 ppcmd=/usr/bin/bash -c ppid=$PPID; prev=''; while :; do kill -0 $ppid 2>/dev/null || exit 0; cur=$(omarchy-shell lock isLocked
+[]   fds(ppid): 
+[] DISK HITS:
+    /home/quantumvik/.claude/projects/-home-quantumvik-WorkPersonal-claude-view/ca79a6f4-1702-4446-ad43-2d954f07e92f/subagents/agent-af0b4a9aaa314d555.jsonl
+    /tmp/claude-1000/-home-quantumvik-WorkPersonal-claude-view/ca79a6f4-1702-4446-ad43-2d954f07e92f/scratchpad/exp/e3_pty.bin
+[] sleeper pid=97747 ppid=95353 ppcmd=quickshell -n -p /usr/share/omarchy/shell
+[]   fds(ppid): 
+[] sleeper pid=2524922 ppid=97747 ppcmd=/usr/bin/bash -c ppid=$PPID; prev=''; while :; do kill -0 $ppid 2>/dev/null || exit 0; cur=$(omarchy-shell lock isLocked
+[]   fds(ppid): 
+[] DISK HITS:
+    /home/quantumvik/.claude/projects/-home-quantumvik-WorkPersonal-claude-view/ca79a6f4-1702-4446-ad43-2d954f07e92f/subagents/agent-af0b4a9aaa314d555.jsonl
+    /tmp/claude-1000/-home-quantumvik-WorkPersonal-claude-view/ca79a6f4-1702-4446-ad43-2d954f07e92f/scratchpad/exp/e3_pty.bin
+[] sleeper pid=97747 ppid=95353 ppcmd=quickshell -n -p /usr/share/omarchy/shell
+[]   fds(ppid): 
+[] sleeper pid=2524922 ppid=97747 ppcmd=/usr/bin/bash -c ppid=$PPID; prev=''; while :; do kill -0 $ppid 2>/dev/null || exit 0; cur=$(omarchy-shell lock isLocked
+[]   fds(ppid): 
+[] DISK HITS:
+    /home/quantumvik/.claude/projects/-home-quantumvik-WorkPersonal-claude-view/ca79a6f4-1702-4446-ad43-2d954f07e92f/subagents/agent-af0b4a9aaa314d555.jsonl
+    /tmp/claude-1000/-home-quantumvik-WorkPersonal-claude-view/ca79a6f4-1702-4446-ad43-2d954f07e92f/scratchpad/exp/e3_pty.bin
+[] sleeper pid=97747 ppid=95353 ppcmd=quickshell -n -p /usr/share/omarchy/shell
+[]   fds(ppid): 
+[] sleeper pid=2524922 ppid=97747 ppcmd=/usr/bin/bash -c ppid=$PPID; prev=''; while :; do kill -0 $ppid 2>/dev/null || exit 0; cur=$(omarchy-shell lock isLocked
+[]   fds(ppid): 
+[] DISK HITS:
+    /home/quantumvik/.claude/projects/-home-quantumvik-WorkPersonal-claude-view/ca79a6f4-1702-4446-ad43-2d954f07e92f/subagents/agent-af0b4a9aaa314d555.jsonl
+    /tmp/claude-1000/-home-quantumvik-WorkPersonal-claude-view/ca79a6f4-1702-4446-ad43-2d954f07e92f/scratchpad/exp/e3_pty.bin
+[] sleeper pid=97747 ppid=95353 ppcmd=quickshell -n -p /usr/share/omarchy/shell
+[]   fds(ppid): 
+[] sleeper pid=2524922 ppid=97747 ppcmd=/usr/bin/bash -c ppid=$PPID; prev=''; while :; do kill -0 $ppid 2>/dev/null || exit 0; cur=$(omarchy-shell lock isLocked
+[]   fds(ppid): 
+[] DISK HITS:
+    /home/quantumvik/.claude/projects/-home-quantumvik-WorkPersonal-claude-view/ca79a6f4-1702-4446-ad43-2d954f07e92f/subagents/agent-af0b4a9aaa314d555.jsonl
+    /tmp/claude-1000/-home-quantumvik-WorkPersonal-claude-view/ca79a6f4-1702-4446-ad43-2d954f07e92f/scratchpad/exp/e3_pty.bin
+[] sleeper pid=97747 ppid=95353 ppcmd=quickshell -n -p /usr/share/omarchy/shell
+[]   fds(ppid): 
+[] sleeper pid=2524922 ppid=97747 ppcmd=/usr/bin/bash -c ppid=$PPID; prev=''; while :; do kill -0 $ppid 2>/dev/null || exit 0; cur=$(omarchy-shell lock isLocked
+[]   fds(ppid): 
+[] DISK HITS:
+    /home/quantumvik/.claude/projects/-home-quantumvik-WorkPersonal-claude-view/ca79a6f4-1702-4446-ad43-2d954f07e92f/subagents/agent-af0b4a9aaa314d555.jsonl
+    /tmp/claude-1000/-home-quantumvik-WorkPersonal-claude-view/ca79a6f4-1702-4446-ad43-2d954f07e92f/scratchpad/exp/e3_pty.bin
+[] sleeper pid=97747 ppid=95353 ppcmd=quickshell -n -p /usr/share/omarchy/shell
+[]   fds(ppid): 
+[] sleeper pid=2524922 ppid=97747 ppcmd=/usr/bin/bash -c ppid=$PPID; prev=''; while :; do kill -0 $ppid 2>/dev/null || exit 0; cur=$(omarchy-shell lock isLocked
+[]   fds(ppid): 
+[] DISK HITS:
+    /home/quantumvik/.claude/projects/-home-quantumvik-WorkPersonal-claude-view/ca79a6f4-1702-4446-ad43-2d954f07e92f/subagents/agent-af0b4a9aaa314d555.jsonl
+    /tmp/claude-1000/-home-quantumvik-WorkPersonal-claude-view/ca79a6f4-1702-4446-ad43-2d954f07e92f/scratchpad/exp/e3_pty.bin
+[] sleeper pid=97747 ppid=95353 ppcmd=quickshell -n -p /usr/share/omarchy/shell
+[]   fds(ppid): 
+[] sleeper pid=2524922 ppid=97747 ppcmd=/usr/bin/bash -c ppid=$PPID; prev=''; while :; do kill -0 $ppid 2>/dev/null || exit 0; cur=$(omarchy-shell lock isLocked
+[]   fds(ppid): 
+[] DISK HITS:
+    /home/quantumvik/.claude/projects/-home-quantumvik-WorkPersonal-claude-view/ca79a6f4-1702-4446-ad43-2d954f07e92f/subagents/agent-af0b4a9aaa314d555.jsonl
+    /tmp/claude-1000/-home-quantumvik-WorkPersonal-claude-view/ca79a6f4-1702-4446-ad43-2d954f07e92f/scratchpad/exp/e3_pty.bin
+[] sleeper pid=97747 ppid=95353 ppcmd=quickshell -n -p /usr/share/omarchy/shell
+[]   fds(ppid): 
+[] sleeper pid=2524922 ppid=97747 ppcmd=/usr/bin/bash -c ppid=$PPID; prev=''; while :; do kill -0 $ppid 2>/dev/null || exit 0; cur=$(omarchy-shell lock isLocked
+[]   fds(ppid): 
+[] DISK HITS:
+    /home/quantumvik/.claude/projects/-home-quantumvik-WorkPersonal-claude-view/ca79a6f4-1702-4446-ad43-2d954f07e92f/subagents/agent-af0b4a9aaa314d555.jsonl
+    /tmp/claude-1000/-home-quantumvik-WorkPersonal-claude-view/ca79a6f4-1702-4446-ad43-2d954f07e92f/scratchpad/exp/e3_pty.bin
+[] sleeper pid=97747 ppid=95353 ppcmd=quickshell -n -p /usr/share/omarchy/shell
+[]   fds(ppid): 
+[] sleeper pid=2528220 ppid=97747 ppcmd=/usr/bin/bash -c ppid=$PPID; prev=''; while :; do kill -0 $ppid 2>/dev/null || exit 0; cur=$(omarchy-shell lock isLocked
+[]   fds(ppid): 
+[] DISK HITS:
+    /home/quantumvik/.claude/projects/-home-quantumvik-WorkPersonal-claude-view/ca79a6f4-1702-4446-ad43-2d954f07e92f/subagents/agent-af0b4a9aaa314d555.jsonl
+    /tmp/claude-1000/-home-quantumvik-WorkPersonal-claude-view/ca79a6f4-1702-4446-ad43-2d954f07e92f/scratchpad/exp/e3_pty.bin
+[] sleeper pid=97747 ppid=95353 ppcmd=quickshell -n -p /usr/share/omarchy/shell
+[]   fds(ppid): 
+[] sleeper pid=2528220 ppid=97747 ppcmd=/usr/bin/bash -c ppid=$PPID; prev=''; while :; do kill -0 $ppid 2>/dev/null || exit 0; cur=$(omarchy-shell lock isLocked
+[]   fds(ppid): 
+[] DISK HITS:
+    /home/quantumvik/.claude/projects/-home-quantumvik-WorkPersonal-claude-view/ca79a6f4-1702-4446-ad43-2d954f07e92f/subagents/agent-af0b4a9aaa314d555.jsonl
+    /tmp/claude-1000/-home-quantumvik-WorkPersonal-claude-view/ca79a6f4-1702-4446-ad43-2d954f07e92f/scratchpad/exp/e3_pty.bin
+[] sleeper pid=97747 ppid=95353 ppcmd=quickshell -n -p /usr/share/omarchy/shell
+[]   fds(ppid): 
+[] sleeper pid=2528220 ppid=97747 ppcmd=/usr/bin/bash -c ppid=$PPID; prev=''; while :; do kill -0 $ppid 2>/dev/null || exit 0; cur=$(omarchy-shell lock isLocked
+[]   fds(ppid): 
+[] DISK HITS:
+    /home/quantumvik/.claude/projects/-home-quantumvik-WorkPersonal-claude-view/ca79a6f4-1702-4446-ad43-2d954f07e92f/subagents/agent-af0b4a9aaa314d555.jsonl
+    /tmp/claude-1000/-home-quantumvik-WorkPersonal-claude-view/ca79a6f4-1702-4446-ad43-2d954f07e92f/scratchpad/exp/e3_pty.bin
+[] sleeper pid=97747 ppid=95353 ppcmd=quickshell -n -p /usr/share/omarchy/shell
+[]   fds(ppid): 
+[] sleeper pid=2528220 ppid=97747 ppcmd=/usr/bin/bash -c ppid=$PPID; prev=''; while :; do kill -0 $ppid 2>/dev/null || exit 0; cur=$(omarchy-shell lock isLocked
+[]   fds(ppid): 
+[] DISK HITS:
+    /home/quantumvik/.claude/projects/-home-quantumvik-WorkPersonal-claude-view/ca79a6f4-1702-4446-ad43-2d954f07e92f/subagents/agent-af0b4a9aaa314d555.jsonl
+    /tmp/claude-1000/-home-quantumvik-WorkPersonal-claude-view/ca79a6f4-1702-4446-ad43-2d954f07e92f/scratchpad/exp/e3_pty.bin
+[] sleeper pid=97747 ppid=95353 ppcmd=quickshell -n -p /usr/share/omarchy/shell
+[]   fds(ppid): 
+[] sleeper pid=2528220 ppid=97747 ppcmd=/usr/bin/bash -c ppid=$PPID; prev=''; while :; do kill -0 $ppid 2>/dev/null || exit 0; cur=$(omarchy-shell lock isLocked
+[]   fds(ppid): 
+[] DISK HITS:
+    /home/quantumvik/.claude/projects/-home-quantumvik-WorkPersonal-claude-view/ca79a6f4-1702-4446-ad43-2d954f07e92f/subagents/agent-af0b4a9aaa314d555.jsonl
+    /tmp/claude-1000/-home-quantumvik-WorkPersonal-claude-view/ca79a6f4-1702-4446-ad43-2d954f07e92f/scratchpad/exp/e3_pty.bin
+[] sleeper pid=97747 ppid=95353 ppcmd=quickshell -n -p /usr/share/omarchy/shell
+[]   fds(ppid): 
+[] sleeper pid=2528220 ppid=97747 ppcmd=/usr/bin/bash -c ppid=$PPID; prev=''; while :; do kill -0 $ppid 2>/dev/null || exit 0; cur=$(omarchy-shell lock isLocked
+[]   fds(ppid): 
+[] DISK HITS:
+    /home/quantumvik/.claude/projects/-home-quantumvik-WorkPersonal-claude-view/ca79a6f4-1702-4446-ad43-2d954f07e92f/subagents/agent-af0b4a9aaa314d555.jsonl
+    /tmp/claude-1000/-home-quantumvik-WorkPersonal-claude-view/ca79a6f4-1702-4446-ad43-2d954f07e92f/scratchpad/exp/e3_pty.bin
+[] sleeper pid=97747 ppid=95353 ppcmd=quickshell -n -p /usr/share/omarchy/shell
+[]   fds(ppid): 
+[] sleeper pid=2528220 ppid=97747 ppcmd=/usr/bin/bash -c ppid=$PPID; prev=''; while :; do kill -0 $ppid 2>/dev/null || exit 0; cur=$(omarchy-shell lock isLocked
+[]   fds(ppid): 
+[] DISK HITS:
+    /home/quantumvik/.claude/projects/-home-quantumvik-WorkPersonal-claude-view/ca79a6f4-1702-4446-ad43-2d954f07e92f/subagents/agent-af0b4a9aaa314d555.jsonl
+    /tmp/claude-1000/-home-quantumvik-WorkPersonal-claude-view/ca79a6f4-1702-4446-ad43-2d954f07e92f/scratchpad/exp/e3_pty.bin
+[] sleeper pid=97747 ppid=95353 ppcmd=quickshell -n -p /usr/share/omarchy/shell
+[]   fds(ppid): 
+[] sleeper pid=2528220 ppid=97747 ppcmd=/usr/bin/bash -c ppid=$PPID; prev=''; while :; do kill -0 $ppid 2>/dev/null || exit 0; cur=$(omarchy-shell lock isLocked
+[]   fds(ppid): 
+[] DISK HITS:
+    /home/quantumvik/.claude/projects/-home-quantumvik-WorkPersonal-claude-view/ca79a6f4-1702-4446-ad43-2d954f07e92f/subagents/agent-af0b4a9aaa314d555.jsonl
+    /tmp/claude-1000/-home-quantumvik-WorkPersonal-claude-view/ca79a6f4-1702-4446-ad43-2d954f07e92f/scratchpad/exp/e3_pty.bin
+[] sleeper pid=97747 ppid=95353 ppcmd=quickshell -n -p /usr/share/omarchy/shell
+[]   fds(ppid): 
+[] sleeper pid=2528220 ppid=97747 ppcmd=/usr/bin/bash -c ppid=$PPID; prev=''; while :; do kill -0 $ppid 2>/dev/null || exit 0; cur=$(omarchy-shell lock isLocked
+[]   fds(ppid): 
+[] DISK HITS:
+    /home/quantumvik/.claude/projects/-home-quantumvik-WorkPersonal-claude-view/ca79a6f4-1702-4446-ad43-2d954f07e92f/subagents/agent-af0b4a9aaa314d555.jsonl
+    /tmp/claude-1000/-home-quantumvik-WorkPersonal-claude-view/ca79a6f4-1702-4446-ad43-2d954f07e92f/scratchpad/exp/e3_pty.bin
+[] sleeper pid=97747 ppid=95353 ppcmd=quickshell -n -p /usr/share/omarchy/shell
+[]   fds(ppid): 
+[] sleeper pid=2531524 ppid=97747 ppcmd=/usr/bin/bash -c ppid=$PPID; prev=''; while :; do kill -0 $ppid 2>/dev/null || exit 0; cur=$(omarchy-shell lock isLocked
+[]   fds(ppid): 
+[] DISK HITS:
+    /home/quantumvik/.claude/projects/-home-quantumvik-WorkPersonal-claude-view/ca79a6f4-1702-4446-ad43-2d954f07e92f/subagents/agent-af0b4a9aaa314d555.jsonl
+    /tmp/claude-1000/-home-quantumvik-WorkPersonal-claude-view/ca79a6f4-1702-4446-ad43-2d954f07e92f/scratchpad/exp/e3_pty.bin
+[] sleeper pid=97747 ppid=95353 ppcmd=quickshell -n -p /usr/share/omarchy/shell
+[]   fds(ppid): 
+[] sleeper pid=2531524 ppid=97747 ppcmd=/usr/bin/bash -c ppid=$PPID; prev=''; while :; do kill -0 $ppid 2>/dev/null || exit 0; cur=$(omarchy-shell lock isLocked
+[]   fds(ppid): 
+[] DISK HITS:
+    /home/quantumvik/.claude/projects/-home-quantumvik-WorkPersonal-claude-view/ca79a6f4-1702-4446-ad43-2d954f07e92f/subagents/agent-af0b4a9aaa314d555.jsonl
+    /tmp/claude-1000/-home-quantumvik-WorkPersonal-claude-view/ca79a6f4-1702-4446-ad43-2d954f07e92f/scratchpad/exp/e3_pty.bin
+[] sleeper pid=97747 ppid=95353 ppcmd=quickshell -n -p /usr/share/omarchy/shell
+[]   fds(ppid): 
+[] sleeper pid=2531524 ppid=97747 ppcmd=/usr/bin/bash -c ppid=$PPID; prev=''; while :; do kill -0 $ppid 2>/dev/null || exit 0; cur=$(omarchy-shell lock isLocked
+[]   fds(ppid): 
+[] DISK HITS:
+    /home/quantumvik/.claude/projects/-home-quantumvik-WorkPersonal-claude-view/ca79a6f4-1702-4446-ad43-2d954f07e92f/subagents/agent-af0b4a9aaa314d555.jsonl
+    /tmp/claude-1000/-home-quantumvik-WorkPersonal-claude-view/ca79a6f4-1702-4446-ad43-2d954f07e92f/scratchpad/exp/e3_pty.bin
+[] sleeper pid=97747 ppid=95353 ppcmd=quickshell -n -p /usr/share/omarchy/shell
+[]   fds(ppid): 
+[] sleeper pid=2531524 ppid=97747 ppcmd=/usr/bin/bash -c ppid=$PPID; prev=''; while :; do kill -0 $ppid 2>/dev/null || exit 0; cur=$(omarchy-shell lock isLocked
+[]   fds(ppid): 
+[] DISK HITS:
+    /home/quantumvik/.claude/projects/-home-quantumvik-WorkPersonal-claude-view/ca79a6f4-1702-4446-ad43-2d954f07e92f/subagents/agent-af0b4a9aaa314d555.jsonl
+    /tmp/claude-1000/-home-quantumvik-WorkPersonal-claude-view/ca79a6f4-1702-4446-ad43-2d954f07e92f/scratchpad/exp/e3_pty.bin
+[] sleeper pid=97747 ppid=95353 ppcmd=quickshell -n -p /usr/share/omarchy/shell
+[]   fds(ppid): 
+[] sleeper pid=2531524 ppid=97747 ppcmd=/usr/bin/bash -c ppid=$PPID; prev=''; while :; do kill -0 $ppid 2>/dev/null || exit 0; cur=$(omarchy-shell lock isLocked
+[]   fds(ppid): 
+[] DISK HITS:
+    /home/quantumvik/.claude/projects/-home-quantumvik-WorkPersonal-claude-view/ca79a6f4-1702-4446-ad43-2d954f07e92f/subagents/agent-af0b4a9aaa314d555.jsonl
+    /tmp/claude-1000/-home-quantumvik-WorkPersonal-claude-view/ca79a6f4-1702-4446-ad43-2d954f07e92f/scratchpad/exp/e3_pty.bin
+[] sleeper pid=97747 ppid=95353 ppcmd=quickshell -n -p /usr/share/omarchy/shell
+[]   fds(ppid): 
+[] sleeper pid=2531524 ppid=97747 ppcmd=/usr/bin/bash -c ppid=$PPID; prev=''; while :; do kill -0 $ppid 2>/dev/null || exit 0; cur=$(omarchy-shell lock isLocked
+[]   fds(ppid): 
