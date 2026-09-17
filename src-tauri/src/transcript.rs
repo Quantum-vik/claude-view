@@ -136,6 +136,33 @@ pub struct Tailer {
     cwd: String,
     session_id: Option<String>,
     after_ms: u64,
+    /// One tail per discovered subagent transcript. Grows as Tasks spawn.
+    subs: Vec<SubTail>,
+}
+
+struct SubTail {
+    file: SubagentFile,
+    offset: u64,
+}
+
+/// A record plus which transcript it came from.
+///
+/// Subagent spend is not a footnote: measured on a real session, subagents were
+/// 1.79x the parent. Attribution has to survive parsing, or the panel cannot
+/// nest a child under the call that spawned it.
+pub struct Tailed {
+    /// `None` = the parent session; `Some(agent_id)` = that subagent.
+    pub agent_id: Option<String>,
+    pub record: Record,
+}
+
+impl Tailed {
+    fn parent(record: Record) -> Self {
+        Self {
+            agent_id: None,
+            record,
+        }
+    }
 }
 
 impl Tailer {
@@ -146,6 +173,7 @@ impl Tailer {
             cwd,
             session_id,
             after_ms,
+            subs: Vec::new(),
         }
     }
 
@@ -155,61 +183,96 @@ impl Tailer {
             // Re-resolve against the exact file next poll.
             self.path = None;
             self.offset = 0;
+            self.subs.clear();
         }
     }
 
-    /// Read any newly-appended records. Returns [] when nothing changed.
-    pub fn poll(&mut self) -> Vec<Record> {
+    /// Read any newly-appended records, from the parent transcript **and** from
+    /// every subagent transcript beneath it. Returns [] when nothing changed.
+    pub fn poll(&mut self) -> Vec<Tailed> {
         if self.path.is_none() {
             self.path = locate(&self.cwd, self.session_id.as_deref(), self.after_ms);
             self.offset = 0;
+            self.subs.clear();
         }
         let Some(path) = self.path.clone() else {
             return Vec::new();
         };
 
-        let Ok(file) = fs::File::open(&path) else {
-            self.path = None; // file vanished (rotation) — re-resolve later
-            return Vec::new();
-        };
-        let len = file.metadata().map(|m| m.len()).unwrap_or(0);
-        if len < self.offset {
-            // Truncated/rewritten — start over.
-            self.offset = 0;
-        }
-        if len == self.offset {
-            return Vec::new();
-        }
-
-        let mut reader = BufReader::new(file);
-        if reader.seek(SeekFrom::Start(self.offset)).is_err() {
-            return Vec::new();
-        }
-
         let mut out = Vec::new();
-        let mut consumed = self.offset;
-        let mut line = String::new();
-        loop {
-            line.clear();
-            match reader.read_line(&mut line) {
-                Ok(0) => break,
-                Ok(n) => {
-                    // Only advance the durable offset past COMPLETE lines, so a
-                    // half-flushed final line is re-read next poll.
-                    if !line.ends_with('\n') {
-                        break;
-                    }
-                    consumed += n as u64;
-                    if let Ok(v) = serde_json::from_str::<Value>(&line) {
-                        parse_record(&v, &mut out);
-                    }
-                }
-                Err(_) => break,
+        match read_new(&path, &mut self.offset) {
+            Some(records) => out.extend(records.into_iter().map(Tailed::parent)),
+            None => {
+                self.path = None; // vanished (rotation) — re-resolve next poll
+                return Vec::new();
             }
         }
-        self.offset = consumed;
+
+        // Subagents are discovered on every poll, not once: a Task can spawn one
+        // at any point in a session, and the sidecar is written at spawn time.
+        for found in subagents_for(&path) {
+            if !self.subs.iter().any(|s| s.file.agent_id == found.agent_id) {
+                self.subs.push(SubTail {
+                    file: found,
+                    offset: 0,
+                });
+            }
+        }
+        for sub in &mut self.subs {
+            if let Some(records) = read_new(&sub.file.path, &mut sub.offset) {
+                let id = sub.file.agent_id.clone();
+                out.extend(records.into_iter().map(|r| Tailed {
+                    agent_id: Some(id.clone()),
+                    record: r,
+                }));
+            }
+        }
         out
     }
+}
+
+/// Read newly-appended complete lines from `path`, advancing `offset`.
+///
+/// `None` means the file could not be opened — the caller re-resolves. An empty
+/// vec means nothing new, which is the common case.
+fn read_new(path: &Path, offset: &mut u64) -> Option<Vec<Record>> {
+    let file = fs::File::open(path).ok()?;
+    let len = file.metadata().map(|m| m.len()).unwrap_or(0);
+    if len < *offset {
+        *offset = 0; // truncated/rewritten — start over
+    }
+    if len == *offset {
+        return Some(Vec::new());
+    }
+
+    let mut reader = BufReader::new(file);
+    if reader.seek(SeekFrom::Start(*offset)).is_err() {
+        return Some(Vec::new());
+    }
+
+    let mut out = Vec::new();
+    let mut consumed = *offset;
+    let mut line = String::new();
+    loop {
+        line.clear();
+        match reader.read_line(&mut line) {
+            Ok(0) => break,
+            Ok(n) => {
+                // Only advance the durable offset past COMPLETE lines, so a
+                // half-flushed final line is re-read next poll.
+                if !line.ends_with('\n') {
+                    break;
+                }
+                consumed += n as u64;
+                if let Ok(v) = serde_json::from_str::<Value>(&line) {
+                    parse_record(&v, &mut out);
+                }
+            }
+            Err(_) => break,
+        }
+    }
+    *offset = consumed;
+    Some(out)
 }
 
 fn parse_record(v: &Value, out: &mut Vec<Record>) {
@@ -302,6 +365,16 @@ fn describe_input(tool: &str, input: &Value) -> Option<String> {
         }
     }
     None
+}
+
+/// Does this record drive **session-level** chrome — the model chip and the
+/// context meter — rather than the timeline?
+///
+/// Such records are meaningful only from the parent transcript. A subagent runs
+/// its own model and has its own context window, so letting a child's through
+/// would misreport both.
+pub fn is_session_scoped(record: &Record) -> bool {
+    matches!(record, Record::Model { .. } | Record::Usage { .. })
 }
 
 /// One subagent transcript found beneath a parent session, with the sidecar
@@ -715,7 +788,11 @@ mod tests {
     fn meta_sidecars_are_not_mistaken_for_transcripts() {
         let (parent, subs) = scratch("meta");
         write_child(&subs, "abc123", SID, true, "toolu_1");
-        assert_eq!(fs::read_dir(&subs).unwrap().count(), 2, "fixture writes both files");
+        assert_eq!(
+            fs::read_dir(&subs).unwrap().count(),
+            2,
+            "fixture writes both files"
+        );
         assert_eq!(subagents_for(&parent).len(), 1);
         let _ = fs::remove_dir_all(parent.parent().unwrap().parent().unwrap());
     }
@@ -726,7 +803,13 @@ mod tests {
     #[test]
     fn a_child_naming_another_session_is_refused() {
         let (parent, subs) = scratch("wrongsid");
-        write_child(&subs, "abc123", "11111111-2222-3333-4444-555555555555", true, "toolu_1");
+        write_child(
+            &subs,
+            "abc123",
+            "11111111-2222-3333-4444-555555555555",
+            true,
+            "toolu_1",
+        );
         assert!(subagents_for(&parent).is_empty());
         let _ = fs::remove_dir_all(parent.parent().unwrap().parent().unwrap());
     }
@@ -821,6 +904,34 @@ mod tests {
             }
         }
         eprintln!("verified {checked} real subagent transcripts");
+    }
+
+    #[test]
+    fn only_model_and_usage_are_session_scoped() {
+        let usage = Record::Usage {
+            usage: TokenUsage::default(),
+            model: None,
+            message_id: None,
+            request_id: None,
+        };
+        assert!(is_session_scoped(&usage));
+        assert!(is_session_scoped(&Record::Model {
+            model: "claude-opus-5".into()
+        }));
+        // Tool activity is per-agent and DOES belong in the timeline, whichever
+        // transcript it came from — that is the whole point of reading them.
+        assert!(!is_session_scoped(&Record::Start {
+            id: "toolu_1".into(),
+            tool: "Bash".into(),
+            command: None,
+            ts: 0,
+        }));
+        assert!(!is_session_scoped(&Record::End {
+            id: "toolu_1".into(),
+            is_error: false,
+            output: None,
+            ts: 0,
+        }));
     }
 
     #[test]

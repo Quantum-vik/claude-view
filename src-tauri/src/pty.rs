@@ -387,8 +387,16 @@ pub fn spawn_session(
             if let Some(sid) = session.session_id.read().clone() {
                 tailer.set_session_id(&sid);
             }
-            for rec in tailer.poll() {
-                match rec {
+            for tailed in tailer.poll() {
+                let crate::transcript::Tailed { agent_id, record } = tailed;
+                // A subagent runs its own model and keeps its own context
+                // window, so its Model/Usage records must never reach the
+                // session header or meter — that would make the model chip
+                // flicker and the meter jump to a child's occupancy.
+                if agent_id.is_some() && crate::transcript::is_session_scoped(&record) {
+                    continue;
+                }
+                match record {
                     // Model changes push a control frame (deduped) so viewers
                     // reflect the session's real model, self-correcting if a
                     // switch was declined at the CLI confirmation prompt.
@@ -416,7 +424,7 @@ pub fn spawn_session(
                         }));
                     }
                     rec => {
-                        if let Some(event) = session.apply_transcript(rec) {
+                        if let Some(event) = session.apply_transcript(rec, agent_id) {
                             session.send_control(
                                 serde_json::json!({ "type": "timeline", "event": event }),
                             );

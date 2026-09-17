@@ -626,6 +626,7 @@ pub(crate) fn apply_pre_tool_use(
         .map(str::to_string)
         .unwrap_or_else(|| Uuid::new_v4().to_string());
     let event = TimelineEvent {
+        agent_id: None,
         id,
         kind: "command".into(),
         tool: tool.clone(),
@@ -694,6 +695,7 @@ fn apply_post_tool_use_with_output(
     } else {
         // PostToolUse without a matching Pre (e.g. viewer attached mid-call).
         let event = TimelineEvent {
+            agent_id: None,
             id: tool_use_id
                 .map(str::to_string)
                 .unwrap_or_else(|| Uuid::new_v4().to_string()),
@@ -804,6 +806,7 @@ mod tests {
     /// A finished card, for filling a timeline without going through the hooks.
     fn settled(id: &str, ts: u64) -> TimelineEvent {
         TimelineEvent {
+            agent_id: None,
             id: id.into(),
             kind: "command".into(),
             tool: "Read".into(),

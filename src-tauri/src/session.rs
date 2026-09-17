@@ -81,6 +81,11 @@ pub struct TimelineEvent {
     /// Captured tool result (truncated) from PostToolUse, shown when a
     /// timeline card is expanded.
     pub output: Option<String>,
+    /// Which subagent produced this card, or `None` for the parent session.
+    /// Without it a subagent's tool calls appear indistinguishable from the
+    /// parent's — and subagents can be the majority of a session's work.
+    #[serde(rename = "agentId", skip_serializing_if = "Option::is_none")]
+    pub agent_id: Option<String>,
 }
 
 pub struct Session {
@@ -168,7 +173,11 @@ impl Session {
     /// by tool-use id, so hook-derived cards (which use the same ids and arrive
     /// live) take precedence and transcript records only fill gaps. Returns the
     /// event to broadcast, or None if nothing changed.
-    pub fn apply_transcript(&self, rec: crate::transcript::Record) -> Option<TimelineEvent> {
+    pub fn apply_transcript(
+        &self,
+        rec: crate::transcript::Record,
+        agent_id: Option<String>,
+    ) -> Option<TimelineEvent> {
         use crate::transcript::Record;
         let mut timeline = self.timeline.lock();
         match rec {
@@ -182,6 +191,7 @@ impl Session {
                     return None; // already known (hook or earlier poll)
                 }
                 let event = TimelineEvent {
+                    agent_id,
                     id,
                     kind: "command".into(),
                     tool,
@@ -629,6 +639,7 @@ pub fn now_ms() -> u64 {
 
 #[cfg(test)]
 mod tests {
+
     use super::*;
 
     const ALL_HOOK_STATES: [AgentState; 4] = [
