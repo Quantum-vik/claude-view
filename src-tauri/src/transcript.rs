@@ -2,6 +2,7 @@ use std::fs;
 use std::io::{BufRead, BufReader, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 
+use serde::Serialize;
 use serde_json::Value;
 
 /// One tool event parsed from a transcript line.
@@ -24,25 +25,104 @@ pub enum Record {
     /// session's *actual* current model — the ground truth the CLI records —
     /// rather than optimistically trusting a switch that may be declined.
     Model { model: String },
-    /// Token usage from an assistant turn (`message.usage`). `input` is the
-    /// context sent (prompt + cache), i.e. the context-window occupancy;
-    /// `output` is tokens generated that turn. Powers the context meter.
-    Usage { input: u64, output: u64 },
+    /// Token usage from an assistant turn (`message.usage`), split per priced
+    /// kind. Powers both the context meter (via `usage.context_tokens()`) and
+    /// cost.
+    ///
+    /// `message_id` and `request_id` are carried because Claude Code writes ONE
+    /// RECORD PER CONTENT BLOCK, each repeating this same usage object. Summing
+    /// per line inflates every total (2.2x-3.3x measured). Whichever key wins,
+    /// de-duplication needs it at hand — so capture both and decide upstream.
+    Usage {
+        usage: TokenUsage,
+        model: Option<String>,
+        message_id: Option<String>,
+        request_id: Option<String>,
+    },
+}
+
+/// Per-turn token usage, split by the kinds that price differently.
+///
+/// The three input kinds used to be collapsed into one number. That is correct
+/// for the context meter — occupancy is occupancy, whatever it cost — and badly
+/// wrong for money: measured against real transcripts, charging cache reads at
+/// the base input rate overstates an Opus 5 session by **7.2x**, because ~97% of
+/// its input tokens are cache reads priced at 0.1x base. So the meter keeps the
+/// sum (see [`TokenUsage::context_tokens`]) and cost gets the breakdown.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
+pub struct TokenUsage {
+    /// Uncached input — `usage.input_tokens`. The 1x reference rate.
+    pub input: u64,
+    /// Cache read/refresh — `usage.cache_read_input_tokens`. ~0.1x input.
+    #[serde(rename = "cacheRead")]
+    pub cache_read: u64,
+    /// Cache write at 5-minute TTL. 1.25x input.
+    #[serde(rename = "cacheWrite5m")]
+    pub cache_write_5m: u64,
+    /// Cache write at 1-hour TTL. 2x input. Claude Code writes mostly 1h, so
+    /// 2x — not 1.25x — is the right mental default for this app.
+    #[serde(rename = "cacheWrite1h")]
+    pub cache_write_1h: u64,
+    /// Generated tokens. Already includes thinking tokens; never add those on
+    /// top or output is double-counted.
+    pub output: u64,
+}
+
+impl TokenUsage {
+    /// Context-window occupancy: every input-side token, whatever it cost.
+    /// This is the only thing the old collapsed number was ever right for.
+    pub fn context_tokens(&self) -> u64 {
+        self.input + self.cache_read + self.cache_write_5m + self.cache_write_1h
+    }
+
+    pub fn is_zero(&self) -> bool {
+        self.context_tokens() == 0 && self.output == 0
+    }
+
+    /// Parse `message.usage`. Returns `None` when the block is absent or all
+    /// zero — `<synthetic>` turns carry an all-zero usage and must not reach
+    /// pricing, where they would trip the unknown-model banner for no reason.
+    pub fn parse(v: &Value) -> Option<Self> {
+        let u = &v["message"]["usage"];
+        if !u.is_object() {
+            return None;
+        }
+        let n = |k: &str| u[k].as_u64().unwrap_or(0);
+
+        // The per-TTL split lives in a nested object. When it is absent (older
+        // CLI writes), attribute the total to the 5m bucket: that is the
+        // CHEAPER write rate, so a legacy transcript is under-priced rather
+        // than charged a 2x rate it may never have incurred. Understating on
+        // data we cannot read beats inventing a number.
+        let cc = &u["cache_creation"];
+        let (w5, w1) = if cc.is_object() {
+            (
+                cc["ephemeral_5m_input_tokens"].as_u64().unwrap_or(0),
+                cc["ephemeral_1h_input_tokens"].as_u64().unwrap_or(0),
+            )
+        } else {
+            (n("cache_creation_input_tokens"), 0)
+        };
+
+        let usage = TokenUsage {
+            input: n("input_tokens"),
+            cache_read: n("cache_read_input_tokens"),
+            cache_write_5m: w5,
+            cache_write_1h: w1,
+            output: n("output_tokens"),
+        };
+        if usage.is_zero() {
+            return None;
+        }
+        Some(usage)
+    }
 }
 
 /// Context tokens for one assistant turn: input side = context-window fill.
+///
+/// Thin wrapper over [`TokenUsage`] for callers that only want occupancy.
 pub fn usage_from(v: &Value) -> Option<(u64, u64)> {
-    let u = &v["message"]["usage"];
-    if !u.is_object() {
-        return None;
-    }
-    let n = |k: &str| u[k].as_u64().unwrap_or(0);
-    let input = n("input_tokens") + n("cache_read_input_tokens") + n("cache_creation_input_tokens");
-    let output = n("output_tokens");
-    if input == 0 && output == 0 {
-        return None;
-    }
-    Some((input, output))
+    TokenUsage::parse(v).map(|u| (u.context_tokens(), u.output))
 }
 
 /// Tails a session transcript JSONL, emitting tool Start/End records as new
@@ -141,8 +221,13 @@ fn parse_record(v: &Value, out: &mut Vec<Record>) {
                 model: model.to_string(),
             });
         }
-        if let Some((input, output)) = usage_from(v) {
-            out.push(Record::Usage { input, output });
+        if let Some(usage) = TokenUsage::parse(v) {
+            out.push(Record::Usage {
+                usage,
+                model: v["message"]["model"].as_str().map(str::to_string),
+                message_id: v["message"]["id"].as_str().map(str::to_string),
+                request_id: v["requestId"].as_str().map(str::to_string),
+            });
         }
     }
     let content = &v["message"]["content"];
@@ -354,6 +439,104 @@ fn parse_iso_ms(s: &str) -> Option<u64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The split is the whole point: these three price 1x / 0.1x / 1.25x / 2x,
+    /// so collapsing them is what produced the 7.2x overstatement.
+    #[test]
+    fn usage_splits_by_priced_kind() {
+        let v: Value = serde_json::from_str(
+            r#"{"type":"assistant","message":{"id":"msg_1","model":"claude-opus-5","usage":{
+                "input_tokens":100,
+                "cache_read_input_tokens":9000,
+                "cache_creation_input_tokens":500,
+                "cache_creation":{"ephemeral_5m_input_tokens":200,"ephemeral_1h_input_tokens":300},
+                "output_tokens":42}}}"#,
+        )
+        .unwrap();
+        let u = TokenUsage::parse(&v).expect("usage present");
+        assert_eq!(u.input, 100);
+        assert_eq!(u.cache_read, 9000);
+        assert_eq!(u.cache_write_5m, 200);
+        assert_eq!(u.cache_write_1h, 300);
+        assert_eq!(u.output, 42);
+        // The TTL split must reconcile with the flat total the API also sends.
+        assert_eq!(u.cache_write_5m + u.cache_write_1h, 500);
+        // Occupancy is every input-side token, whatever it cost.
+        // 100 + 9000 + 200 + 300. Identical to what the OLD collapsed formula
+        // (input + cache_read + cache_creation) produced, which is the point:
+        // splitting changes what cost can see, never what the meter reports.
+        assert_eq!(u.context_tokens(), 9600);
+        assert_eq!(usage_from(&v), Some((9600, 42)));
+    }
+
+    /// Older CLI writes carry no per-TTL object. Attribute to the CHEAPER
+    /// bucket so such a transcript is under-priced rather than charged a 2x
+    /// rate it may never have incurred.
+    #[test]
+    fn usage_without_ttl_split_falls_back_to_5m() {
+        let v: Value = serde_json::from_str(
+            r#"{"type":"assistant","message":{"usage":{
+                "input_tokens":10,"cache_creation_input_tokens":700,"output_tokens":1}}}"#,
+        )
+        .unwrap();
+        let u = TokenUsage::parse(&v).unwrap();
+        assert_eq!(u.cache_write_5m, 700);
+        assert_eq!(u.cache_write_1h, 0);
+        assert_eq!(u.context_tokens(), 710);
+    }
+
+    /// `<synthetic>` turns carry an all-zero usage block. They must not reach
+    /// pricing, where an unknown model id would raise an "Unpriced" banner over
+    /// a turn that cost nothing.
+    #[test]
+    fn all_zero_usage_is_dropped() {
+        let v: Value = serde_json::from_str(
+            r#"{"type":"assistant","message":{"model":"<synthetic>","usage":{
+                "input_tokens":0,"cache_read_input_tokens":0,
+                "cache_creation_input_tokens":0,"output_tokens":0}}}"#,
+        )
+        .unwrap();
+        assert!(TokenUsage::parse(&v).is_none());
+        assert!(usage_from(&v).is_none());
+    }
+
+    #[test]
+    fn missing_usage_block_is_none() {
+        let v: Value = serde_json::from_str(r#"{"type":"assistant","message":{}}"#).unwrap();
+        assert!(TokenUsage::parse(&v).is_none());
+    }
+
+    /// Dedup keys must survive parsing: Claude Code repeats one usage object
+    /// across every content block of a turn, so summing per record inflates
+    /// totals. Whichever key wins, both have to be on the record.
+    #[test]
+    fn usage_record_carries_dedup_keys() {
+        let v: Value = serde_json::from_str(
+            r#"{"type":"assistant","requestId":"req_abc","message":{
+                "id":"msg_xyz","model":"claude-opus-5",
+                "usage":{"input_tokens":5,"output_tokens":5}}}"#,
+        )
+        .unwrap();
+        let mut out = Vec::new();
+        parse_record(&v, &mut out);
+        let found = out.iter().find_map(|r| match r {
+            Record::Usage {
+                message_id,
+                request_id,
+                model,
+                ..
+            } => Some((message_id.clone(), request_id.clone(), model.clone())),
+            _ => None,
+        });
+        assert_eq!(
+            found,
+            Some((
+                Some("msg_xyz".into()),
+                Some("req_abc".into()),
+                Some("claude-opus-5".into())
+            ))
+        );
+    }
 
     #[test]
     fn iso_parse() {

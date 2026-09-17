@@ -401,11 +401,18 @@ pub fn spawn_session(
                             );
                         }
                     }
-                    crate::transcript::Record::Usage { input, output } => {
-                        let usage = crate::session::ContextUsage { input, output };
-                        *session.usage.write() = Some(usage);
+                    crate::transcript::Record::Usage { usage, .. } => {
+                        // The meter wants occupancy, so it keeps the collapsed
+                        // sum; the per-kind breakdown rides along for cost.
+                        let input = usage.context_tokens();
+                        let output = usage.output;
+                        *session.usage.write() =
+                            Some(crate::session::ContextUsage { input, output });
                         session.send_control(serde_json::json!({
-                            "type": "usage", "input": input, "output": output
+                            "type": "usage",
+                            "input": input,
+                            "output": output,
+                            "breakdown": usage
                         }));
                     }
                     rec => {
