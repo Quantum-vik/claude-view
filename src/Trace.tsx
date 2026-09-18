@@ -26,6 +26,7 @@
 
 import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
+import { save } from "@tauri-apps/plugin-dialog";
 import { T, tint, toolFamily } from "./tokens";
 import { formatUsd, type TokenUsage } from "./cost";
 import { CAVEAT, costOfTurn } from "./pricing";
@@ -332,6 +333,44 @@ export default function Trace({ vid, modelId }: Props) {
   const { entries, turns, unavailable, loading, sources } = useTrace(vid);
   const [filter, setFilter] = useState<Filter>("all");
   const [query, setQuery] = useState("");
+  const [exporting, setExporting] = useState<string | null>(null);
+
+  /** Export the WHOLE trace, not the filtered view: a file that silently
+   *  contained only what happened to be on screen would be a trap. */
+  const doExport = useCallback(
+    async (format: "md" | "json") => {
+      setExporting(format);
+      try {
+        const path = await save({
+          defaultPath: `claude-view-${vid.slice(0, 8)}.${format}`,
+          filters: [
+            format === "md"
+              ? { name: "Markdown", extensions: ["md"] }
+              : { name: "JSON", extensions: ["json"] },
+          ],
+        });
+        if (!path) return; // user cancelled — not an error
+        // The backend writes it: handing the body to the webview would mean
+        // granting the frontend a write-any-file capability it has no other
+        // need for.
+        const out = (await invoke("export_trace", {
+          viewerId: vid,
+          format,
+          dest: path,
+        })) as { path: string; entries: number };
+        setExported(`${out.entries} entries → ${out.path}`);
+      } catch (e) {
+        // Surface it rather than failing silently — an export that quietly
+        // does nothing is indistinguishable from one that worked.
+        setExportError(String(e));
+      } finally {
+        setExporting(null);
+      }
+    },
+    [vid],
+  );
+  const [exportError, setExportError] = useState<string | null>(null);
+  const [exported, setExported] = useState<string | null>(null);
 
   const rows = useMemo(
     () => buildRows(entries, turns, filter, query),
@@ -396,7 +435,63 @@ export default function Trace({ vid, modelId }: Props) {
           {sources.length > 1 && `${sources.length - 1} subagents · `}
           {rows.length} rows
         </span>
+        {(["md", "json"] as const).map((f) => (
+          <button
+            key={f}
+            onClick={() => void doExport(f)}
+            disabled={exporting !== null || !!unavailable}
+            title={
+              f === "md"
+                ? "Export the whole session as Markdown — readable, shareable"
+                : "Export the whole session as JSON — tokens per turn, every entry"
+            }
+            style={{
+              background: T.surface2,
+              border: `1px solid ${T.border}`,
+              borderRadius: 6,
+              color: exporting === f ? T.accent : T.textDim,
+              cursor: exporting || unavailable ? "default" : "pointer",
+              fontSize: 10.5,
+              fontFamily: T.mono,
+              padding: "3px 8px",
+              opacity: unavailable ? 0.4 : 1,
+            }}
+          >
+            {exporting === f ? "…" : `↓ ${f}`}
+          </button>
+        ))}
       </div>
+
+      {exported && (
+        <div
+          onClick={() => setExported(null)}
+          style={{
+            padding: "6px 14px",
+            background: tint(T.success, 0.12),
+            color: T.success,
+            fontSize: 11.5,
+            fontFamily: T.mono,
+            cursor: "pointer",
+          }}
+        >
+          Exported {exported} (click to dismiss)
+        </div>
+      )}
+      {exportError && (
+        <div
+          onClick={() => setExportError(null)}
+          style={{
+            padding: "6px 14px",
+            background: T.errorTint,
+            color: T.errorText,
+            fontSize: 11.5,
+            fontFamily: T.mono,
+            cursor: "pointer",
+          }}
+        >
+          Export failed: {exportError} (click to dismiss)
+        </div>
+      )}
 
       <div style={{ flex: 1, overflow: "auto", padding: "6px 0 40px" }}>
         {unavailable && (

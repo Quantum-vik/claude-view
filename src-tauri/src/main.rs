@@ -1,6 +1,7 @@
 // Prevents an extra console window on Windows in release builds.
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod export;
 mod git;
 mod hooks_install;
 mod instance;
@@ -261,6 +262,99 @@ fn is_executable(_meta: &std::fs::Metadata) -> bool {
 /// which only ever displays a file as text) when available. The OS default
 /// opener — which could *execute* a bundle/script — is used only as a fallback
 /// and only for an allowlist of inert document types.
+/// Write a session's full trace to `dest`.
+///
+/// The command writes the file itself rather than handing the body back for the
+/// webview to save: that would mean granting the frontend a general
+/// write-any-file capability, a far larger surface than "write this one export
+/// to the path the user just picked in a dialog".
+#[tauri::command]
+fn export_trace(
+    state: State<'_, AppState>,
+    viewer_id: String,
+    format: String,
+    dest: String,
+) -> Result<serde_json::Value, String> {
+    let fmt = crate::export::Format::parse(&format).ok_or("unknown format")?;
+    let session = state
+        .registry
+        .get(&viewer_id)
+        .ok_or_else(|| "no such session".to_string())?;
+
+    let sid = session.session_id.read().clone();
+    let path = crate::trace::locate_for(&session.cwd, sid.as_deref(), session.spawned_at);
+
+    // Read the WHOLE trace, not a page: a partial export is worse than none,
+    // because nothing in the file would say it was cut short.
+    let mut entries = Vec::new();
+    let mut turns = std::collections::BTreeMap::new();
+    let mut sources = Vec::new();
+    let mut cursor = crate::trace::Cursor::default();
+    for _ in 0..500 {
+        let page = crate::trace::read_page(path.as_deref(), &cursor, crate::trace::MAX_LIMIT)
+            .map_err(|why| match why {
+                crate::trace::Unavailable::NoTranscript => {
+                    "no transcript for this session — nothing to export".to_string()
+                }
+                crate::trace::Unavailable::Unreadable => {
+                    "the transcript could not be read".to_string()
+                }
+            })?;
+        if page.sources.len() > sources.len() {
+            sources = page.sources.clone();
+        }
+        let done = !page.has_more || page.entries.is_empty();
+        entries.extend(page.entries);
+        turns.extend(page.turns);
+        cursor = crate::trace::Cursor::decode(&page.cursor).unwrap_or_default();
+        if done {
+            break;
+        }
+    }
+
+    let meta = crate::export::Meta {
+        session_id: sid,
+        cwd: session.cwd.clone(),
+        model: session.model.read().clone(),
+        sources,
+        exported_at: now_iso8601(),
+    };
+    let body = match fmt {
+        crate::export::Format::Markdown => crate::export::to_markdown(&entries, &turns, &meta),
+        crate::export::Format::Json => crate::export::to_json(&entries, &turns, &meta),
+    };
+    let dest = fmt.with_extension(&dest);
+    std::fs::write(&dest, body.as_bytes()).map_err(|e| format!("could not write {dest}: {e}"))?;
+    Ok(serde_json::json!({
+        "path": dest,
+        "bytes": body.len(),
+        "entries": entries.len(),
+        "turns": turns.len(),
+    }))
+}
+
+/// `2026-09-18T11:00:00Z`, without pulling in a datetime crate for one line.
+fn now_iso8601() -> String {
+    let secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let days = secs / 86_400;
+    let (h, mi, s) = ((secs % 86_400) / 3600, (secs % 3600) / 60, secs % 60);
+    // Civil-from-days (Howard Hinnant), matching transcript.rs's parser.
+    let z = days as i64 + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z.rem_euclid(146_097);
+    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146_096) / 365;
+    let y = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 };
+    let y = if m <= 2 { y + 1 } else { y };
+    format!("{y:04}-{m:02}-{d:02}T{h:02}:{mi:02}:{s:02}Z")
+}
+
 #[tauri::command]
 fn read_trace(
     state: State<'_, AppState>,
@@ -649,6 +743,7 @@ fn main() {
             close_session,
             get_conn_info,
             read_trace,
+            export_trace,
             open_path,
             open_url,
             hooks_status,
