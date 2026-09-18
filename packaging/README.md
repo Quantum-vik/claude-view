@@ -27,10 +27,40 @@ system WebKit.
 APPIMAGE_EXTRACT_AND_RUN=1 npm run tauri build -- --bundles deb,appimage
 ```
 
-**That env var is required on Arch**, and harmless everywhere else. linuxdeploy
-is an AppImage that mounts itself via FUSE **2**; Arch ships only `fusermount3`,
-so without it the `.deb` builds fine and the AppImage fails with `failed to run
-linuxdeploy`. Extracting instead of mounting avoids needing root or `fuse2`.
+`APPIMAGE_EXTRACT_AND_RUN=1` is needed on Arch and harmless elsewhere:
+linuxdeploy is itself an AppImage and mounts via FUSE **2**, but Arch ships only
+`fusermount3`.
+
+### The AppImage does not currently build on modern Arch
+
+It is **not** shipped in v1.0.0. The `.deb` and `.pkg.tar.zst` are.
+
+The blocker is *not* FUSE. `gdk-pixbuf2` 2.44+ compiles its image loaders into
+the library and ships no `/usr/lib/gdk-pixbuf-2.0/2.10.0/` directory at all —
+but `pkg-config` still advertises that path:
+
+```
+$ pkg-config --variable=gdk_pixbuf_binarydir gdk-pixbuf-2.0
+/usr/lib/gdk-pixbuf-2.0/2.10.0          # does not exist
+```
+
+`linuxdeploy-plugin-gtk` copies that path unconditionally and dies with
+`cp: cannot stat`, which Tauri surfaces only as `failed to run linuxdeploy` —
+the real message is two layers down. Run linuxdeploy directly to see it:
+
+```bash
+cd src-tauri/target/release/bundle/appimage
+APPIMAGE_EXTRACT_AND_RUN=1 ~/.cache/tauri/linuxdeploy-x86_64.AppImage \
+  --appdir claude-view.AppDir --plugin gtk --output appimage
+```
+
+A working no-root workaround is a shadowed `.pc` on `PKG_CONFIG_PATH` whose
+`gdk_pixbuf_binarydir` points at a directory that exists and holds a generated
+`loaders.cache`. It builds, but it changes `PKG_CONFIG_PATH`, which invalidates
+the cargo cache and forces a full GTK recompile — so it is left out of the
+default recipe rather than imposed on every build. Building the AppImage on a
+distro with the traditional gdk-pixbuf layout (Debian, Ubuntu) avoids the
+problem entirely, and is the better home for it anyway.
 
 Artifacts land in `src-tauri/target/release/bundle/{deb,appimage}/`.
 

@@ -47,11 +47,13 @@ dev:
 
 # Build the downloadable Linux artifacts (.deb + .AppImage).
 #
-# APPIMAGE_EXTRACT_AND_RUN=1 is not optional on Arch (and most modern distros):
-# linuxdeploy is itself an AppImage and mounts via FUSE *2*, but Arch ships only
-# fusermount3. Without it the deb succeeds and the AppImage dies with the
-# singularly unhelpful `failed to run linuxdeploy`. Extracting instead of
-# mounting needs no root and no fuse2 package.
+# APPIMAGE_EXTRACT_AND_RUN=1 is needed on Arch: linuxdeploy is itself an AppImage
+# and mounts via FUSE *2*, but Arch ships only fusermount3.
+#
+# NOTE: on modern Arch the AppImage still fails, for an unrelated reason --
+# gdk-pixbuf 2.44+ ships no /usr/lib/gdk-pixbuf-2.0/2.10.0 while pkg-config still
+# advertises it, and linuxdeploy-plugin-gtk copies that path unconditionally.
+# See packaging/README.md. The deb builds fine either way.
 package:
     APPIMAGE_EXTRACT_AND_RUN=1 npm run tauri build -- --bundles deb,appimage
 
