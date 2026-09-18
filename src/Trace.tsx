@@ -24,7 +24,7 @@
  *     header, rather than defended on every row.
  */
 
-import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { save } from "@tauri-apps/plugin-dialog";
 import { T, tint, toolFamily } from "./tokens";
@@ -443,6 +443,54 @@ export default function Trace({
   const [exportError, setExportError] = useState<string | null>(null);
   const [exported, setExported] = useState<string | null>(null);
 
+  /**
+   * Keep the reader in place when the session ends.
+   *
+   * `live` flipping reverses the whole stream. Measured before this existed:
+   * scrollTop stayed at 21808 of 48463 while the content under it reversed —
+   * the reader was silently moved from 45% into a newest-first list to 45%
+   * into an oldest-first one, a different part of the session, with nothing
+   * said. Preserving the pixel offset is exactly the wrong thing; what has to
+   * be preserved is the ROW.
+   *
+   * So: before the flip repaints, remember which row is at the top of the
+   * viewport and how far into it we are; afterwards, put that same row back
+   * there. The order changes around the reader instead of under them.
+   */
+  const scrollerRef = useRef<HTMLDivElement>(null);
+  const anchor = useRef<{ key: string; offset: number } | null>(null);
+  const prevLive = useRef(live);
+  /** Set when the order flips under an open panel, so the change is announced
+   *  rather than merely survived. Not shown on first mount — a session that was
+   *  already over when you opened it never reversed. */
+  const [reversed, setReversed] = useState(false);
+
+  if (prevLive.current !== live && scrollerRef.current) {
+    const sc = scrollerRef.current;
+    const top = sc.getBoundingClientRect().top;
+    let best: { key: string; offset: number } | null = null;
+    for (const el of Array.from(sc.querySelectorAll<HTMLElement>("[data-row]"))) {
+      const r = el.getBoundingClientRect();
+      if (r.bottom < top) continue; // fully scrolled past
+      best = { key: el.dataset.row as string, offset: r.top - top };
+      break;
+    }
+    anchor.current = best;
+    prevLive.current = live;
+    setReversed(true);
+  }
+
+  useLayoutEffect(() => {
+    const a = anchor.current;
+    const sc = scrollerRef.current;
+    if (!a || !sc) return;
+    anchor.current = null;
+    const el = sc.querySelector<HTMLElement>(`[data-row="${CSS.escape(a.key)}"]`);
+    if (!el) return; // the row was filtered out — leave the scroll alone
+    const delta = el.getBoundingClientRect().top - sc.getBoundingClientRect().top - a.offset;
+    sc.scrollTop += delta;
+  }, [live]);
+
   const byAgent = useMemo(() => {
     const m = new Map<string, AgentRun>();
     for (const r of roster.runs) m.set(r.id, r);
@@ -637,7 +685,27 @@ export default function Trace({
         </div>
       )}
 
-      <div style={{ flex: 1, overflow: "auto", padding: "6px 0 40px" }}>
+      {reversed && (
+        <div
+          onClick={() => setReversed(false)}
+          style={{
+            padding: "6px 14px",
+            background: tint(T.running, 0.12),
+            borderBottom: `1px solid ${tint(T.running, 0.3)}`,
+            color: T.running,
+            fontSize: 11.5,
+            fontFamily: T.mono,
+            cursor: "pointer",
+          }}
+        >
+          {live
+            ? "Session resumed — newest turns are at the top again."
+            : "Session ended — the stream now reads oldest-first. You are still on the same turn."}{" "}
+          <span style={{ color: T.textFaint }}>(click to dismiss)</span>
+        </div>
+      )}
+
+      <div ref={scrollerRef} style={{ flex: 1, overflow: "auto", padding: "6px 0 40px" }}>
         {unavailable && (
           <div style={{ padding: 20, color: T.textDim, font: `13px ${T.serif}` }}>
             {unavailable === "no_transcript" ? (
@@ -683,16 +751,19 @@ export default function Trace({
           </div>
         )}
         {rows.map((r) => (
-          <RowView
-            key={r.key}
-            row={r}
-            turns={turns}
-            modelId={modelId}
-            runs={byAgent}
-            running={running}
-            hideAgentHeaders={scopeLocked}
-            onScopeTo={scopeLocked ? undefined : onScope}
-          />
+          // data-row is the anchor the reversal uses to keep the reader in
+          // place; the wrapper exists for that and nothing else.
+          <div key={r.key} data-row={r.key}>
+            <RowView
+              row={r}
+              turns={turns}
+              modelId={modelId}
+              runs={byAgent}
+              running={running}
+              hideAgentHeaders={scopeLocked}
+              onScopeTo={scopeLocked ? undefined : onScope}
+            />
+          </div>
         ))}
       </div>
     </div>
