@@ -1,6 +1,7 @@
 // Prevents an extra console window on Windows in release builds.
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod agents;
 mod export;
 mod git;
 mod hooks_install;
@@ -369,6 +370,40 @@ fn now_iso8601() -> String {
     let m = if mp < 10 { mp + 3 } else { mp - 9 };
     let y = if m <= 2 { y + 1 } else { y };
     format!("{y:04}-{m:02}-{d:02}T{h:02}:{mi:02}:{s:02}Z")
+}
+
+/// The agent-run roster for a session: every subagent it spawned, named and
+/// costed, plus the parent totals so the viewer can show the partition.
+///
+/// A separate command rather than a field on `read_trace`, because the two
+/// answer different questions: the trace is paged and positional, the roster is
+/// whole-session and unordered by position. Folding them would mean either
+/// recomputing the roster on every page or letting it go stale on page two.
+#[tauri::command]
+fn read_agents(state: State<'_, AppState>, viewer_id: String) -> Result<serde_json::Value, String> {
+    let session = state
+        .registry
+        .get(&viewer_id)
+        .ok_or_else(|| "no such session".to_string())?;
+    let sid = session.session_id.read().clone();
+    let path = crate::trace::locate_for(&session.cwd, sid.as_deref(), session.spawned_at);
+
+    match path
+        .as_deref()
+        .ok_or(crate::trace::Unavailable::NoTranscript)
+        .and_then(crate::agents::read_roster)
+    {
+        Ok(roster) => serde_json::to_value(roster).map_err(|e| e.to_string()),
+        // Same typed-absence contract as the trace: the panel says WHICH
+        // failure it is rather than rendering an empty roster for "I cannot see".
+        Err(why) => Ok(serde_json::json!({
+            "unavailable": why,
+            "runs": [],
+            "parentTurns": 0,
+            "parentUsage": crate::transcript::TokenUsage::default(),
+            "duplicatesFolded": 0,
+        })),
+    }
 }
 
 #[tauri::command]
@@ -759,6 +794,7 @@ fn main() {
             close_session,
             get_conn_info,
             read_trace,
+            read_agents,
             export_trace,
             session_spend,
             open_path,

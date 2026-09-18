@@ -399,6 +399,11 @@ pub struct SubagentFile {
     pub parent_agent_id: Option<String>,
     pub agent_type: Option<String>,
     pub description: Option<String>,
+    /// Sidecar `spawnDepth`: 1 for a run the parent session spawned, 2+ for a
+    /// run spawned by another run. Depth is a property of the run, NOT of where
+    /// its file sits — records stay flat under the session however deep the
+    /// nesting goes. Defaults to 1 when the sidecar is missing or malformed.
+    pub depth: u32,
 }
 
 /// The directory holding a session's subagent transcripts.
@@ -455,6 +460,11 @@ pub fn subagents_for(parent: &Path) -> Vec<SubagentFile> {
             parent_agent_id: meta.as_ref().and_then(|m| str_field(m, "parentAgentId")),
             agent_type: meta.as_ref().and_then(|m| str_field(m, "agentType")),
             description: meta.as_ref().and_then(|m| str_field(m, "description")),
+            depth: meta
+                .as_ref()
+                .and_then(|m| m["spawnDepth"].as_u64())
+                .unwrap_or(1)
+                .max(1) as u32,
             path,
         });
     }
