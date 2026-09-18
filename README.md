@@ -5,13 +5,12 @@ session's terminal **in real time, character-by-character** — every command, i
 output, and Claude's messages — beside a **panel that is the readable, costed record of everything
 the session did**: the full trace, every subagent run, and what each turn cost.
 
-The panel has three views:
+The panel has two views:
 
 | View | What it shows |
 |---|---|
-| **Log** | One card per tool call — command, output, status, duration. The default. |
-| **Trace** | Everything: prompts, replies, thinking, tool calls and their full output, nested subagent runs, with **cost on each turn**. Searchable, filterable, exportable to Markdown or JSON. |
-| **Agents** | Every subagent the session spawned — what it was asked to do, its type, model, status, tool count, duration and **notional cost**. Selecting one scopes the Trace and the Log to it; **`open ↗` opens that run in its own window** with its own trace, cost and export. |
+| **Stream** | Everything the session did: prompts, replies, thinking, tool calls with their full output, nested subagent runs, with **cost on each turn**. Searchable, filterable (`tools` reproduces the old command log), exportable to Markdown or JSON. Reads **newest-first while a session is live, oldest-first once it has ended** — the direction is derived from session state, not a setting. |
+| **Agents** | Every subagent the session spawned — what it was asked to do, its type, model, status, tool count, duration and **notional cost**. Selecting one scopes the Stream to it; **`open ↗` opens that run in its own window** with its own trace, cost and export. |
 
 Above the split sits the **agent strip**, mirroring Claude Code's own agent tree — `● main`, then a
 chip per run with a live status dot and what it was asked to do. It appears only when a session has
@@ -164,7 +163,7 @@ Tauri app (one process)
 
 Where the spec was silent (or allowed a choice), these defaults were picked:
 
-- **Timeline transport:** pushed as JSON **text frames on the same WebSocket** as the PTY bytes
+- **Event transport:** pushed as JSON **text frames on the same WebSocket** as the PTY bytes
   (binary = bytes, text = control) instead of a second WS channel or Tauri emit — one connection,
   no framing ambiguity.
 - **Bridge normalization:** the bridge script forwards the hook's stdin JSON **verbatim** with
@@ -217,8 +216,8 @@ claude-view/
 ├─ src/                       React + TS frontend
 │  ├─ SessionWindow.tsx       per-session layout (terminal + panel)
 │  ├─ Terminal.tsx            xterm.js + fit/webgl/search + WS wiring
-│  ├─ Timeline.tsx            the Log view — command cards
-│  ├─ Trace.tsx               the Trace view — every kind, nested runs, cost per turn
+│  ├─ Trace.tsx               the Stream — every kind, nested runs, cost per turn
+│  ├─ events.ts              the hook event stream (live tool state)
 │  ├─ Agents.tsx              the Agents view — the run roster
 │  ├─ AgentStrip.tsx         the agent tree above the split (● main / ○ run)
 │  ├─ AgentWindow.tsx        one agent run in its own read-only window
