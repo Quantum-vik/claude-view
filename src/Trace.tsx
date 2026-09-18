@@ -333,17 +333,28 @@ interface Props {
    *  survives switching between the trace and the command log (#25). */
   agentScope: string | null;
   onScope: (agentId: string | null) => void;
+  /** The scope is a property of the surrounding window, not a filter the
+   *  reader chose — set by `AgentWindow`, where the whole window IS one run.
+   *
+   *  Suppresses the removable pill (clearing it would show the entire session
+   *  inside a window titled for one agent), the per-run headers (the window
+   *  header already carries that identity), and the sibling-run count (a
+   *  window showing one run has no business advertising its parent's others). */
+  scopeLocked?: boolean;
 }
 
-export default function Trace({ vid, modelId, agentScope, onScope }: Props) {
+export default function Trace({ vid, modelId, agentScope, onScope, scopeLocked = false }: Props) {
   const { entries, turns, unavailable, loading, sources } = useTrace(vid);
   const { roster } = useRoster(vid);
   const [filter, setFilter] = useState<Filter>("all");
   const [query, setQuery] = useState("");
   const [exporting, setExporting] = useState<string | null>(null);
 
-  /** Export the WHOLE trace, not the filtered view: a file that silently
-   *  contained only what happened to be on screen would be a trap. */
+  /** Export the whole trace, not the on-screen filtered view: a file that
+   *  silently contained only what kind-tab and search happened to leave visible
+   *  would be a trap. The ONE exception is a locked scope — in an agent window
+   *  the run is the window's subject, not a filter the reader applied, so
+   *  exporting its parent's whole session is the surprising outcome. */
   const doExport = useCallback(
     async (format: "md" | "json") => {
       setExporting(format);
@@ -364,6 +375,7 @@ export default function Trace({ vid, modelId, agentScope, onScope }: Props) {
           viewerId: vid,
           format,
           dest: path,
+          agent: scopeLocked ? agentScope : null,
         })) as { path: string; entries: number };
         setExported(`${out.entries} entries → ${out.path}`);
       } catch (e) {
@@ -437,7 +449,7 @@ export default function Trace({ vid, modelId, agentScope, onScope }: Props) {
             {label}
           </span>
         ))}
-        {agentScope && (
+        {agentScope && !scopeLocked && (
           <span
             title={scopedRun ? runLabel(scopedRun) : agentScope}
             style={{
@@ -491,7 +503,7 @@ export default function Trace({ vid, modelId, agentScope, onScope }: Props) {
           }}
         />
         <span style={{ marginLeft: "auto", fontSize: 11, color: T.textFaint, fontFamily: T.mono }}>
-          {sources.length > 1 && `${sources.length - 1} subagents · `}
+          {!scopeLocked && sources.length > 1 && `${sources.length - 1} subagents · `}
           {rows.length} rows
         </span>
         {(["md", "json"] as const).map((f) => (
@@ -598,7 +610,14 @@ export default function Trace({ vid, modelId, agentScope, onScope }: Props) {
           </div>
         )}
         {rows.map((r) => (
-          <RowView key={r.key} row={r} turns={turns} modelId={modelId} runs={byAgent} />
+          <RowView
+            key={r.key}
+            row={r}
+            turns={turns}
+            modelId={modelId}
+            runs={byAgent}
+            hideAgentHeaders={scopeLocked}
+          />
         ))}
       </div>
     </div>
@@ -610,6 +629,7 @@ const RowView = memo(function RowView({
   turns,
   modelId,
   runs,
+  hideAgentHeaders,
 }: {
   row: Row;
   turns: Record<string, TokenUsage>;
@@ -617,6 +637,8 @@ const RowView = memo(function RowView({
   /** Roster metadata by agent id, so a run's block can open with what it was
    *  asked to do instead of a hex prefix. */
   runs: Map<string, AgentRun>;
+  /** The surrounding window already names the run — don't repeat it per block. */
+  hideAgentHeaders?: boolean;
 }) {
   if (row.kind === "turn") {
     const u = turns[row.turnId];
@@ -678,6 +700,7 @@ const RowView = memo(function RowView({
   }
 
   if (row.kind === "agent") {
+    if (hideAgentHeaders) return null;
     // Promoted from a hairline to a real section opening (#22). The prototype's
     // spine and band both lost to this: identity and cost belong exactly where
     // the run's work appears, not in a rail beside it.

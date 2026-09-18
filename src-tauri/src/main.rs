@@ -285,12 +285,16 @@ fn session_spend() -> Result<serde_json::Value, String> {
     serde_json::to_value(spend).map_err(|e| e.to_string())
 }
 
+/// `agent`, when set, exports only that run. An agent window passes it:
+/// exporting the whole parent session from a window titled for one run is
+/// the surprising outcome, not the safe one.
 #[tauri::command]
 fn export_trace(
     state: State<'_, AppState>,
     viewer_id: String,
     format: String,
     dest: String,
+    agent: Option<String>,
 ) -> Result<serde_json::Value, String> {
     let fmt = crate::export::Format::parse(&format).ok_or("unknown format")?;
     let session = state
@@ -327,6 +331,14 @@ fn export_trace(
         if done {
             break;
         }
+    }
+
+    // Scoping is applied to the WHOLE trace, never to a page: the "read
+    // everything first" rule above exists so a file can never be silently cut
+    // short, and filtering a complete read keeps that guarantee.
+    if let Some(agent) = &agent {
+        entries.retain(|e| e.agent_id.as_deref() == Some(agent.as_str()));
+        sources.retain(|s| s == agent);
     }
 
     let meta = crate::export::Meta {
@@ -591,6 +603,46 @@ fn focus_session(
     Ok(())
 }
 
+/// Open one agent run in its own window, read-only.
+///
+/// A run is not a session: it has no PTY, so there is nothing to type into and
+/// nothing to resize. What it does have is its own transcript, its own context
+/// window, its own model and its own cost — enough to be worth looking at on
+/// its own terms rather than as a filtered slice of its parent.
+///
+/// The window is addressed by the PARENT's viewer id plus the agent id, because
+/// the run has no registry entry of its own; the reader resolves its transcript
+/// from the parent's, exactly as the roster does.
+#[tauri::command]
+fn open_agent_window(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    viewer_id: String,
+    agent_id: String,
+) -> Result<(), String> {
+    // One window per run, so clicking the same run twice focuses rather than
+    // stacking duplicates on top of each other.
+    let label = format!("agent-{viewer_id}-{agent_id}");
+    if let Some(window) = app.get_webview_window(&label) {
+        return window.set_focus().map_err(|e| e.to_string());
+    }
+    let session = state.registry.get(&viewer_id).ok_or("session not found")?;
+    let url = format!(
+        "index.html?vid={}&port={}&token={}&cwd={}&kind=agent&agent={}",
+        viewer_id,
+        state.port,
+        state.token,
+        urlencoding::encode(&session.cwd),
+        urlencoding::encode(&agent_id)
+    );
+    WebviewWindowBuilder::new(&app, label, WebviewUrl::App(url.into()))
+        .title(format!("Agent — {}", &agent_id[..agent_id.len().min(12)]))
+        .inner_size(1000.0, 720.0)
+        .build()
+        .map_err(|e| format!("failed to open agent window: {e}"))?;
+    Ok(())
+}
+
 /// Move a popped-out session window back into the main app: tell the launcher
 /// to open the session as a tab, focus the launcher, then close the native
 /// session window. The session itself (PTY, scrollback) is untouched — the
@@ -795,6 +847,7 @@ fn main() {
             get_conn_info,
             read_trace,
             read_agents,
+            open_agent_window,
             export_trace,
             session_spend,
             open_path,

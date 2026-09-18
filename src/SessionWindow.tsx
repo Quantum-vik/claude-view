@@ -4,6 +4,7 @@ import Terminal from "./Terminal";
 import Timeline, { TimelineEvent } from "./Timeline";
 import Trace from "./Trace";
 import { Agents } from "./Agents";
+import AgentStrip from "./AgentStrip";
 import { ConnectionStatus } from "./ws";
 
 /** Which view the side panel shows. The command log stays the default: it is
@@ -943,6 +944,15 @@ export default function SessionWindow(props: SessionWindowProps = {}) {
 
         <ThemeMenu compact />
       </div>
+
+      {/* The agent tree, the way Claude Code's own TUI shows it. Renders
+          nothing when no runs exist, which is most sessions. */}
+      <AgentStrip
+        vid={vid}
+        scope={agentScope}
+        onScope={setAgentScope}
+        onShowAll={() => showPanel("agents")}
+      />
 
       {/* Main content — command log on the LEFT, terminal on the RIGHT */}
       <div style={{ display: "flex", flex: 1, overflow: "hidden" }}>

@@ -258,6 +258,7 @@ export function Agents({
                 {sort.key === c.key && (sort.dir < 0 ? " ↓" : " ↑")}
               </th>
             ))}
+            <th style={{ borderBottom: `1px solid ${T.border}`, padding: "0 0 6px" }} />
           </tr>
         </thead>
         <tbody>
@@ -265,6 +266,7 @@ export function Agents({
             <Row
               key={r.id}
               run={r}
+              vid={vid}
               maxUsd={maxUsd}
               selected={selected === r.id}
               onSelect={() => onSelect(selected === r.id ? null : r.id)}
@@ -286,11 +288,13 @@ export function Agents({
 
 function Row({
   run,
+  vid,
   maxUsd,
   selected,
   onSelect,
 }: {
   run: PricedRun;
+  vid: string;
   maxUsd: number;
   selected: boolean;
   onSelect: () => void;
@@ -360,7 +364,7 @@ function Row({
       </td>
       <td style={{ ...CELL, textAlign: "right", ...NUM }}>{run.tools}</td>
       <td style={{ ...CELL, textAlign: "right", ...NUM }}>{formatDuration(run.durationMs)}</td>
-      <td style={{ ...CELL, textAlign: "right" }}>
+      <td style={{ ...CELL, textAlign: "right", whiteSpace: "nowrap" }}>
         {run.usd === null ? (
           <span
             style={{ font: `11px ${T.mono}`, color: T.textFaint }}
@@ -379,6 +383,29 @@ function Row({
             {formatRunUsd(run.usd)}
           </span>
         )}
+      </td>
+      <td style={{ ...CELL, textAlign: "right", whiteSpace: "nowrap" }}>
+        {/* An explicit control, not a row-click: "open this run" is the thing
+            people came here to do, and an invisible affordance is one nobody
+            finds. Row-click still scopes the panels; this opens the run. */}
+        <button
+          onClick={(e) => {
+            e.stopPropagation();
+            void invoke("open_agent_window", { viewerId: vid, agentId: run.id }).catch(() => {});
+          }}
+          title={`Open ${runLabel(run)} in its own window`}
+          style={{
+            background: hover ? tint(T.accent, 0.16) : T.surface2,
+            border: `1px solid ${hover ? T.accentBorder : T.border}`,
+            borderRadius: 6,
+            color: hover ? T.accent : T.textDim,
+            cursor: "pointer",
+            font: `10.5px ${T.mono}`,
+            padding: "3px 9px",
+          }}
+        >
+          open ↗
+        </button>
       </td>
     </tr>
   );
