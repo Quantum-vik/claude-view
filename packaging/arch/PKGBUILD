@@ -8,7 +8,7 @@
 # toolchain needed), see ../README.md — `just package-arch-bin`.
 
 pkgname=claude-view
-pkgver=1.4.1
+pkgver=1.5.0
 pkgrel=1
 pkgdesc="A dedicated window for each Claude Code session: live terminal mirror + command timeline"
 arch=('x86_64')
