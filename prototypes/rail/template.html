@@ -1,0 +1,226 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>claude-view — the rail (issue #29)</title>
+<!--
+  THROWAWAY. Issue #29: does the rail earn its ink?
+
+  One continuous spine at the panel's leading edge, carrying four things the UI
+  cannot show today:
+    · turn boundary + cost weight   (3 steps, not a gradient)
+    · subagent fork / lane / rejoin (matched run.toolUseId <-> entry.toolUseId)
+    · CONCURRENCY — an open-lane tick on any PARENT row whose ts falls inside a
+      live run's interval. This is the fact the app cannot express at all today.
+    · failure — an error notch no fold can hide
+
+  Switch fixture with ?f=multi|short|single. Real data (see gen_fixture.py).
+  Chronology is NOT position: trace.rs refuses to sort globally, so gap size
+  cannot mean elapsed time. Sparse time is printed instead.
+-->
+<style>
+:root{
+  --bg:#14110d; --s1:#1a1712; --s2:#211c15; --sidebar:#12100c;
+  --border:#2e2820; --text:#e8e2d5; --dim:#a89f8d; --faint:#8f8575;
+  --accent:#d4a55e; --task:#b9a2c9; --error:#c97b6f; --ok:#8aab7a;
+  --mono:'IBM Plex Mono',ui-monospace,Menlo,monospace;
+  --serif:'Lora',Georgia,serif;
+  --rail:56px;          /* gutter: time + spine + lane */
+}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--text);font:13px/1.55 var(--mono)}
+header{display:flex;gap:14px;align-items:baseline;padding:8px 14px;background:var(--s1);
+  border-bottom:1px solid var(--border);position:sticky;top:0;z-index:5;font-size:11px;color:var(--dim)}
+header b{color:var(--text);font-family:var(--serif);font-size:14px}
+header a{color:var(--faint);text-decoration:none;padding:2px 8px;border:1px solid var(--border);border-radius:99px}
+header a.on{color:var(--accent);border-color:var(--accent)}
+
+#log{padding:4px 0 60px}
+
+/* ── the row grid: [time+rail] [content] ─────────────────────────────── */
+.r{display:grid;grid-template-columns:var(--rail) 1fr;column-gap:10px;align-items:start;
+  padding:0 14px 0 8px;position:relative}
+.g{position:relative;min-height:19px}
+.body{min-width:0;padding:1px 0}
+
+/* time, printed sparsely: only when the minute changes, else the gap if >30s */
+.t{position:absolute;left:0;top:2px;width:30px;text-align:right;font-size:9.5px;
+  color:var(--faint);font-variant-numeric:tabular-nums;white-space:nowrap}
+.t.gap{color:#6f675a}
+
+/* the spine: one continuous 2px line through every row */
+.spine{position:absolute;left:36px;top:0;bottom:0;width:2px;background:var(--border)}
+.r.in-turn .spine{background:#3a3228}
+
+/* turn boundary: a weighted accent segment, 3 steps by cost */
+.tick{position:absolute;left:34px;top:0;width:6px;border-radius:1px;background:var(--accent)}
+.tick.w1{height:10px;opacity:.45}
+.tick.w2{height:16px;opacity:.75}
+.tick.w3{height:24px;opacity:1}
+.folio{position:absolute;left:44px;top:-1px;font-size:9px;color:var(--faint);
+  font-variant-numeric:tabular-nums}
+
+/* the error notch — clay, wider than the spine, unmissable */
+.notch{position:absolute;left:32px;top:4px;width:10px;height:10px;background:var(--error);
+  border-radius:2px}
+
+/* subagent lane: forks right of the spine and runs down its own column */
+.lane{position:absolute;left:44px;top:0;bottom:0;width:2px;background:var(--task);opacity:.85}
+.fork{position:absolute;left:36px;top:8px;width:10px;height:2px;background:var(--task)}
+.fork::after{content:"";position:absolute;right:0;top:-3px;width:2px;height:8px;background:var(--task)}
+.rejoin{position:absolute;left:36px;top:8px;width:10px;height:2px;background:var(--task);opacity:.6}
+
+/* CONCURRENCY: a tick in the lane column on a PARENT row that overlaps a live run */
+.open{position:absolute;left:43px;top:8px;width:4px;height:2px;background:var(--task);opacity:.5}
+
+/* ── content ─────────────────────────────────────────────────────────── */
+.k-prompt .body{font:italic 13px/1.6 var(--serif);border-left:2px solid var(--accent);
+  padding-left:9px;margin:5px 0;max-width:72ch}
+.k-assistant .body{font:13.5px/1.68 var(--serif);max-width:72ch;white-space:pre-wrap}
+.k-thinking .body{color:var(--faint);font:italic 12.5px/1.6 var(--serif);max-width:74ch}
+.k-tool .body{font-size:12px}
+.k-tool .name{font-weight:600;color:var(--accent)}
+.k-tool .arg{color:var(--dim)}
+.k-tool.err .name{color:var(--error)}
+.turnhead{grid-column:2;display:flex;gap:9px;align-items:baseline;padding:8px 0 2px;
+  font-size:10px;color:var(--faint);border-top:1px solid #241f19;margin-top:4px}
+.turnhead .usd{margin-left:auto;color:var(--accent);font-variant-numeric:tabular-nums}
+.runhead{grid-column:2;margin:8px 0 2px;padding:5px 9px;border-left:2px solid var(--task);
+  background:color-mix(in srgb,var(--task) 7%,transparent);border-radius:0 4px 4px 0}
+.runhead .d{font-family:var(--serif);font-size:13px}
+.runhead .m{font-size:10px;color:var(--faint);margin-top:2px}
+.runend{grid-column:2;font-size:10px;color:var(--faint);padding:1px 0 8px 9px;
+  border-left:2px solid color-mix(in srgb,var(--task) 40%,transparent)}
+.dim{color:var(--faint)}
+</style>
+
+<header>
+  <b>the rail</b>
+  <span id="meta"></span>
+  <span style="margin-left:auto"></span>
+  <a href="?f=single" id="a-single">single</a>
+  <a href="?f=short" id="a-short">short</a>
+  <a href="?f=multi" id="a-multi">multi</a>
+  <a href="?f=runs" id="a-runs">runs</a>
+</header>
+<div id="log"></div>
+
+<script>
+const FIX = /*__FIXTURE__*/null;
+const which = new URLSearchParams(location.search).get("f") || "short";
+document.getElementById("a-"+which)?.classList.add("on");
+const D = FIX[which];
+
+const esc = s => String(s ?? "").replace(/[&<>]/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;"}[c]));
+const usd = n => n == null ? "" : "$" + n.toFixed(n >= 10 ? 2 : 3);
+const PRICE = {"claude-opus-5":[5,6.25,10,.5,25],"claude-haiku-4-5":[1,1.25,2,.1,5],
+               "claude-sonnet-5":[2,2.5,4,.2,10]};
+function cost(t){
+  const k = String(t.model||"").replace(/-\d{8}$/,"");
+  const p = PRICE[k]; if (!p) return null;
+  return (t.input*p[0] + t.w5*p[1] + t.w1h*p[2] + t.cacheRead*p[3] + t.output*p[4]) / 1e6;
+}
+const hhmm = ms => new Date(ms).toTimeString().slice(0,5);
+const hhmmss = ms => new Date(ms).toTimeString().slice(0,8);
+
+// ── errors, by tool_use id ────────────────────────────────────────────
+const errOf = new Map();
+for (const e of D.entries) if (e.kind === "result" && e.toolUseId) errOf.set(e.toolUseId, e.isError);
+
+// ── runs: fork point, and the interval used for concurrency ───────────
+const runs = D.runs || [];
+const runByTool = new Map(runs.map(r => [r.toolUseId, r]));
+const byId = new Map(runs.map(r => [r.id, r]));
+
+// ── build rows ────────────────────────────────────────────────────────
+const visible = D.entries.filter(e => e.kind !== "result");
+const rows = [];
+let curTurn = null, curAgent = null, folio = 0, lastTs = 0, lastMin = "";
+const turnCost = {};
+for (const [id, t] of Object.entries(D.turns || {})) turnCost[id] = cost(t);
+const costs = Object.values(turnCost).filter(c => c != null).sort((a,b)=>a-b);
+const q1 = costs[Math.floor(costs.length*0.33)] ?? 0, q2 = costs[Math.floor(costs.length*0.66)] ?? 0;
+const weight = c => c == null ? 1 : c >= q2 ? 3 : c >= q1 ? 2 : 1;
+
+for (let i = 0; i < visible.length; i++) {
+  const e = visible[i];
+  const agent = e.agent ?? null;
+
+  if (agent !== curAgent) {
+    if (curAgent) { const r = byId.get(curAgent); rows.push({kind:"runend", run:r}); }
+    if (agent) { const r = byId.get(agent); rows.push({kind:"runhead", run:r}); }
+    curAgent = agent;
+  }
+  // turn header for the PARENT only — a run's turns belong to its own stream
+  let head = null;
+  if (!agent && e.turnId && e.turnId !== curTurn) {
+    curTurn = e.turnId; folio++;
+    head = {kind:"turnhead", turnId:e.turnId, folio, ts:e.ts, usd:turnCost[e.turnId]};
+    rows.push(head);
+  }
+  // sparse time: print the clock only when the minute changes; else the gap if it opened
+  let time = "", cls = "";
+  const min = e.ts ? hhmm(e.ts) : "";
+  if (e.ts) {
+    if (min !== lastMin) { time = min; lastMin = min; }
+    else if (lastTs && e.ts - lastTs > 30000) { time = "+" + Math.round((e.ts-lastTs)/1000) + "s"; cls = "gap"; }
+    lastTs = e.ts;
+  }
+  // concurrency: is this PARENT row inside a live run's interval?
+  const openLanes = !agent && e.ts
+    ? runs.filter(r => r.startedAt && e.ts >= r.startedAt && e.ts <= r.endedAt).length : 0;
+
+  rows.push({kind:"entry", e, agent, time, cls, openLanes,
+             isErr: e.kind === "tool" && errOf.get(e.toolUseId) === true,
+             forks: e.kind === "tool" && runByTool.has(e.toolUseId),
+             newTurn: !!head, weight: head ? weight(head.usd) : 0, folio: head ? folio : 0});
+}
+if (curAgent) rows.push({kind:"runend", run: byId.get(curAgent)});
+
+// ── render ────────────────────────────────────────────────────────────
+const GLYPH = {prompt:"›", assistant:"◆", thinking:"∴", tool:"»"};
+const out = [];
+for (const r of rows) {
+  if (r.kind === "turnhead") {
+    out.push(`<div class="r"><div class="g"><span class="spine"></span></div>
+      <div class="turnhead">turn ${r.folio}<span class="dim">${hhmmss(r.ts)}</span>
+      ${r.usd!=null?`<span class="usd">${usd(r.usd)}</span>`:""}</div></div>`);
+    continue;
+  }
+  if (r.kind === "runhead") {
+    const x = r.run || {};
+    out.push(`<div class="r"><div class="g"><span class="spine"></span><span class="fork"></span></div>
+      <div class="runhead"><div class="d">${esc(x.description||("agent-"+(x.id||"").slice(0,10)))}</div>
+      <div class="m">${esc(x.type||"agent")} · ${x.tools||0} tools</div></div></div>`);
+    continue;
+  }
+  if (r.kind === "runend") {
+    const x = r.run || {};
+    out.push(`<div class="r"><div class="g"><span class="spine"></span><span class="rejoin"></span></div>
+      <div class="runend">└ ${esc(x.description||"run")} rejoined</div></div>`);
+    continue;
+  }
+  const e = r.e;
+  const label = e.kind === "tool"
+    ? `<span class="name">${esc(e.tool)}</span> <span class="arg">${esc(e.text)}</span>`
+    : esc(e.text);
+  const marks =
+    `<span class="spine"></span>` +
+    (r.newTurn ? `<span class="tick w${r.weight}"></span><span class="folio">${r.folio}</span>` : "") +
+    (r.isErr ? `<span class="notch"></span>` : "") +
+    (r.agent ? `<span class="lane"></span>` : "") +
+    (r.openLanes && !r.agent ? `<span class="open"></span>` : "") +
+    (r.time ? `<span class="t ${r.cls}">${r.time}</span>` : "");
+  out.push(`<div class="r k-${e.kind} ${r.isErr?"err":""} ${r.newTurn?"":"in-turn"}">
+    <div class="g">${marks}</div><div class="body">${label}</div></div>`);
+}
+document.getElementById("log").innerHTML = out.join("");
+const nOpen = rows.filter(r => r.kind==="entry" && r.openLanes && !r.agent).length;
+// ?at=N scrolls to the Nth row that opens a subagent run — the thing the rail
+// exists to show, which is never at the top of a session.
+const at = +(new URLSearchParams(location.search).get("at") || 0);
+if (at) {
+  const heads = [...document.querySelectorAll(".runhead")];
+  heads[Math.min(at, heads.length) - 1]?.scrollIntoView({block: "start"});
+}
+document.getElementById("meta").textContent =
+  `${D.label} · ${rows.length} rows · ${folio} turns · ${runs.length} runs · ${nOpen} rows overlap a live run`;
+</script>
