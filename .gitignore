@@ -9,3 +9,7 @@ src-tauri/gen/schemas/
 *.dc.html
 UI improvement and documentation.zip
 .gstack/
+
+# Third-party skills installed by `npx skills` (pinned by skills-lock.json)
+.agents/
+.claude/
