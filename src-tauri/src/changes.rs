@@ -414,6 +414,22 @@ mod tests {
         eprintln!("renames: {renames:?}");
         eprintln!("binaries: {binaries:?}");
         eprintln!("untracked: {untracked:?}");
+        if let Ok(dest) = std::env::var("CV_DUMP_CHANGES_JSON") {
+            // Patch text is fetched per file, so the fixture carries it for the
+            // handful a preview will open rather than for all 60.
+            let mut patches = serde_json::Map::new();
+            let mut by_churn: Vec<_> = cs.files.iter().collect();
+            by_churn.sort_by_key(|f| std::cmp::Reverse(f.add + f.rem));
+            for f in by_churn.into_iter().take(8) {
+                if let Ok(p) = patch(&cwd, ms.parse().unwrap(), &f.path) {
+                    patches.insert(f.path.clone(), serde_json::Value::String(p));
+                }
+            }
+            let mut v = serde_json::to_value(&cs).unwrap();
+            v.as_object_mut().unwrap().insert("_patches".into(), serde_json::Value::Object(patches));
+            fs::write(&dest, serde_json::to_string(&v).unwrap()).unwrap();
+            eprintln!("wrote {dest}");
+        }
     }
 
     #[test]

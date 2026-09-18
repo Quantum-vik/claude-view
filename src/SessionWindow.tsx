@@ -4,6 +4,7 @@ import Terminal from "./Terminal";
 import type { TimelineEvent } from "./events";
 import Trace from "./Trace";
 import { Agents } from "./Agents";
+import Changes from "./Changes";
 import AgentStrip from "./AgentStrip";
 import { ConnectionStatus } from "./ws";
 
@@ -14,9 +15,15 @@ import { ConnectionStatus } from "./ws";
  *  `tools` tab yields exactly the same content (935 against 935, measured).
  *  The alias is kept only so a stored preference or a ?panel= link from an
  *  older build still resolves instead of falling back silently. */
-type Panel = "stream" | "agents";
+type Panel = "stream" | "agents" | "changes";
 const asPanel = (v: string | null): Panel | null =>
-  v === "agents" ? "agents" : v === "stream" || v === "trace" || v === "timeline" ? "stream" : null;
+  v === "agents"
+    ? "agents"
+    : v === "changes"
+      ? "changes"
+      : v === "stream" || v === "trace" || v === "timeline"
+        ? "stream"
+        : null;
 import { DragHandle, clamp } from "./Resizer";
 import { T, tint } from "./tokens";
 import ContextMeter from "./ContextMeter";
@@ -888,6 +895,7 @@ export default function SessionWindow(props: SessionWindowProps = {}) {
         {([
           ["stream", "Stream", "Everything Claude did: prompts, replies, thinking, tools, subagents, and cost"],
           ["agents", "Agents", "Every subagent this session spawned: what it was asked to do, what it cost, and whether it has finished"],
+          ["changes", "Changes", "Every file this session changed on disk, measured from where the repo stood when it started"],
         ] as const).map(([key, label, hint]) => {
           const on = sidebarOpen && panel === key;
           return (
@@ -968,6 +976,8 @@ export default function SessionWindow(props: SessionWindowProps = {}) {
           >
             {panel === "agents" ? (
               <Agents vid={vid} sessionModel={liveModel} selected={agentScope} />
+            ) : panel === "changes" ? (
+              <Changes vid={vid} />
             ) : (
               <Trace
                 vid={vid}
