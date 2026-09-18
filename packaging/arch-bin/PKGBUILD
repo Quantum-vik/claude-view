@@ -1,0 +1,46 @@
+# Maintainer: QuantumVik <https://github.com/Quantum-vik>
+#
+# Repackages an ALREADY-BUILT release binary into a .pkg.tar.zst.
+# No Rust toolchain, no npm, seconds instead of minutes.
+#
+#   npm run tauri build -- --bundles deb,appimage   # produces the binary
+#   cd packaging/arch-bin && makepkg -f
+#
+# Use ../arch/PKGBUILD instead when you want a from-source build.
+
+pkgname=claude-view-bin
+pkgver=1.0.0
+pkgrel=1
+pkgdesc="A dedicated window for each Claude Code session: live terminal mirror + command timeline (prebuilt)"
+arch=('x86_64')
+url="https://github.com/Quantum-vik/claude-view"
+license=('MIT')
+depends=('webkit2gtk-4.1' 'gtk3' 'libsoup3' 'glib2' 'cairo' 'pango' 'gdk-pixbuf2')
+optdepends=('claude-code: the CLI this app launches and mirrors')
+provides=('claude-view')
+conflicts=('claude-view')
+options=('!strip' '!debug')
+
+_root="$(cd "$startdir/../.." && pwd)"
+_bin="$_root/src-tauri/target/release/claude-view"
+
+prepare() {
+  if [ ! -x "$_bin" ]; then
+    echo "==> release binary not found at $_bin" >&2
+    echo "==> build it first:  npm run tauri build -- --bundles deb,appimage" >&2
+    return 1
+  fi
+}
+
+package() {
+  install -Dm755 "$_bin" "$pkgdir/usr/bin/claude-view"
+  install -Dm644 "$startdir/claude-view.desktop" \
+    "$pkgdir/usr/share/applications/claude-view.desktop"
+  for size in 32x32 128x128; do
+    install -Dm644 "$_root/src-tauri/icons/${size}.png" \
+      "$pkgdir/usr/share/icons/hicolor/${size}/apps/claude-view.png"
+  done
+  install -Dm644 "$_root/src-tauri/icons/128x128@2x.png" \
+    "$pkgdir/usr/share/icons/hicolor/256x256/apps/claude-view.png"
+  install -Dm644 "$_root/README.md" "$pkgdir/usr/share/doc/claude-view/README.md"
+}

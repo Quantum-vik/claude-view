@@ -1,0 +1,52 @@
+# Maintainer: QuantumVik <https://github.com/Quantum-vik>
+#
+# Builds claude-view from the source tree this PKGBUILD ships in.
+#
+#   cd packaging/arch && makepkg -si
+#
+# For a package built from an already-compiled binary (much faster, no Rust
+# toolchain needed), see ../README.md — `just package-arch-bin`.
+
+pkgname=claude-view
+pkgver=1.0.0
+pkgrel=1
+pkgdesc="A dedicated window for each Claude Code session: live terminal mirror + command timeline"
+arch=('x86_64')
+url="https://github.com/Quantum-vik/claude-view"
+license=('MIT')
+# Tauri v2 runtime deps on Arch. webkit2gtk-4.1 is the one people miss —
+# 4.0 will NOT work, the ABI differs.
+depends=('webkit2gtk-4.1' 'gtk3' 'libsoup3' 'glib2' 'cairo' 'pango' 'gdk-pixbuf2')
+optdepends=('claude-code: the CLI this app launches and mirrors')
+makedepends=('rust' 'cargo' 'nodejs' 'npm' 'pkgconf')
+options=('!strip' '!debug')
+
+# Built from the working tree, not a released tarball: this repo is private.
+# Swap to a source=() entry pointing at a release tag when it goes public.
+_srcdir="$(cd "$startdir/../.." && pwd)"
+
+build() {
+  cd "$_srcdir"
+  npm ci
+  npm run build
+  cd src-tauri
+  cargo build --release --locked --no-default-features
+}
+
+package() {
+  install -Dm755 "$_srcdir/src-tauri/target/release/claude-view" \
+    "$pkgdir/usr/bin/claude-view"
+
+  install -Dm644 "$startdir/claude-view.desktop" \
+    "$pkgdir/usr/share/applications/claude-view.desktop"
+
+  for size in 32x32 128x128; do
+    install -Dm644 "$_srcdir/src-tauri/icons/${size}.png" \
+      "$pkgdir/usr/share/icons/hicolor/${size}/apps/claude-view.png"
+  done
+  install -Dm644 "$_srcdir/src-tauri/icons/128x128@2x.png" \
+    "$pkgdir/usr/share/icons/hicolor/256x256/apps/claude-view.png"
+
+  install -Dm644 "$_srcdir/README.md" \
+    "$pkgdir/usr/share/doc/$pkgname/README.md"
+}

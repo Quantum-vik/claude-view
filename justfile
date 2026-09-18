@@ -44,3 +44,15 @@ ci: build lint test
 # Run the app in dev mode.
 dev:
     npm run tauri dev
+
+# Build the downloadable Linux artifacts (.deb + .AppImage).
+package:
+    npm run tauri build -- --bundles deb,appimage
+
+# Repackage the release binary as an Arch .pkg.tar.zst (needs `package` first).
+package-arch-bin:
+    cd packaging/arch-bin && makepkg -f
+
+# Build the Arch package from source (no prebuilt binary required).
+package-arch:
+    cd packaging/arch && makepkg -sf

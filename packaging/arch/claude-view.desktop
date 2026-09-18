@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=Claude View
+GenericName=Claude Code session viewer
+Comment=A dedicated window per Claude Code session: live terminal mirror plus a command timeline
+Exec=claude-view
+Icon=claude-view
+Terminal=false
+Categories=Development;Utility;
+Keywords=claude;ai;terminal;development;
+StartupWMClass=claude-view
