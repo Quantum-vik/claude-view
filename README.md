@@ -11,7 +11,11 @@ The panel has three views:
 |---|---|
 | **Log** | One card per tool call — command, output, status, duration. The default. |
 | **Trace** | Everything: prompts, replies, thinking, tool calls and their full output, nested subagent runs, with **cost on each turn**. Searchable, filterable, exportable to Markdown or JSON. |
-| **Agents** | Every subagent the session spawned — what it was asked to do, its type, model, status, tool count, duration and **notional cost**. Selecting one scopes the Trace and the Log to it. |
+| **Agents** | Every subagent the session spawned — what it was asked to do, its type, model, status, tool count, duration and **notional cost**. Selecting one scopes the Trace and the Log to it; **`open ↗` opens that run in its own window** with its own trace, cost and export. |
+
+Above the split sits the **agent strip**, mirroring Claude Code's own agent tree — `● main`, then a
+chip per run with a live status dot and what it was asked to do. It appears only when a session has
+actually spawned runs.
 
 The launcher adds a **spend** rollup across every session on the machine — today, all time, split
 by model, directory and day.
@@ -216,6 +220,8 @@ claude-view/
 │  ├─ Timeline.tsx            the Log view — command cards
 │  ├─ Trace.tsx               the Trace view — every kind, nested runs, cost per turn
 │  ├─ Agents.tsx              the Agents view — the run roster
+│  ├─ AgentStrip.tsx         the agent tree above the split (● main / ○ run)
+│  ├─ AgentWindow.tsx        one agent run in its own read-only window
 │  ├─ agents.ts / cost.ts     pricing the roster and the rollup
 │  ├─ pricing.ts              the model price table, with its AS_OF date
 │  ├─ Spend.tsx               launcher spend rollup
