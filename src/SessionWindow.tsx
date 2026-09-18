@@ -268,6 +268,26 @@ export default function SessionWindow(props: SessionWindowProps = {}) {
       /* private window / blocked storage — the choice just won't persist */
     }
   }, []);
+
+  /**
+   * Clicking the button for the panel you are already looking at closes the
+   * sidebar; clicking any other switches to it.
+   *
+   * EVERY panel button goes through this. The command log had this toggle
+   * written inline and Trace and Agents did not, so two of the three buttons
+   * looked stuck — they opened and never closed. Keeping the behaviour in one
+   * place is the fix; three copies of it is how they drifted apart.
+   */
+  const togglePanel = useCallback(
+    (p: Panel) => {
+      if (sidebarOpen && panel === p) {
+        setSidebarOpen(false);
+        return;
+      }
+      showPanel(p);
+    },
+    [sidebarOpen, panel, showPanel],
+  );
   // Committed width (used at mount); live width mutates the DOM directly
   // during drags so a resize never re-renders the tree per mousemove.
   const [sidebarWidth, setSidebarWidth] = useState(savedSidebarWidth);
@@ -857,8 +877,12 @@ export default function SessionWindow(props: SessionWindowProps = {}) {
 
         {/* Panel switch: command log (hook/transcript cards) vs full trace. */}
         <button
-          onClick={() => showPanel("trace")}
-          title="Everything Claude did: prompts, replies, thinking, tools, subagents, and cost"
+          onClick={() => togglePanel("trace")}
+          title={
+            sidebarOpen && panel === "trace"
+              ? "Hide the trace"
+              : "Everything Claude did: prompts, replies, thinking, tools, subagents, and cost"
+          }
           style={{
             background: sidebarOpen && panel === "trace" ? T.accent : T.surface2,
             border:
@@ -878,8 +902,12 @@ export default function SessionWindow(props: SessionWindowProps = {}) {
         </button>
 
         <button
-          onClick={() => showPanel("agents")}
-          title="Every subagent this session spawned: what it was asked to do, what it cost, and whether it has finished"
+          onClick={() => togglePanel("agents")}
+          title={
+            sidebarOpen && panel === "agents"
+              ? "Hide the agent list"
+              : "Every subagent this session spawned: what it was asked to do, what it cost, and whether it has finished"
+          }
           style={{
             background: sidebarOpen && panel === "agents" ? T.accent : T.surface2,
             border:
@@ -900,7 +928,7 @@ export default function SessionWindow(props: SessionWindowProps = {}) {
 
         {/* Sidebar toggle */}
         <button
-          onClick={() => (sidebarOpen && panel === "timeline" ? setSidebarOpen(false) : showPanel("timeline"))}
+          onClick={() => togglePanel("timeline")}
           title={sidebarOpen ? "Hide the command log" : "Show the command log"}
           style={{
             background: sidebarOpen && panel === "timeline" ? T.accent : T.surface2,
