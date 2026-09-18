@@ -1,0 +1,393 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>claude-view — Agents section prototype</title>
+<!--
+  THROWAWAY. Issue #22: where does the Agents section live, and what does a row show?
+
+  Three variants of the Agents section, switchable via ?variant=, mounted inside
+  the real session-panel shell (header / rail / tabs) so each is judged against
+  the app's real density rather than in a vacuum.
+
+    A  Roster    a third tab beside Trace and Log — a place you go
+    B  Band      a sticky strip above the trace — always in view, never in the way
+    C  Spine     a proportional gutter down the trace + promoted inline headers
+
+  Data is REAL (see gen_fixture.py): 11 runs, $164.12 session, 13.1% of it agents.
+  One run is forced to `running` in the UI so live status can be judged; it is
+  labelled DEMO wherever it appears.
+-->
+<style>
+:root{
+  --bg:#14110d; --s1:#1a1712; --s2:#211c15; --sidebar:#12100c;
+  --border:#2e2820; --text:#e8e2d5; --dim:#a89f8d; --faint:#6f675a;
+  --accent:#d4a55e; --success:#8aab7a; --running:#d4b36a; --error:#c97b6f;
+  --idle:#5c554a; --violet:#c9a2c0; --task:#b9a2c9;
+  --mono:'IBM Plex Mono',ui-monospace,Menlo,monospace;
+  --serif:'Lora',Georgia,serif;
+}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--text);font:13px/1.55 var(--mono)}
+a{color:inherit}
+
+/* ── shell: the real window chrome, so variants are judged in context ─────── */
+header{display:flex;align-items:center;gap:14px;padding:9px 14px;background:var(--s1);
+  border-bottom:1px solid var(--border);position:sticky;top:0;z-index:6}
+header .cwd{color:var(--dim);font-size:12px}
+.sep{width:1px;height:18px;background:var(--border);flex:0 0 auto}
+.chip{font-size:11px;padding:2px 7px;border-radius:999px;background:var(--s2);color:var(--dim);white-space:nowrap}
+.chip.model{color:var(--violet);border:1px solid color-mix(in srgb,var(--violet) 35%,transparent)}
+.hero{margin-left:auto;display:flex;gap:18px;align-items:center}
+.stat{text-align:right;line-height:1.25}
+.stat b{display:block;font:600 16px/1.2 var(--serif)}
+.stat i{font-style:normal;font-size:10px;color:var(--faint);text-transform:uppercase;letter-spacing:.08em}
+main{display:flex;min-height:calc(100vh - 47px)}
+#rail{width:34px;flex:0 0 34px;background:var(--sidebar);border-right:1px solid var(--border);
+  display:flex;flex-direction:column;align-items:center;padding-top:10px;gap:8px}
+#rail span{writing-mode:vertical-rl;font-size:10px;color:var(--faint);letter-spacing:.14em;text-transform:uppercase}
+#panel{flex:1;min-width:0;display:flex;flex-direction:column}
+#bar{display:flex;gap:8px;align-items:center;padding:7px 14px;border-bottom:1px solid var(--border);
+  background:var(--sidebar);position:sticky;top:47px;z-index:5}
+.tab{font:11px var(--mono);padding:3px 9px;border-radius:999px;background:transparent;color:var(--dim);
+  border:1px solid transparent;cursor:pointer}
+.tab[data-on=1]{background:color-mix(in srgb,var(--accent) 15%,transparent);color:var(--accent);
+  border-color:color-mix(in srgb,var(--accent) 40%,transparent)}
+.tab .n{opacity:.65;margin-left:4px}
+
+/* ── status: never colour alone — glyph + word carry it too ──────────────── */
+.st{display:inline-flex;align-items:center;gap:5px;font-size:10.5px;white-space:nowrap}
+.st .dot{width:6px;height:6px;border-radius:99px;flex:0 0 6px}
+.st-done .dot{background:var(--success)} .st-done{color:var(--success)}
+.st-running .dot{background:var(--running);animation:pulse 1.4s ease-in-out infinite} .st-running{color:var(--running)}
+@keyframes pulse{0%,100%{opacity:1}50%{opacity:.25}}
+.demo{font-size:9px;letter-spacing:.1em;color:var(--faint);border:1px solid var(--border);
+  border-radius:3px;padding:0 3px;margin-left:5px}
+
+.usd{font-variant-numeric:tabular-nums;color:var(--accent);font-weight:600}
+.usd.sm{font-weight:400;color:var(--dim)}
+.dur,.tok{font-variant-numeric:tabular-nums;color:var(--faint)}
+.desc{font-family:var(--serif);color:var(--text)}      /* human language */
+.type{font-family:var(--mono);color:var(--task)}       /* machine language */
+.mid{font-family:var(--mono);color:var(--faint);font-size:10.5px}
+
+/* ══ VARIANT A — Roster: a third tab, the list is the whole view ══════════ */
+#A{padding:14px 14px 70px}
+#A .lede{color:var(--dim);font-size:12px;max-width:74ch;margin:0 0 14px;
+  font-family:var(--serif);line-height:1.65}
+#A .lede b{color:var(--text)}
+#A table{width:100%;border-collapse:collapse}
+#A th{text-align:left;font:10px var(--mono);letter-spacing:.08em;text-transform:uppercase;
+  color:var(--faint);padding:0 10px 6px 0;border-bottom:1px solid var(--border);cursor:pointer;white-space:nowrap}
+#A th:hover{color:var(--dim)}
+#A th.r,#A td.r{text-align:right}
+#A td{padding:9px 10px 9px 0;border-bottom:1px solid color-mix(in srgb,var(--border) 60%,transparent);
+  vertical-align:top}
+#A tr:hover td{background:color-mix(in srgb,var(--accent) 5%,transparent)}
+#A .d{font-family:var(--serif);font-size:13.5px;line-height:1.4}
+#A .sub{display:flex;gap:8px;align-items:center;margin-top:3px;font-size:10.5px;color:var(--faint)}
+#A .bar{width:100%;height:3px;background:var(--s2);border-radius:99px;overflow:hidden;margin-top:6px}
+#A .bar>span{display:block;height:100%;background:var(--accent);border-radius:99px}
+#A tfoot td{border:none;padding-top:12px;color:var(--dim);font-size:11.5px}
+
+/* ══ VARIANT B — Band: a sticky strip above the trace ═════════════════════ */
+#B .band{position:sticky;top:83px;z-index:4;background:var(--sidebar);
+  border-bottom:1px solid var(--border);padding:8px 14px}
+#B .bhead{display:flex;align-items:baseline;gap:10px;font-size:10px;color:var(--faint);
+  text-transform:uppercase;letter-spacing:.08em;margin-bottom:7px}
+#B .bhead .tot{margin-left:auto;text-transform:none;letter-spacing:0;font-size:11px;color:var(--dim)}
+#B .strip{display:flex;gap:6px;overflow-x:auto;padding-bottom:3px}
+#B .rchip{flex:0 0 auto;max-width:190px;background:var(--s1);border:1px solid var(--border);
+  border-radius:6px;padding:5px 9px;cursor:pointer;display:flex;flex-direction:column;gap:2px}
+#B .rchip:hover{border-color:color-mix(in srgb,var(--accent) 45%,transparent)}
+#B .rchip[data-on=1]{border-color:var(--accent);background:color-mix(in srgb,var(--accent) 10%,transparent)}
+#B .rchip .d{font-family:var(--serif);font-size:12px;white-space:nowrap;line-height:1.35}
+#B .rchip .m{display:flex;gap:7px;align-items:center;font-size:10px;color:var(--faint)}
+#B .stream{padding:6px 0 70px}
+
+/* ══ VARIANT C — Spine: proportional gutter + promoted inline headers ═════ */
+#C{display:flex;padding-bottom:70px}
+#C .spine{width:132px;flex:0 0 132px;border-right:1px solid var(--border);
+  padding:12px 0 12px 12px;position:sticky;top:83px;align-self:flex-start;
+  max-height:calc(100vh - 95px);overflow:auto}
+#C .spine h4{font:10px var(--mono);letter-spacing:.08em;text-transform:uppercase;
+  color:var(--faint);margin:0 0 9px}
+#C .seg{display:block;width:100%;text-align:left;background:none;border:none;cursor:pointer;
+  padding:0 10px 0 0;margin-bottom:2px;color:inherit;font:inherit;position:relative}
+#C .seg .rule{height:100%;position:absolute;left:-12px;top:0;width:3px;background:var(--task);
+  opacity:.5;border-radius:0 2px 2px 0}
+#C .seg:hover .rule,#C .seg[data-on=1] .rule{opacity:1;background:var(--accent)}
+#C .seg .lab{font:10.5px/1.35 var(--mono);color:var(--faint);padding:4px 0;white-space:nowrap;
+  overflow:hidden;text-overflow:ellipsis}
+#C .seg:hover .lab,#C .seg[data-on=1] .lab{color:var(--dim)}
+#C .stream{flex:1;min-width:0;padding:6px 0}
+#C .runhead{margin:14px 14px 6px;border:1px solid color-mix(in srgb,var(--task) 40%,transparent);
+  border-left:3px solid var(--task);border-radius:0 6px 6px 0;
+  background:color-mix(in srgb,var(--task) 6%,transparent);padding:9px 12px}
+#C .runhead .top{display:flex;gap:10px;align-items:baseline;flex-wrap:wrap}
+#C .runhead .d{font-family:var(--serif);font-size:14px;line-height:1.35}
+#C .runhead .m{display:flex;gap:12px;align-items:center;margin-top:5px;font-size:10.5px;color:var(--faint)}
+#C .runend{margin:2px 14px 12px;border-left:3px solid color-mix(in srgb,var(--task) 40%,transparent);
+  padding:2px 12px;font-size:10.5px;color:var(--faint)}
+
+/* ── shared stream rendering (B and C) ───────────────────────────────────── */
+.e{display:flex;gap:9px;padding:3px 14px;align-items:baseline}
+.e:hover{background:color-mix(in srgb,var(--accent) 5%,transparent)}
+.e.inrun{background:color-mix(in srgb,var(--task) 4%,transparent)}
+.g{width:12px;flex:0 0 12px;text-align:center;color:var(--faint);font-size:11px}
+.ts{font-size:10px;color:var(--faint);flex:0 0 52px;font-variant-numeric:tabular-nums}
+.body{flex:1;min-width:0}
+.k-prompt .body{font:italic 13px/1.6 var(--serif);border-left:2px solid var(--accent);
+  padding-left:10px;margin:5px 0}
+.k-assistant .body{font:13.5px/1.68 var(--serif);max-width:74ch;white-space:pre-wrap}
+.k-thinking .body{color:var(--faint);font:italic 12.5px/1.6 var(--serif);max-width:80ch;white-space:pre-wrap}
+.k-tool .body{white-space:pre-wrap;word-break:break-word}
+.k-tool .name{font-weight:600}
+.dim{color:var(--faint)}
+.hide{display:none}
+
+/* ── the switcher: deliberately not part of the design under test ────────── */
+#sw{position:fixed;left:50%;transform:translateX(-50%);bottom:16px;z-index:50;
+  display:flex;align-items:center;gap:2px;background:#f4efe4;color:#14110d;
+  border-radius:999px;padding:4px;box-shadow:0 6px 28px rgba(0,0,0,.55);font:12px var(--mono)}
+#sw button{border:none;background:none;cursor:pointer;font:inherit;color:inherit;
+  padding:5px 11px;border-radius:999px}
+#sw button:hover{background:rgba(0,0,0,.09)}
+#sw .lab{padding:5px 12px;font-weight:600;white-space:nowrap}
+#sw .hint{padding-right:10px;opacity:.5;font-size:10.5px}
+</style>
+
+<header>
+  <span class="cwd" id="h-cwd"></span>
+  <span class="sep"></span>
+  <span class="chip model" id="h-model"></span>
+  <span class="chip" id="h-runs"></span>
+  <div class="hero">
+    <div class="stat"><b class="usd" id="h-cost"></b><i>session · notional</i></div>
+    <div class="stat"><b id="h-agent"></b><i>agents</i></div>
+  </div>
+</header>
+
+<main>
+  <div id="rail"><span>terminal</span></div>
+  <div id="panel">
+    <div id="bar">
+      <button class="tab">Log</button>
+      <button class="tab">Trace</button>
+      <button class="tab" id="t-agents">Agents<span class="n" id="t-n"></span></button>
+      <span style="margin-left:auto;color:var(--faint);font-size:10.5px" id="bar-note"></span>
+    </div>
+    <div id="A" class="hide"></div>
+    <div id="B" class="hide"></div>
+    <div id="C" class="hide"></div>
+  </div>
+</main>
+
+<div id="sw">
+  <button id="prev" title="Previous variant (←)">←</button>
+  <span class="lab" id="swlab"></span>
+  <button id="next" title="Next variant (→)">→</button>
+  <span class="hint">prototype · #22</span>
+</div>
+
+<script>
+const FIX = /*__FIXTURE__*/null;
+
+// ── helpers ────────────────────────────────────────────────────────────────
+const $ = i => document.getElementById(i);
+const esc = s => String(s ?? "").replace(/[&<>]/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;"}[c]));
+const usd = n => n == null ? "—" : (n < 0.01 ? "<$0.01" : "$" + n.toFixed(2));
+const usdp = n => n == null ? "—" : "$" + n.toFixed(3);
+const dur = s => s == null ? "—" : s < 60 ? s + "s" : Math.floor(s/60) + "m" + String(s%60).padStart(2,"0") + "s";
+const clock = t => t ? new Date(t).toTimeString().slice(0,8) : "";
+// Descriptions share long common prefixes ("Security review plugins group A/C/D"),
+// so the identifying token is at the END. Measured on the 11 real runs:
+// end-truncation at 18 chars -> 7/11 distinct; MIDDLE-truncation -> 11/11.
+// Never truncate an agent description from the right.
+const mid = (s, n) => {
+  s = String(s ?? "");
+  if (s.length <= n) return s;
+  const h = (n - 1) >> 1;
+  return s.slice(0, h) + "…" + s.slice(-(n - 1 - h));
+};
+const shortModel = m => !m ? "unpriced" : m.replace(/^claude-/,"").replace(/-\d{8}$/,"");
+
+// The fixture is all-finished. Force one run live so the status design can be
+// judged — labelled DEMO everywhere it shows, never silently faked.
+const RUNS = FIX.runs.map((r,i) => ({...r, status: i === 5 ? "running" : r.status, demo: i === 5}));
+const S = FIX.session;
+
+const stat = r => `<span class="st st-${r.status}"><span class="dot"></span>${r.status}` +
+  (r.demo ? `<span class="demo">DEMO</span>` : ``) + `</span>`;
+
+// ── shell header ───────────────────────────────────────────────────────────
+$("h-cwd").textContent = "~/" + S.cwd.split("/").filter(Boolean).slice(-2).join("/");
+$("h-model").textContent = shortModel(S.model);
+$("h-runs").textContent = RUNS.length + " agent runs";
+$("h-cost").textContent = usd(S.cost);
+$("h-agent").textContent = usd(S.runCost) + "  " + Math.round(S.runShare*100) + "%";
+$("t-n").textContent = " " + RUNS.length;
+$("t-agents").dataset.on = 1;
+
+// ═══ VARIANT A — Roster ════════════════════════════════════════════════════
+let sortKey = "cost", sortDir = -1;
+function renderA(){
+  const rows = [...RUNS].sort((a,b) => {
+    const get = k => k === "desc" ? (a.description||"") : a[k] ?? 0;
+    let x = sortKey === "desc" ? (a.description||"") : (a[sortKey] ?? 0);
+    let y = sortKey === "desc" ? (b.description||"") : (b[sortKey] ?? 0);
+    return (x > y ? 1 : x < y ? -1 : 0) * sortDir;
+  });
+  const max = Math.max(...RUNS.map(r => r.cost ?? 0));
+  const th = (k,l,cls="") => `<th class="${cls}" data-k="${k}">${l}${sortKey===k?(sortDir<0?" ↓":" ↑"):""}</th>`;
+  $("A").innerHTML = `
+    <p class="lede">These <b>${RUNS.length} runs</b> did <b>${RUNS.reduce((s,r)=>s+r.tools,0)} tool calls</b>
+      and cost <b>${usd(S.runCost)}</b> — ${Math.round(S.runShare*100)}% of this session's
+      ${usd(S.cost)}. Notional: derived from published API rates, not a bill.</p>
+    <table>
+      <thead><tr>
+        ${th("desc","What it was asked to do")}${th("type","Type")}${th("model","Model")}
+        ${th("status","Status")}${th("tools","Tools","r")}${th("durationSec","Took","r")}${th("cost","Cost","r")}
+      </tr></thead>
+      <tbody>${rows.map(r => `
+        <tr>
+          <td style="max-width:360px">
+            <div class="d">${esc(r.description || "—")}</div>
+            <div class="sub"><span class="mid">agent-${r.id.slice(0,10)}</span>
+              ${r.depth > 1 ? `<span class="mid">depth ${r.depth}</span>` : ``}</div>
+            <div class="bar"><span style="width:${((r.cost??0)/max*100).toFixed(1)}%"></span></div>
+          </td>
+          <td><span class="type">${esc(r.type || "—")}</span></td>
+          <td><span class="mid">${esc(shortModel(r.model))}</span></td>
+          <td>${stat(r)}</td>
+          <td class="r tok">${r.tools}</td>
+          <td class="r dur">${dur(r.durationSec)}</td>
+          <td class="r"><span class="usd">${usdp(r.cost)}</span></td>
+        </tr>`).join("")}</tbody>
+      <tfoot><tr><td colspan="7">
+        Sorted by <b>${sortKey}</b> — click any header. The cheapest run here made the
+        <i>most</i> tool calls: <b>haiku, 34 calls, ${usdp(0.113)}</b>, against opus runs doing
+        fewer for up to ${usdp(3.715)}. Token counts would hide that — 84–94% of every run's
+        tokens are cache reads at a tenth the rate.
+      </td></tr></tfoot>
+    </table>`;
+  $("A").querySelectorAll("th").forEach(h => h.onclick = () => {
+    const k = h.dataset.k;
+    if (k === sortKey) sortDir *= -1; else { sortKey = k; sortDir = -1; }
+    renderA();
+  });
+}
+
+// ═══ shared stream (B and C) ═══════════════════════════════════════════════
+const GLYPH = {prompt:"›", assistant:"◆", thinking:"∴", tool:"»"};
+function entryHTML(e, cls=""){
+  const label = e.kind === "tool"
+    ? `<span class="name">${esc(e.tool)}</span> <span class="dim">${esc(e.text)}</span>`
+    : esc(e.text);
+  return `<div class="e k-${e.kind} ${cls}"><span class="ts">${clock(e.at)}</span>
+    <span class="g">${GLYPH[e.kind] || "›"}</span><div class="body">${label}</div></div>`;
+}
+
+// ═══ VARIANT B — Band ══════════════════════════════════════════════════════
+let bSel = null;
+function renderB(){
+  const strip = RUNS.map(r => `
+    <div class="rchip" data-id="${r.id}" data-on="${bSel===r.id?1:0}">
+      <div class="d">${esc(mid(r.description || "agent-" + r.id.slice(0,8), 26))}</div>
+      <div class="m">${stat(r)}<span class="usd sm">${usdp(r.cost)}</span>
+        <span class="dur">${dur(r.durationSec)}</span></div>
+    </div>`).join("");
+  const stream = FIX.trace.map(e => {
+    const hidden = bSel && e.agent !== bSel;
+    return entryHTML(e, (e.agent ? "inrun " : "") + (hidden ? "hide" : ""));
+  }).join("");
+  $("B").innerHTML = `
+    <div class="band">
+      <div class="bhead">agents in this session
+        <span class="tot">${usd(S.runCost)} of ${usd(S.cost)} · ${Math.round(S.runShare*100)}%
+          ${bSel ? `· <b style="color:var(--accent)">filtered to 1 run</b> — <u style="cursor:pointer" id="clr">clear</u>` : ``}</span>
+      </div>
+      <div class="strip">${strip}</div>
+    </div>
+    <div class="stream">${stream}
+      ${bSel && !FIX.trace.some(e=>e.agent===bSel) ? `<div class="e"><div class="body dim">
+        No entries from this run in the fixture slice — the filter is real, the slice is short.</div></div>` : ``}</div>`;
+  $("B").querySelectorAll(".rchip").forEach(c => c.onclick = () => {
+    bSel = bSel === c.dataset.id ? null : c.dataset.id; renderB();
+  });
+  const clr = $("B").querySelector("#clr"); if (clr) clr.onclick = () => { bSel = null; renderB(); };
+}
+
+// ═══ VARIANT C — Spine ═════════════════════════════════════════════════════
+let cSel = null;
+function renderC(){
+  const maxc = Math.max(...RUNS.map(r => r.cost ?? 0));
+  const spine = RUNS.map(r => {
+    const h = 16 + Math.round((r.cost ?? 0) / maxc * 46);   // height ∝ cost
+    return `<button class="seg" data-id="${r.id}" data-on="${cSel===r.id?1:0}" style="height:${h}px">
+      <span class="rule"></span>
+      <span class="lab">${esc(mid(r.description || r.id, 18))}</span>
+    </button>`;
+  }).join("");
+
+  // promote the hairline divider into a real run header wherever the stream
+  // crosses into a run, and close it when it crosses back out
+  let cur = null; const out = [];
+  for (const e of FIX.trace){
+    if (e.agent !== cur){
+      if (cur){
+        const r = RUNS.find(x => x.id === cur);
+        out.push(`<div class="runend">└ ${esc(r?.description||cur)} finished · ${r?.tools} tools · ${usdp(r?.cost)}</div>`);
+      }
+      if (e.agent){
+        const r = RUNS.find(x => x.id === e.agent) || {};
+        out.push(`<div class="runhead">
+          <div class="top"><span class="d">${esc(r.description || e.agent)}</span>${stat(r)}</div>
+          <div class="m"><span class="type">${esc(r.type||"")}</span>
+            <span class="mid">${esc(shortModel(r.model))}</span>
+            <span class="dur">${dur(r.durationSec)}</span>
+            <span class="tok">${r.tools} tools</span>
+            <span class="usd sm" style="margin-left:auto">${usdp(r.cost)} · ${((r.share||0)*100).toFixed(1)}% of session</span></div>
+        </div>`);
+      }
+      cur = e.agent;
+    }
+    const dimmed = cSel && e.agent !== cSel;
+    out.push(entryHTML(e, (e.agent ? "inrun " : "") + (dimmed ? "hide" : "")));
+  }
+  if (cur){
+    const r = RUNS.find(x => x.id === cur);
+    out.push(`<div class="runend">└ ${esc(r?.description||cur)} finished · ${r?.tools} tools · ${usdp(r?.cost)}</div>`);
+  }
+
+  $("C").innerHTML = `<div class="spine"><h4>runs · height = cost</h4>${spine}</div>
+    <div class="stream">${out.join("")}</div>`;
+  $("C").querySelectorAll(".seg").forEach(s => s.onclick = () => {
+    cSel = cSel === s.dataset.id ? null : s.dataset.id; renderC();
+  });
+}
+
+// ── switcher ───────────────────────────────────────────────────────────────
+const V = [
+  ["A","Roster — a third tab","the list is a place you go"],
+  ["B","Band — a strip above the trace","runs stay beside the work"],
+  ["C","Spine — gutter + inline headers","the list is the trace's structure"],
+];
+function show(k){
+  for (const [id] of V) $(id).classList.toggle("hide", id !== k);
+  const v = V.find(x => x[0] === k) || V[0];
+  $("swlab").textContent = v[1];
+  $("bar-note").textContent = v[2];
+  const u = new URL(location); u.searchParams.set("variant", k);
+  history.replaceState(null, "", u);
+  if (k === "A") renderA(); if (k === "B") renderB(); if (k === "C") renderC();
+}
+let cur = (new URL(location).searchParams.get("variant") || "A").toUpperCase();
+if (!V.some(v => v[0] === cur)) cur = "A";
+const step = d => { const i = V.findIndex(v => v[0] === cur); cur = V[(i + d + V.length) % V.length][0]; show(cur); };
+$("prev").onclick = () => step(-1); $("next").onclick = () => step(1);
+addEventListener("keydown", e => {
+  if (/^(INPUT|TEXTAREA)$/.test(e.target.tagName) || e.target.isContentEditable) return;
+  if (e.key === "ArrowLeft") step(-1);
+  if (e.key === "ArrowRight") step(1);
+});
+show(cur);
+</script>
