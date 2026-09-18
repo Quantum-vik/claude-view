@@ -13,3 +13,8 @@ UI improvement and documentation.zip
 # Third-party skills installed by `npx skills` (pinned by skills-lock.json)
 .agents/
 .claude/
+
+# throwaway UI verification harness — never commit
+preview.html
+src/dev-preview.tsx
+.preview-*.json
