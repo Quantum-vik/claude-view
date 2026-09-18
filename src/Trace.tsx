@@ -28,6 +28,7 @@ import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useStat
 import { invoke } from "@tauri-apps/api/core";
 import { save } from "@tauri-apps/plugin-dialog";
 import { T, tint, toolFamily } from "./tokens";
+import type { ChangeSet, CommitSpan } from "./Changes";
 import { useRoster } from "./Agents";
 import type { TimelineEvent } from "./events";
 import { runLabel, shorten, formatDuration, formatRunUsd, type AgentRun } from "./agents";
@@ -387,6 +388,27 @@ interface Props {
   live?: boolean;
 }
 
+/** Commit spans for the session, so a turn can show what it left on disk (#36).
+ *
+ *  Fetched once, not polled: a diff is reviewed rather than watched, and the
+ *  Stream already polls the transcript. A failure is silent on purpose — a
+ *  session outside a repo has no spans, and that is not an error worth
+ *  interrupting the stream for. The Changes panel is where absence is explained.
+ */
+function useCommitSpans(vid: string): CommitSpan[] {
+  const [spans, setSpans] = useState<CommitSpan[]>([]);
+  useEffect(() => {
+    let live = true;
+    invoke("read_changes", { viewerId: vid })
+      .then((cs) => live && setSpans((cs as ChangeSet).spans ?? []))
+      .catch(() => {});
+    return () => {
+      live = false;
+    };
+  }, [vid]);
+  return spans;
+}
+
 export default function Trace({
   vid,
   modelId,
@@ -504,6 +526,37 @@ export default function Trace({
     () => (agentScope ? entries.filter((e) => e.agentId === agentScope) : entries),
     [entries, agentScope],
   );
+
+  const spans = useCommitSpans(vid);
+
+  /** Which turn each commit belongs to: the last turn that had started when the
+   *  commit was made. Entry timestamps are epoch MILLIseconds and git's are
+   *  seconds, which is the kind of mismatch that silently assigns everything to
+   *  turn one. */
+  const spansByTurn = useMemo(() => {
+    const m = new Map<string, CommitSpan[]>();
+    if (!spans.length) return m;
+    const starts: { id: string; ts: number }[] = [];
+    let cur = "";
+    for (const e of scoped) {
+      if (e.turnId && e.turnId !== cur && !e.agentId) {
+        cur = e.turnId;
+        starts.push({ id: e.turnId, ts: e.ts });
+      }
+    }
+    for (const sp of spans) {
+      const at = sp.ts * 1000;
+      let owner: string | null = null;
+      for (const t of starts) {
+        if (t.ts <= at) owner = t.id;
+        else break;
+      }
+      // A commit made before the first turn belongs to no turn on screen —
+      // dropping it beats attributing it to a turn that had not happened.
+      if (owner) (m.get(owner) ?? m.set(owner, []).get(owner)!).push(sp);
+    }
+    return m;
+  }, [spans, scoped]);
 
   /** Tool-use ids the hooks say are in flight. `TimelineEvent.id` IS the
    *  tool-use id, so this joins straight onto a trace entry's `toolUseId`.
@@ -757,6 +810,7 @@ export default function Trace({
             <RowView
               row={r}
               turns={turns}
+              spans={spansByTurn.get(r.kind === "turn" ? r.turnId : "")}
               modelId={modelId}
               runs={byAgent}
               running={running}
@@ -770,9 +824,53 @@ export default function Trace({
   );
 }
 
+/** What a turn left on disk, shown on the turn it landed in.
+ *
+ *  #37 rejected folding the whole diff into the Stream — browsing 60 files
+ *  belongs in the Changes panel — but kept its premise: seeing WHEN something
+ *  changed is worth having where you read the session. So this is a count and a
+ *  churn figure, never a file list.
+ *
+ *  A turn that changed nothing renders nothing at all. No bar, no "0 files": a
+ *  change mark is a signal that something happened, and a column of empty ones
+ *  trains the eye to stop looking.
+ */
+function TurnChanges({ spans }: { spans: CommitSpan[] }) {
+  const files = new Set<string>();
+  let add = 0;
+  let rem = 0;
+  for (const s of spans) {
+    for (const f of s.files) files.add(f);
+    add += s.add;
+    rem += s.rem;
+  }
+  const n = files.size;
+  return (
+    <span
+      title={spans.map((s) => `${s.sha}  ${s.subject}`).join("\n")}
+      style={{
+        display: "inline-flex",
+        alignItems: "baseline",
+        gap: 6,
+        padding: "0 7px",
+        borderRadius: 3,
+        background: tint(T.accent, 0.1),
+        color: T.textDim,
+      }}
+    >
+      <span>
+        {n} file{n === 1 ? "" : "s"}
+      </span>
+      <span style={{ color: T.success }}>+{add}</span>
+      <span style={{ color: T.error }}>−{rem}</span>
+    </span>
+  );
+}
+
 const RowView = memo(function RowView({
   row,
   turns,
+  spans,
   modelId,
   runs,
   running,
@@ -787,6 +885,10 @@ const RowView = memo(function RowView({
   /** Roster metadata by agent id, so a run's block can open with what it was
    *  asked to do instead of a hex prefix. */
   runs: Map<string, AgentRun>;
+  /** Commits made during this turn, if any. Absent for every other row kind,
+   *  and for a turn that left nothing on disk — which is most of them: one
+   *  measured session had 147 turns and 10 commits. */
+  spans?: CommitSpan[];
   /** The surrounding window already names the run — don't repeat it per block. */
   hideAgentHeaders?: boolean;
   /** Filter the trace to this run. Lives on the run header because that is
@@ -821,6 +923,7 @@ const RowView = memo(function RowView({
       >
         <span>turn</span>
         <span style={{ color: T.textDim }}>{row.turnId.slice(0, 16)}…</span>
+        {spans?.length ? <TurnChanges spans={spans} /> : null}
         <span style={{ marginLeft: "auto", fontVariantNumeric: "tabular-nums", color: T.textDim }}>
           {tokens.toLocaleString()} tokens
           {usd !== null ? (

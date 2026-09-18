@@ -1,6 +1,7 @@
 // Prevents an extra console window on Windows in release builds.
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod changes;
 mod agents;
 mod export;
 mod git;
@@ -416,6 +417,42 @@ fn read_agents(state: State<'_, AppState>, viewer_id: String) -> Result<serde_js
             "duplicatesFolded": 0,
         })),
     }
+}
+
+/// What the session changed on disk, measured from the commit HEAD pointed at
+/// when it started.
+///
+/// Separate from `read_trace` for the same reason `read_agents` is: the trace is
+/// paged and positional, a change set is whole-session and keyed by path. It is
+/// also computed on demand rather than polled — a diff is reviewed, not watched.
+#[tauri::command]
+fn read_changes(state: State<'_, AppState>, viewer_id: String) -> Result<serde_json::Value, String> {
+    let session = state
+        .registry
+        .get(&viewer_id)
+        .ok_or_else(|| "no such session".to_string())?;
+    let cs = crate::changes::read(std::path::Path::new(&session.cwd), session.spawned_at);
+    serde_json::to_value(cs).map_err(|e| e.to_string())
+}
+
+/// Unified patch for one file, fetched when the reader opens it. Kept out of
+/// `read_changes` so a 5,668-line lock file does not ride along in a listing
+/// nobody asked to expand.
+#[tauri::command]
+fn read_patch(
+    state: State<'_, AppState>,
+    viewer_id: String,
+    path: String,
+) -> Result<String, String> {
+    let session = state
+        .registry
+        .get(&viewer_id)
+        .ok_or_else(|| "no such session".to_string())?;
+    crate::changes::patch(
+        std::path::Path::new(&session.cwd),
+        session.spawned_at,
+        &path,
+    )
 }
 
 #[tauri::command]
@@ -847,6 +884,8 @@ fn main() {
             get_conn_info,
             read_trace,
             read_agents,
+            read_changes,
+            read_patch,
             open_agent_window,
             export_trace,
             session_spend,

@@ -42,6 +42,7 @@ pub fn router(registry: Arc<Registry>, token: String, app: tauri::AppHandle, por
         .route("/terminals", post(terminals_handler))
         .route("/past_sessions", get(past_sessions_handler))
         .route("/trace/:id", get(trace_handler))
+        .route("/changes/:id", get(changes_handler))
         .with_state(state)
 }
 
@@ -177,6 +178,13 @@ struct TraceQuery {
     token: Option<String>,
 }
 
+#[derive(serde::Deserialize)]
+struct ChangesQuery {
+    token: Option<String>,
+    /// When present, return this one file's patch instead of the listing.
+    path: Option<String>,
+}
+
 /// `GET /trace/:id?after=<cursor>&limit=<n>` — a page of the session's trace,
 /// read straight off disk.
 ///
@@ -228,6 +236,39 @@ async fn trace_handler(
             "sources": [],
         }))),
     }
+}
+
+/// `GET /changes/:id` — what the session changed on disk, for scripting.
+///
+/// Pairs with `/trace/:id` the way `read_changes` pairs with `read_trace`: the
+/// webview uses the command, this exists so a script can ask the same question.
+/// Patch text is not included; `?path=` returns one file's patch instead, so a
+/// caller that wants a listing never pays for a lock file it will not read.
+async fn changes_handler(
+    Path(id): Path<String>,
+    Query(q): Query<ChangesQuery>,
+    State(state): State<ServerState>,
+    headers: HeaderMap,
+) -> Result<axum::Json<Value>, (StatusCode, String)> {
+    let via_query = q.token.as_deref() == Some(state.token.as_str());
+    if !via_query && !check_token(&state, &headers) {
+        return Err((StatusCode::UNAUTHORIZED, "bad token".into()));
+    }
+    let session = state
+        .registry
+        .get(&id)
+        .ok_or((StatusCode::NOT_FOUND, "no such session".into()))?;
+    let cwd = std::path::Path::new(&session.cwd);
+
+    if let Some(path) = q.path.as_deref() {
+        let patch = crate::changes::patch(cwd, session.spawned_at, path)
+            .map_err(|e| (StatusCode::NOT_FOUND, e))?;
+        return Ok(axum::Json(json!({ "path": path, "patch": patch })));
+    }
+    Ok(axum::Json(json!(crate::changes::read(
+        cwd,
+        session.spawned_at
+    ))))
 }
 
 async fn ws_handler(
