@@ -90,6 +90,51 @@ function hhmmss(ts: number): string {
   return `${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`;
 }
 
+/** The timestamp of a row that actually RENDERS a clock.
+ *
+ *  Turn and agent headers are stamped in the data but draw no gutter, so they
+ *  must not take part: letting a turn header claim its minute silently stole
+ *  the clock from the first real row under it, and since that is the row a
+ *  reader looks at to place a turn in time, every turn lost its timestamp. */
+function rowTs(row: Row): number {
+  switch (row.kind) {
+    case "entry":
+      return row.entry.ts;
+    case "tool":
+      return row.row.call.ts;
+    case "fold":
+      return row.rows[0]?.call.ts ?? 0;
+    default:
+      return 0;
+  }
+}
+
+/** Print the clock only when the minute changes; otherwise leave the gap.
+ *
+ *  Measured in the rail prototype (#29) as the clearest single win in it, and
+ *  the only one independent of the rail — which is why it survived the rail
+ *  being cut. A full hh:mm:ss on every row is 58px of near-identical digits
+ *  repeated down the panel: the eye reads it as texture, not as time, and the
+ *  one row where time actually jumped is camouflaged by its neighbours.
+ *
+ *  Keyed by row, computed in DISPLAY order — the Stream reverses by turn while
+ *  a session is live, so "the row above" is not "the row before" in the data.
+ */
+function clockRows(rows: Row[]): Set<string> {
+  const show = new Set<string>();
+  let lastMinute = -1;
+  for (const r of rows) {
+    const ts = rowTs(r);
+    if (!ts) continue;
+    const minute = Math.floor(ts / 60000);
+    if (minute !== lastMinute) {
+      show.add(r.key);
+      lastMinute = minute;
+    }
+  }
+  return show;
+}
+
 /** Pull the whole trace, page by page, and keep the cursor for the next call. */
 function useTrace(vid: string) {
   const [entries, setEntries] = useState<TraceEntry[]>([]);
@@ -252,6 +297,7 @@ function buildRows(
 }
 
 const Gutter = ({
+  showClock = true,
   ts,
   mark,
   color,
@@ -261,6 +307,7 @@ const Gutter = ({
   mark: string;
   color?: string;
   pulse?: boolean;
+  showClock?: boolean;
 }) => (
   <>
     <span
@@ -272,7 +319,7 @@ const Gutter = ({
         fontVariantNumeric: "tabular-nums",
       }}
     >
-      {hhmmss(ts)}
+      {showClock ? hhmmss(ts) : ""}
     </span>
     <span
       className={pulse ? "cv-pulse" : undefined}
@@ -290,7 +337,15 @@ const ROW: React.CSSProperties = {
   alignItems: "baseline",
 };
 
-const ToolCard = memo(function ToolCard({ row, running }: { row: ToolRow; running?: boolean }) {
+const ToolCard = memo(function ToolCard({
+  row,
+  running,
+  showClock,
+}: {
+  row: ToolRow;
+  running?: boolean;
+  showClock?: boolean;
+}) {
   const { call, result } = row;
   const fam = toolFamily(call.tool ?? "");
   const err = result?.isError === true;
@@ -308,6 +363,7 @@ const ToolCard = memo(function ToolCard({ row, running }: { row: ToolRow; runnin
   return (
     <div style={ROW}>
       <Gutter
+        showClock={showClock}
         ts={call.ts}
         mark={inFlight ? "●" : err ? "✗" : "✓"}
         color={inFlight ? T.running : err ? T.error : T.success}
@@ -584,6 +640,10 @@ export default function Trace({
     return blocks.flat();
   }, [scoped, turns, filter, query, live, running]);
 
+  /** Which rows print a clock. Derived from the FINAL order, so it stays
+   *  correct when the stream reverses on a session ending. */
+  const clocks = useMemo(() => clockRows(rows), [rows]);
+
   const tabs: Array<[Filter, string]> = [
     ["all", "all"],
     ["tools", "tools"],
@@ -811,6 +871,7 @@ export default function Trace({
               row={r}
               turns={turns}
               spans={spansByTurn.get(r.kind === "turn" ? r.turnId : "")}
+              showClock={clocks.has(r.key)}
               modelId={modelId}
               runs={byAgent}
               running={running}
@@ -871,6 +932,7 @@ const RowView = memo(function RowView({
   row,
   turns,
   spans,
+  showClock,
   modelId,
   runs,
   running,
@@ -889,6 +951,9 @@ const RowView = memo(function RowView({
    *  and for a turn that left nothing on disk — which is most of them: one
    *  measured session had 147 turns and 10 commits. */
   spans?: CommitSpan[];
+  /** Print the clock on this row. False for a row in the same minute as the one
+   *  above it — the gutter keeps its width so nothing shifts. */
+  showClock?: boolean;
   /** The surrounding window already names the run — don't repeat it per block. */
   hideAgentHeaders?: boolean;
   /** Filter the trace to this run. Lives on the run header because that is
@@ -1065,7 +1130,7 @@ const RowView = memo(function RowView({
     const fam = toolFamily(row.tool);
     return (
       <div style={{ ...ROW, color: T.textFaint, fontSize: 11.5, fontFamily: T.mono }}>
-        <Gutter ts={row.rows[0].call.ts} mark="⌄" />
+        <Gutter ts={row.rows[0].call.ts} mark="⌄" showClock={showClock} />
         <span>
           {row.count} ×{" "}
           <span style={{ color: fam.color }}>
@@ -1082,6 +1147,7 @@ const RowView = memo(function RowView({
       <ToolCard
         row={row.row}
         running={row.row.call.toolUseId ? running?.has(row.row.call.toolUseId) : false}
+        showClock={showClock}
       />
     );
 
@@ -1089,7 +1155,7 @@ const RowView = memo(function RowView({
   if (e.kind === "prompt") {
     return (
       <div style={ROW}>
-        <Gutter ts={e.ts} mark="▍" color={T.accent} />
+        <Gutter ts={e.ts} mark="▍" color={T.accent} showClock={showClock} />
         <div
           style={{
             flex: 1,
@@ -1110,7 +1176,7 @@ const RowView = memo(function RowView({
   if (e.kind === "assistant") {
     return (
       <div style={ROW}>
-        <Gutter ts={e.ts} mark="✻" color={T.modelViolet} />
+        <Gutter ts={e.ts} mark="✻" color={T.modelViolet} showClock={showClock} />
         <div
           style={{
             flex: 1,
@@ -1131,7 +1197,7 @@ const RowView = memo(function RowView({
   const long = text.length > THINK_INLINE_MAX;
   return (
     <div style={ROW}>
-      <Gutter ts={e.ts} mark="◦" />
+      <Gutter ts={e.ts} mark="◦" showClock={showClock} />
       <div
         style={{
           flex: 1,
