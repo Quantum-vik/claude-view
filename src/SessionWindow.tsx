@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import Terminal from "./Terminal";
-import Timeline, { TimelineEvent } from "./Timeline";
+import type { TimelineEvent } from "./events";
 import Trace from "./Trace";
 import { Agents } from "./Agents";
 import AgentStrip from "./AgentStrip";
@@ -9,7 +9,14 @@ import { ConnectionStatus } from "./ws";
 
 /** Which view the side panel shows. The command log stays the default: it is
  *  what existing users know, and both the trace and the roster are newer. */
-type Panel = "timeline" | "trace" | "agents";
+/** The panel's views. `timeline` was the command log; it merged into the
+ *  Stream (#31) because Trace already contained it as a filter preset — the
+ *  `tools` tab yields exactly the same content (935 against 935, measured).
+ *  The alias is kept only so a stored preference or a ?panel= link from an
+ *  older build still resolves instead of falling back silently. */
+type Panel = "stream" | "agents";
+const asPanel = (v: string | null): Panel | null =>
+  v === "agents" ? "agents" : v === "stream" || v === "trace" || v === "timeline" ? "stream" : null;
 import { DragHandle, clamp } from "./Resizer";
 import { T, tint } from "./tokens";
 import ContextMeter from "./ContextMeter";
@@ -229,13 +236,12 @@ export default function SessionWindow(props: SessionWindowProps = {}) {
   const [panel, setPanel] = useState<Panel>(() => {
     // An explicit ?panel= wins, so a window can be opened straight onto the
     // trace — the same way vid/port/token/cwd already configure this window.
-    const wanted = params.get("panel");
-    if (wanted === "trace" || wanted === "timeline" || wanted === "agents") return wanted;
+    const wanted = asPanel(params.get("panel"));
+    if (wanted) return wanted;
     try {
-      const saved = localStorage.getItem("cv.panel");
-      return saved === "trace" || saved === "agents" ? saved : "timeline";
+      return asPanel(localStorage.getItem("cv.panel")) ?? "stream";
     } catch {
-      return "timeline";
+      return "stream";
     }
   });
 
@@ -875,77 +881,38 @@ export default function SessionWindow(props: SessionWindowProps = {}) {
             );
           })()}
 
-        {/* Panel switch: command log (hook/transcript cards) vs full trace. */}
-        <button
-          onClick={() => togglePanel("trace")}
-          title={
-            sidebarOpen && panel === "trace"
-              ? "Hide the trace"
-              : "Everything Claude did: prompts, replies, thinking, tools, subagents, and cost"
-          }
-          style={{
-            background: sidebarOpen && panel === "trace" ? T.accent : T.surface2,
-            border:
-              sidebarOpen && panel === "trace" ? "none" : `1px solid ${T.borderStrong}`,
-            borderRadius: 8,
-            color: sidebarOpen && panel === "trace" ? T.accentInk : T.text,
-            cursor: "pointer",
-            fontSize: 12,
-            fontWeight: 600,
-            padding: "5px 12px",
-            flexShrink: 0,
-            whiteSpace: "nowrap",
-            fontFamily: T.serif,
-          }}
-        >
-          Trace
-        </button>
-
-        <button
-          onClick={() => togglePanel("agents")}
-          title={
-            sidebarOpen && panel === "agents"
-              ? "Hide the agent list"
-              : "Every subagent this session spawned: what it was asked to do, what it cost, and whether it has finished"
-          }
-          style={{
-            background: sidebarOpen && panel === "agents" ? T.accent : T.surface2,
-            border:
-              sidebarOpen && panel === "agents" ? "none" : `1px solid ${T.borderStrong}`,
-            borderRadius: 8,
-            color: sidebarOpen && panel === "agents" ? T.accentInk : T.text,
-            cursor: "pointer",
-            fontSize: 12,
-            fontWeight: 600,
-            padding: "5px 12px",
-            flexShrink: 0,
-            whiteSpace: "nowrap",
-            fontFamily: T.serif,
-          }}
-        >
-          Agents
-        </button>
-
-        {/* Sidebar toggle */}
-        <button
-          onClick={() => togglePanel("timeline")}
-          title={sidebarOpen ? "Hide the command log" : "Show the command log"}
-          style={{
-            background: sidebarOpen && panel === "timeline" ? T.accent : T.surface2,
-            border:
-              sidebarOpen && panel === "timeline" ? "none" : `1px solid ${T.borderStrong}`,
-            borderRadius: 8,
-            color: sidebarOpen && panel === "timeline" ? T.accentInk : T.text,
-            cursor: "pointer",
-            fontSize: 12,
-            fontWeight: 600,
-            padding: "5px 12px",
-            flexShrink: 0,
-            whiteSpace: "nowrap",
-          }}
-        >
-          Timeline
-        </button>
+        {/* Two views, not three: the command log merged into the Stream (#31).
+            One style, built from the panel key — three hand-written copies is
+            how the Trace and Agents buttons drifted out of sync with Timeline's
+            toggle in the first place. */}
+        {([
+          ["stream", "Stream", "Everything Claude did: prompts, replies, thinking, tools, subagents, and cost"],
+          ["agents", "Agents", "Every subagent this session spawned: what it was asked to do, what it cost, and whether it has finished"],
+        ] as const).map(([key, label, hint]) => {
+          const on = sidebarOpen && panel === key;
+          return (
+            <button
+              key={key}
+              onClick={() => togglePanel(key)}
+              title={on ? `Hide the ${label.toLowerCase()}` : hint}
+              style={{
+                background: on ? T.accent : T.surface2,
+                border: on ? "none" : `1px solid ${T.borderStrong}`,
+                borderRadius: 8,
+                color: on ? T.accentInk : T.text,
+                cursor: "pointer",
+                fontSize: 12,
+                fontWeight: 600,
+                padding: "5px 12px",
+                flexShrink: 0,
+                whiteSpace: "nowrap",
+                fontFamily: T.serif,
+              }}
+            >
+              {label}
+            </button>
+          );
+        })}
 
         {/* Popped-out window only: move this session back into the main app
             as a tab (closes this window; the PTY keeps running). */}
@@ -999,12 +966,23 @@ export default function SessionWindow(props: SessionWindowProps = {}) {
               flexDirection: "column",
             }}
           >
-            {panel === "trace" ? (
-              <Trace vid={vid} modelId={liveModel} agentScope={agentScope} onScope={setAgentScope} />
-            ) : panel === "agents" ? (
+            {panel === "agents" ? (
               <Agents vid={vid} sessionModel={liveModel} selected={agentScope} />
             ) : (
-              <Timeline events={events} agentScope={agentScope} onScope={setAgentScope} />
+              <Trace
+                vid={vid}
+                modelId={liveModel}
+                agentScope={agentScope}
+                onScope={setAgentScope}
+                // The hook stream is what lets the Stream show a tool as
+                // RUNNING — the transcript records the call, never that it is
+                // still out. Without this the merge would lose the one thing
+                // the command log did better.
+                events={events}
+                // Newest-first while the session is live, oldest-first once it
+                // has ended (#28). Derived, never a control.
+                live={!ended}
+              />
             )}
           </div>
         )}

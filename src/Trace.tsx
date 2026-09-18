@@ -29,6 +29,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { save } from "@tauri-apps/plugin-dialog";
 import { T, tint, toolFamily } from "./tokens";
 import { useRoster } from "./Agents";
+import type { TimelineEvent } from "./events";
 import { runLabel, shorten, formatDuration, formatRunUsd, type AgentRun } from "./agents";
 import { formatUsd, type TokenUsage } from "./cost";
 import { CAVEAT, costOfTurn } from "./pricing";
@@ -156,6 +157,7 @@ function buildRows(
   turns: Record<string, TokenUsage>,
   filter: Filter,
   query: string,
+  running?: Set<string>,
 ): Row[] {
   const q = query.trim().toLowerCase();
   const resultFor = new Map<string, TraceEntry>();
@@ -208,15 +210,23 @@ function buildRows(
         result: e.toolUseId ? resultFor.get(e.toolUseId) : undefined,
       };
       // Fold a run of consecutive same-tool successes behind one line — the
-      // affordance worth keeping from Timeline.tsx.
-      if (!row.result?.isError) {
+      // affordance worth keeping from the command log.
+      //
+      // An IN-FLIGHT tool is never folded and always breaks a run. Folding one
+      // hides the single row the reader most needs to see: without this, three
+      // consecutive Bash calls with the last still running collapse to
+      // "3 × Bash" and the running state vanishes. Found by testing the merge,
+      // not by reading it.
+      const isRunning = (t?: TraceEntry) =>
+        t?.toolUseId ? running?.has(t.toolUseId) === true : false;
+      if (!row.result?.isError && !isRunning(e)) {
         let j = i;
         const run: ToolRow[] = [row];
         while (j + 1 < visible.length) {
           const n = visible[j + 1];
           if (n.kind !== "tool" || n.tool !== e.tool || (n.agentId ?? null) !== agent) break;
           const nr = n.toolUseId ? resultFor.get(n.toolUseId) : undefined;
-          if (nr?.isError) break;
+          if (nr?.isError || isRunning(n)) break;
           run.push({ call: n, result: nr });
           j++;
         }
@@ -240,7 +250,17 @@ function buildRows(
   return rows;
 }
 
-const Gutter = ({ ts, mark, color }: { ts: number; mark: string; color?: string }) => (
+const Gutter = ({
+  ts,
+  mark,
+  color,
+  pulse,
+}: {
+  ts: number;
+  mark: string;
+  color?: string;
+  pulse?: boolean;
+}) => (
   <>
     <span
       style={{
@@ -253,7 +273,10 @@ const Gutter = ({ ts, mark, color }: { ts: number; mark: string; color?: string 
     >
       {hhmmss(ts)}
     </span>
-    <span style={{ flex: "0 0 14px", textAlign: "center", color: color ?? T.textFaint, fontSize: 11 }}>
+    <span
+      className={pulse ? "cv-pulse" : undefined}
+      style={{ flex: "0 0 14px", textAlign: "center", color: color ?? T.textFaint, fontSize: 11 }}
+    >
       {mark}
     </span>
   </>
@@ -266,10 +289,16 @@ const ROW: React.CSSProperties = {
   alignItems: "baseline",
 };
 
-const ToolCard = memo(function ToolCard({ row }: { row: ToolRow }) {
+const ToolCard = memo(function ToolCard({ row, running }: { row: ToolRow; running?: boolean }) {
   const { call, result } = row;
   const fam = toolFamily(call.tool ?? "");
   const err = result?.isError === true;
+  // In flight: the hooks say so and no result has landed. A transcript records
+  // that a tool was CALLED, never that it has not come back — so without the
+  // hook overlay the Stream would render a running tool identically to one
+  // that returned nothing, which is the one way this merge could lose to the
+  // command log it replaces.
+  const inFlight = running === true && !result;
   const [open, setOpen] = useState(false);
   const out = result?.text ?? "";
   const long = out.split("\n").length > 6 || out.length > 400;
@@ -277,7 +306,12 @@ const ToolCard = memo(function ToolCard({ row }: { row: ToolRow }) {
 
   return (
     <div style={ROW}>
-      <Gutter ts={call.ts} mark={err ? "✗" : "✓"} color={err ? T.error : T.success} />
+      <Gutter
+        ts={call.ts}
+        mark={inFlight ? "●" : err ? "✗" : "✓"}
+        color={inFlight ? T.running : err ? T.error : T.success}
+        pulse={inFlight}
+      />
       <div style={{ flex: 1, minWidth: 0 }}>
         <span style={{ color: fam.color, fontWeight: 600, fontSize: 11, fontFamily: T.mono }}>
           {fam.glyph} {call.tool}
@@ -342,9 +376,26 @@ interface Props {
    *  header already carries that identity), and the sibling-run count (a
    *  window showing one run has no business advertising its parent's others). */
   scopeLocked?: boolean;
+  /** Hook-derived cards, keyed by tool-use id (`TimelineEvent.id` IS the
+   *  tool-use id — see `apply_transcript` in session.rs). They arrive over the
+   *  WebSocket ahead of the transcript, so they are the only source of "this
+   *  tool is running RIGHT NOW": a transcript cannot express in-flight. */
+  events?: TimelineEvent[];
+  /** Live sessions read newest-first, ended ones oldest-first (#28). DERIVED
+   *  from session state, never offered as a control — the direction tracks the
+   *  use case instead of asking the reader to know which one they are in. */
+  live?: boolean;
 }
 
-export default function Trace({ vid, modelId, agentScope, onScope, scopeLocked = false }: Props) {
+export default function Trace({
+  vid,
+  modelId,
+  agentScope,
+  onScope,
+  scopeLocked = false,
+  events = [],
+  live = false,
+}: Props) {
   const { entries, turns, unavailable, loading, sources } = useTrace(vid);
   const { roster } = useRoster(vid);
   const [filter, setFilter] = useState<Filter>("all");
@@ -406,10 +457,31 @@ export default function Trace({ vid, modelId, agentScope, onScope, scopeLocked =
     [entries, agentScope],
   );
 
-  const rows = useMemo(
-    () => buildRows(scoped, turns, filter, query),
-    [scoped, turns, filter, query],
-  );
+  /** Tool-use ids the hooks say are in flight. `TimelineEvent.id` IS the
+   *  tool-use id, so this joins straight onto a trace entry's `toolUseId`.
+   *  Without it the Stream cannot show a running tool at all — the transcript
+   *  only records a `tool_use`, never "and it has not come back yet". */
+  const running = useMemo(() => {
+    const m = new Set<string>();
+    for (const e of events) if (e.status === "running") m.add(e.id);
+    return m;
+  }, [events]);
+
+  const rows = useMemo(() => {
+    const built = buildRows(scoped, turns, filter, query, running);
+    if (!live) return built;
+    // Newest-first while the session is live — but reversed BY TURN, not by
+    // row. Reversing rows outright would put each turn's header after its own
+    // entries and its cost under the wrong turn. Blocks stay internally
+    // ordered; only their order flips.
+    const blocks: Row[][] = [];
+    for (const r of built) {
+      if (r.kind === "turn" || r.kind === "agent" || blocks.length === 0) blocks.push([r]);
+      else blocks[blocks.length - 1].push(r);
+    }
+    blocks.reverse();
+    return blocks.flat();
+  }, [scoped, turns, filter, query, live, running]);
 
   const tabs: Array<[Filter, string]> = [
     ["all", "all"],
@@ -617,6 +689,7 @@ export default function Trace({ vid, modelId, agentScope, onScope, scopeLocked =
             turns={turns}
             modelId={modelId}
             runs={byAgent}
+            running={running}
             hideAgentHeaders={scopeLocked}
             onScopeTo={scopeLocked ? undefined : onScope}
           />
@@ -631,12 +704,15 @@ const RowView = memo(function RowView({
   turns,
   modelId,
   runs,
+  running,
   hideAgentHeaders,
   onScopeTo,
 }: {
   row: Row;
   turns: Record<string, TokenUsage>;
   modelId: string | null;
+  /** Tool-use ids the hooks report as in flight. */
+  running?: Set<string>;
   /** Roster metadata by agent id, so a run's block can open with what it was
    *  asked to do instead of a hex prefix. */
   runs: Map<string, AgentRun>;
@@ -827,7 +903,13 @@ const RowView = memo(function RowView({
     );
   }
 
-  if (row.kind === "tool") return <ToolCard row={row.row} />;
+  if (row.kind === "tool")
+    return (
+      <ToolCard
+        row={row.row}
+        running={row.row.call.toolUseId ? running?.has(row.row.call.toolUseId) : false}
+      />
+    );
 
   const e = row.entry;
   if (e.kind === "prompt") {
