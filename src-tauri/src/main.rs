@@ -7,6 +7,7 @@ mod hooks_install;
 mod instance;
 mod past_sessions;
 mod pty;
+mod rollup;
 mod server;
 mod session;
 mod trace;
@@ -268,6 +269,21 @@ fn is_executable(_meta: &std::fs::Metadata) -> bool {
 /// webview to save: that would mean granting the frontend a general
 /// write-any-file capability, a far larger surface than "write this one export
 /// to the path the user just picked in a dialog".
+/// Spend across every session on this machine.
+///
+/// Scans the whole transcript corpus rather than asking each open session for
+/// its total: a resumed session replays earlier turns verbatim into a new file,
+/// so per-session ledgers are individually correct and still sum to the wrong
+/// number. De-duplication has to be global.
+#[tauri::command]
+fn session_spend() -> Result<serde_json::Value, String> {
+    let root = dirs::home_dir()
+        .map(|h| h.join(".claude").join("projects"))
+        .ok_or("no home directory")?;
+    let spend = crate::rollup::scan(&root);
+    serde_json::to_value(spend).map_err(|e| e.to_string())
+}
+
 #[tauri::command]
 fn export_trace(
     state: State<'_, AppState>,
@@ -744,6 +760,7 @@ fn main() {
             get_conn_info,
             read_trace,
             export_trace,
+            session_spend,
             open_path,
             open_url,
             hooks_status,

@@ -8,6 +8,7 @@ import { DragHandle, clamp } from "./Resizer";
 import { T, tint } from "./tokens";
 import ContextMeter from "./ContextMeter";
 import ThemeMenu from "./ThemeMenu";
+import Spend from "./Spend";
 
 const PAGE_SIZE = 10;
 /** Launcher width at/above which sessions embed in a right-hand pane. */
@@ -1311,6 +1312,8 @@ export default function Launcher() {
           </div>
           <div style={{ flex: 1 }} />
           <div style={{ display: "flex", gap: 8, flexShrink: 0, alignItems: "center" }}>
+            {/* Spend across every session on this machine, not just this app's. */}
+            <Spend />
             <button
               onClick={handleNewSession}
               style={{ ...primaryBtnStyle, padding: narrow ? "9px 13px" : "9px 18px" }}
