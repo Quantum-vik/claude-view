@@ -8,6 +8,8 @@ use portable_pty::{ChildKiller, MasterPty};
 use serde::Serialize;
 use tokio::sync::broadcast;
 
+use crate::transcript::TokenUsage;
+
 /// Bytes of raw PTY output retained per session for replay when a viewer
 /// (re)connects. xterm.js re-renders this instantly, so a window opened or
 /// refreshed mid-session still shows history.
@@ -114,6 +116,11 @@ pub struct Session {
     pub model: RwLock<Option<String>>,
     /// Latest context-window usage (input/output tokens) from the transcript.
     pub usage: RwLock<Option<ContextUsage>>,
+    /// De-duplicated per-turn usage for the whole session, parent AND
+    /// subagents. Distinct from `usage` above: the meter wants the LATEST
+    /// turn's occupancy, cost wants the de-duplicated SUM. Conflating them is
+    /// how you get a 2x-3x cost error.
+    pub ledger: Mutex<UsageLedger>,
     /// True for a plain shell/tmux terminal (no claude, no transcript). Lets the
     /// viewer drop the claude-only chrome (timeline, model switcher, context
     /// meter) and lets the backend rebuild the right window URL on reopen.
@@ -158,6 +165,121 @@ pub struct Session {
     /// git identity of `cwd`, resolved once at spawn (a session's cwd never
     /// changes). `None` when cwd isn't in a repo.
     pub repo: Option<crate::git::RepoInfo>,
+}
+
+/// One turn's usage, as the API billed it.
+#[derive(Clone, Debug, Serialize)]
+pub struct TurnUsage {
+    pub usage: TokenUsage,
+    pub model: Option<String>,
+    /// Which subagent produced it; `None` for the parent session.
+    #[serde(rename = "agentId", skip_serializing_if = "Option::is_none")]
+    pub agent_id: Option<String>,
+}
+
+/// Aggregated usage for one model, because prices are per model.
+#[derive(Clone, Debug, Serialize)]
+pub struct ModelTotal {
+    pub model: String,
+    pub turns: usize,
+    pub usage: TokenUsage,
+}
+
+/// What the viewer needs to turn tokens into money.
+///
+/// Deliberately carries **no dollar figure**: the price table lives in
+/// `src/pricing.ts` with its own `AS_OF` date, and duplicating it here would
+/// give the app two sources of truth for money that could disagree.
+#[derive(Clone, Debug, Default, Serialize)]
+pub struct CostRollup {
+    pub turns: usize,
+    #[serde(rename = "subagentTurns")]
+    pub subagent_turns: usize,
+    #[serde(rename = "byModel")]
+    pub by_model: Vec<ModelTotal>,
+    pub total: TokenUsage,
+    /// The subagent share, which is routinely the majority — measured at 64.2%
+    /// of one real session. Surfaced separately so it cannot hide inside the
+    /// total.
+    #[serde(rename = "subagentTotal")]
+    pub subagent_total: TokenUsage,
+}
+
+/// De-duplicated per-turn usage across a whole session: parent and subagents.
+///
+/// Claude Code writes ONE RECORD PER CONTENT BLOCK, each repeating the same
+/// `message.usage`, so summing per record inflates totals (1.00x-3.57x per file,
+/// median 2.12, token-weighted 2.20x input / 2.08x output on the reference
+/// corpus). Turns are therefore keyed, and the last write wins.
+///
+/// **Last-wins, not first-wins.** Within a turn the input side is identical
+/// across records (0 of 1,258 groups differed), but `output_tokens` GROWS —
+/// 283 groups, every one of them in a subagent transcript. Taking the first
+/// record undercounts corpus output by 27.9%.
+///
+/// **The key is global, not per file.** A resumed session replays turns
+/// verbatim into a new transcript — same `requestId`, same usage — so keying
+/// per file double-counts them.
+#[derive(Default)]
+pub struct UsageLedger {
+    turns: HashMap<String, TurnUsage>,
+}
+
+impl UsageLedger {
+    /// Record a turn. Returns true when this actually changed the totals, so
+    /// callers can skip broadcasting an identical rollup for every one of a
+    /// turn's repeated records.
+    pub fn record(&mut self, key: String, turn: TurnUsage) -> bool {
+        match self.turns.get(&key) {
+            // Same key, same numbers: one of the repeated content-block records.
+            Some(prev) if prev.usage == turn.usage => false,
+            _ => {
+                self.turns.insert(key, turn);
+                true
+            }
+        }
+    }
+
+    pub fn rollup(&self) -> CostRollup {
+        let mut by: HashMap<&str, (usize, TokenUsage)> = HashMap::new();
+        let mut out = CostRollup {
+            turns: self.turns.len(),
+            ..Default::default()
+        };
+        for t in self.turns.values() {
+            add(&mut out.total, &t.usage);
+            if t.agent_id.is_some() {
+                out.subagent_turns += 1;
+                add(&mut out.subagent_total, &t.usage);
+            }
+            // An unpriceable turn still has to be counted, or the total quietly
+            // shrinks. It lands under "unknown" and the viewer renders it
+            // Unpriced rather than $0.00.
+            let model = t.model.as_deref().unwrap_or("unknown");
+            let slot = by.entry(model).or_insert((0, TokenUsage::default()));
+            slot.0 += 1;
+            add(&mut slot.1, &t.usage);
+        }
+        out.by_model = by
+            .into_iter()
+            .map(|(model, (turns, usage))| ModelTotal {
+                model: model.to_string(),
+                turns,
+                usage,
+            })
+            .collect();
+        // Stable order so the viewer does not reshuffle rows on every update.
+        out.by_model.sort_by(|a, b| a.model.cmp(&b.model));
+        out
+    }
+}
+
+fn add(acc: &mut TokenUsage, u: &TokenUsage) {
+    acc.input += u.input;
+    acc.cache_read += u.cache_read;
+    acc.cache_write_5m += u.cache_write_5m;
+    acc.cache_write_1h += u.cache_write_1h;
+    acc.output += u.output;
 }
 
 /// Token usage for the context meter. `input` = context-window occupancy
@@ -639,6 +761,141 @@ pub fn now_ms() -> u64 {
 
 #[cfg(test)]
 mod tests {
+    use crate::transcript::TokenUsage as TU;
+
+    fn tu(input: u64, cache_read: u64, output: u64) -> TU {
+        TU {
+            input,
+            cache_read,
+            cache_write_5m: 0,
+            cache_write_1h: 0,
+            output,
+        }
+    }
+    fn turn(u: TU, model: &str, agent: Option<&str>) -> TurnUsage {
+        TurnUsage {
+            usage: u,
+            model: Some(model.into()),
+            agent_id: agent.map(str::to_string),
+        }
+    }
+
+    /// The core of the whole rollup. Claude Code writes one record per content
+    /// block, each repeating the same usage; summing them inflates totals
+    /// 2.2x-3.3x. Keyed turns must collapse to one.
+    #[test]
+    fn repeated_records_for_one_turn_count_once() {
+        let mut l = UsageLedger::default();
+        let u = tu(100, 9_000, 50);
+        assert!(l.record("req_1".into(), turn(u, "claude-opus-5", None)));
+        // ...the same turn arriving four more times, as it really does.
+        for _ in 0..4 {
+            assert!(
+                !l.record("req_1".into(), turn(u, "claude-opus-5", None)),
+                "an identical repeat must not report a change"
+            );
+        }
+        let r = l.rollup();
+        assert_eq!(r.turns, 1);
+        assert_eq!(
+            r.total.output, 50,
+            "output summed per record instead of per turn"
+        );
+        assert_eq!(r.total.cache_read, 9_000);
+    }
+
+    /// LAST-wins, not first. Input is identical across a turn's records but
+    /// output GROWS (283 groups on the reference corpus, all in subagent
+    /// transcripts); taking the first undercounts output by 27.9%.
+    #[test]
+    fn a_turns_growing_output_takes_the_last_value() {
+        let mut l = UsageLedger::default();
+        for out in [10, 40, 90] {
+            l.record("req_1".into(), turn(tu(100, 0, out), "claude-opus-5", None));
+        }
+        assert_eq!(l.rollup().total.output, 90, "must be last-wins, not first");
+        assert_eq!(l.rollup().turns, 1);
+    }
+
+    /// Subagent spend is routinely the majority — 64.2% of one real session —
+    /// so it must be in the total AND visible separately.
+    #[test]
+    fn subagent_turns_are_counted_and_also_surfaced_separately() {
+        let mut l = UsageLedger::default();
+        l.record("req_p".into(), turn(tu(10, 0, 5), "claude-opus-5", None));
+        l.record(
+            "req_a".into(),
+            turn(tu(70, 0, 30), "claude-opus-5", Some("agent-1")),
+        );
+        l.record(
+            "req_b".into(),
+            turn(tu(20, 0, 10), "claude-opus-5", Some("agent-2")),
+        );
+        let r = l.rollup();
+        assert_eq!(r.turns, 3);
+        assert_eq!(r.subagent_turns, 2);
+        assert_eq!(r.total.input, 100, "subagents must be inside the total");
+        assert_eq!(r.subagent_total.input, 90);
+        assert_eq!(r.subagent_total.output, 40);
+    }
+
+    /// A resumed session replays turns verbatim into a NEW transcript file.
+    /// Keys are global precisely so that does not double-count.
+    #[test]
+    fn a_replayed_turn_from_another_file_does_not_double_count() {
+        let mut l = UsageLedger::default();
+        let u = tu(1_000, 0, 100);
+        l.record("req_x".into(), turn(u, "claude-opus-5", None));
+        // same turn, re-seen while tailing the resumed session's file
+        l.record("req_x".into(), turn(u, "claude-opus-5", None));
+        let r = l.rollup();
+        assert_eq!(r.turns, 1);
+        assert_eq!(r.total.input, 1_000);
+    }
+
+    /// Prices are per model, so totals split by model — and a turn whose model
+    /// is unknown must still be COUNTED, or the total quietly shrinks. It lands
+    /// under "unknown" for the viewer to render as Unpriced, never $0.00.
+    #[test]
+    fn totals_split_by_model_and_unknown_models_are_still_counted() {
+        let mut l = UsageLedger::default();
+        l.record("r1".into(), turn(tu(10, 0, 1), "claude-opus-5", None));
+        l.record("r2".into(), turn(tu(20, 0, 2), "claude-haiku-4-5", None));
+        l.record(
+            "r3".into(),
+            TurnUsage {
+                usage: tu(40, 0, 4),
+                model: None,
+                agent_id: None,
+            },
+        );
+        let r = l.rollup();
+        assert_eq!(r.turns, 3);
+        assert_eq!(
+            r.total.input, 70,
+            "the unpriceable turn must still be in the total"
+        );
+        let models: Vec<&str> = r.by_model.iter().map(|m| m.model.as_str()).collect();
+        // sorted, so the viewer does not reshuffle rows on every update
+        assert_eq!(models, vec!["claude-haiku-4-5", "claude-opus-5", "unknown"]);
+        let unknown = r.by_model.iter().find(|m| m.model == "unknown").unwrap();
+        assert_eq!(unknown.usage.input, 40);
+    }
+
+    /// The meter and the ledger answer different questions: latest occupancy
+    /// vs de-duplicated sum. Conflating them is how a 2x-3x cost error happens.
+    #[test]
+    fn the_ledger_sums_while_the_meter_would_take_the_latest() {
+        let mut l = UsageLedger::default();
+        l.record("r1".into(), turn(tu(500_000, 0, 10), "claude-opus-5", None));
+        l.record("r2".into(), turn(tu(60_000, 0, 20), "claude-opus-5", None));
+        let r = l.rollup();
+        // Cost wants the sum...
+        assert_eq!(r.total.input, 560_000);
+        // ...even though the meter would show 60_000, because compaction just
+        // dropped the context. Occupancy is not monotonic; spend is.
+        assert!(r.total.input > 60_000);
+    }
 
     use super::*;
 

@@ -6,6 +6,8 @@ import { ConnectionStatus } from "./ws";
 import { DragHandle, clamp } from "./Resizer";
 import { T, tint } from "./tokens";
 import ContextMeter from "./ContextMeter";
+import { formatUsd, priceRollup, type CostRollup, type PricedRollup } from "./cost";
+import { CAVEAT } from "./pricing";
 import ThemeMenu from "./ThemeMenu";
 import {
   MODELS,
@@ -37,6 +39,14 @@ interface ExitMsg {
   code: number;
 }
 
+/** De-duplicated token totals for the session, parent AND subagents. Carries no
+ *  dollar figure on purpose — the price table lives in pricing.ts, and a second
+ *  copy in Rust would be a second source of truth for money. */
+interface CostMsg {
+  type: "cost";
+  rollup: CostRollup;
+}
+
 /** What the agent is doing, as reported by the backend's hook-driven state
  *  machine. Broadcast only on a REAL transition, with a monotonic `seq`. */
 type AgentState = "unknown" | "idle" | "working" | "blocked";
@@ -54,6 +64,7 @@ type ControlMsg =
   | TimelineSnapshotMsg
   | TimelineEventMsg
   | ExitMsg
+  | CostMsg
   | AgentStateMsg
   | { type: string };
 
@@ -220,6 +231,9 @@ export default function SessionWindow(props: SessionWindowProps = {}) {
   const [liveModel, setLiveModel] = useState<string | null>(null);
   // Latest context-window usage (input/output tokens) from the transcript.
   const [usage, setUsage] = useState<{ input: number; output: number } | null>(null);
+  // Session-wide de-duplicated spend. Distinct from `usage` above: the meter
+  // wants the LATEST turn's occupancy, cost wants the de-duplicated SUM.
+  const [cost, setCost] = useState<PricedRollup | null>(null);
   // Last effort we *requested* per alias — used only to position the slider on
   // reopen. Effort has no transcript readback, so this is a convenience memory,
   // never presented as confirmed state.
@@ -478,6 +492,11 @@ export default function SessionWindow(props: SessionWindowProps = {}) {
         setUsage({ input: u.input ?? 0, output: u.output ?? 0 });
         break;
       }
+      case "cost": {
+        const m = msg as CostMsg;
+        if (m.rollup) setCost(priceRollup(m.rollup));
+        break;
+      }
       // Ground-truth state transition from the agent's own hooks. Also the
       // cancel signal for a ping still waiting out its hold.
       case "agent_state": {
@@ -645,6 +664,45 @@ export default function SessionWindow(props: SessionWindowProps = {}) {
           <>
             <span style={{ width: 1, height: 18, background: T.border, flexShrink: 0 }} />
             <ContextMeter tokens={usage.input} modelId={liveModel} />
+          </>
+        )}
+
+        {/* Session spend. Never a bare number: the figure is notional, and the
+            subscription caveat rides along in the tooltip. */}
+        {cost && cost.turns > 0 && (
+          <>
+            <span style={{ width: 1, height: 18, background: T.border, flexShrink: 0 }} />
+            <span
+              title={
+                CAVEAT.tooltip +
+                (cost.unpricedTurns > 0
+                  ? `\n\n${CAVEAT.unpricedTooltip(cost.unpricedModels.join(", "))}`
+                  : "") +
+                `\n\n${cost.turns} turns` +
+                (cost.subagentTurns > 0
+                  ? ` · ${cost.subagentTurns} in subagents (${Math.round(cost.subagentShare * 100)}% of tokens)`
+                  : "") +
+                `\n${CAVEAT.footer}`
+              }
+              style={{
+                display: "inline-flex",
+                alignItems: "baseline",
+                gap: 5,
+                fontSize: 11,
+                fontFamily: T.mono,
+                color: T.textDim,
+                cursor: "help",
+                flexShrink: 0,
+              }}
+            >
+              <span style={{ color: T.textFaint, fontSize: 9.5 }}>{CAVEAT.prefix}</span>
+              <b style={{ color: T.accent, fontWeight: 600 }}>{formatUsd(cost.usd)}</b>
+              {cost.unpricedTurns > 0 && (
+                <span style={{ color: T.running, fontSize: 9.5 }}>
+                  +{cost.unpricedTurns} {CAVEAT.unpricedLabel.toLowerCase()}
+                </span>
+              )}
+            </span>
           </>
         )}
 

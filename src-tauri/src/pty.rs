@@ -220,6 +220,7 @@ fn spawn_in_pty(
         timeline: Mutex::new(Vec::new()),
         model: RwLock::new(None),
         usage: RwLock::new(None),
+        ledger: Mutex::new(crate::session::UsageLedger::default()),
         is_terminal,
         // Belt and braces: a plain shell has no permission model to skip, so it
         // must never report `true` even if a caller passes one through.
@@ -390,9 +391,14 @@ pub fn spawn_session(
             for tailed in tailer.poll() {
                 let crate::transcript::Tailed { agent_id, record } = tailed;
                 // A subagent runs its own model and keeps its own context
-                // window, so its Model/Usage records must never reach the
-                // session header or meter — that would make the model chip
-                // flicker and the meter jump to a child's occupancy.
+                // window, so its Model records must never reach the session
+                // header — that would make the model chip flicker.
+                //
+                // Usage is deliberately NOT skipped here. A subagent's tokens
+                // are excluded from the METER (a child's occupancy is not the
+                // parent's) but must still reach the LEDGER, or the rollup
+                // silently omits the majority of a session's spend — measured
+                // at 64.2% on a real session.
                 if agent_id.is_some() && crate::transcript::is_session_scoped(&record) {
                     continue;
                 }
@@ -409,19 +415,50 @@ pub fn spawn_session(
                             );
                         }
                     }
-                    crate::transcript::Record::Usage { usage, .. } => {
-                        // The meter wants occupancy, so it keeps the collapsed
-                        // sum; the per-kind breakdown rides along for cost.
-                        let input = usage.context_tokens();
-                        let output = usage.output;
-                        *session.usage.write() =
-                            Some(crate::session::ContextUsage { input, output });
-                        session.send_control(serde_json::json!({
-                            "type": "usage",
-                            "input": input,
-                            "output": output,
-                            "breakdown": usage
-                        }));
+                    crate::transcript::Record::Usage {
+                        usage,
+                        model,
+                        message_id,
+                        request_id,
+                    } => {
+                        // Key on requestId because billing is per API request,
+                        // which is what a cost column claims to report. It is
+                        // absent only on <synthetic> turns, whose all-zero
+                        // usage never parses. message.id is the fallback and
+                        // was never absent across 2,803 real records.
+                        if let Some(key) = request_id.or(message_id) {
+                            let changed = session.ledger.lock().record(
+                                key,
+                                crate::session::TurnUsage {
+                                    usage,
+                                    model: model.clone(),
+                                    agent_id: agent_id.clone(),
+                                },
+                            );
+                            // Only broadcast when the totals actually moved —
+                            // a turn arrives as many identical records.
+                            if changed {
+                                let rollup = session.ledger.lock().rollup();
+                                session.send_control(serde_json::json!({
+                                    "type": "cost", "rollup": rollup
+                                }));
+                            }
+                        }
+
+                        // The meter is parent-only and wants the LATEST turn's
+                        // occupancy, never a sum.
+                        if agent_id.is_none() {
+                            let input = usage.context_tokens();
+                            let output = usage.output;
+                            *session.usage.write() =
+                                Some(crate::session::ContextUsage { input, output });
+                            session.send_control(serde_json::json!({
+                                "type": "usage",
+                                "input": input,
+                                "output": output,
+                                "breakdown": usage
+                            }));
+                        }
                     }
                     rec => {
                         if let Some(event) = session.apply_transcript(rec, agent_id) {

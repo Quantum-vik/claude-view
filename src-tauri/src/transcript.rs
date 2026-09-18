@@ -367,14 +367,20 @@ fn describe_input(tool: &str, input: &Value) -> Option<String> {
     None
 }
 
-/// Does this record drive **session-level** chrome — the model chip and the
-/// context meter — rather than the timeline?
+/// Does this record describe the **session as a whole**, such that a
+/// subagent's copy would misreport it?
 ///
-/// Such records are meaningful only from the parent transcript. A subagent runs
-/// its own model and has its own context window, so letting a child's through
-/// would misreport both.
+/// Only `Model`. A subagent may run a different model than its parent, so
+/// letting a child's through makes the header's model chip flicker.
+///
+/// `Usage` is deliberately NOT included, though it once was. A subagent's
+/// tokens must stay out of the *context meter* — a child has its own window —
+/// but they belong in the *cost ledger*, where they are routinely the majority
+/// of a session's spend. Excluding usage wholesale silently drops it. The meter
+/// is filtered at its own call site instead, which is the only place the
+/// distinction actually matters.
 pub fn is_session_scoped(record: &Record) -> bool {
-    matches!(record, Record::Model { .. } | Record::Usage { .. })
+    matches!(record, Record::Model { .. })
 }
 
 /// One subagent transcript found beneath a parent session, with the sidecar
@@ -914,10 +920,12 @@ mod tests {
             message_id: None,
             request_id: None,
         };
-        assert!(is_session_scoped(&usage));
         assert!(is_session_scoped(&Record::Model {
             model: "claude-opus-5".into()
         }));
+        // Usage is per-agent for COST purposes: a subagent's tokens are real
+        // spend and must reach the ledger. Only the meter filters them.
+        assert!(!is_session_scoped(&usage));
         // Tool activity is per-agent and DOES belong in the timeline, whichever
         // transcript it came from — that is the whole point of reading them.
         assert!(!is_session_scoped(&Record::Start {
