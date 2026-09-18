@@ -1002,12 +1002,7 @@ export default function SessionWindow(props: SessionWindowProps = {}) {
             {panel === "trace" ? (
               <Trace vid={vid} modelId={liveModel} agentScope={agentScope} onScope={setAgentScope} />
             ) : panel === "agents" ? (
-              <Agents
-                vid={vid}
-                sessionModel={liveModel}
-                selected={agentScope}
-                onSelect={setAgentScope}
-              />
+              <Agents vid={vid} sessionModel={liveModel} selected={agentScope} />
             ) : (
               <Timeline events={events} agentScope={agentScope} onScope={setAgentScope} />
             )}

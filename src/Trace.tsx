@@ -617,6 +617,7 @@ export default function Trace({ vid, modelId, agentScope, onScope, scopeLocked =
             modelId={modelId}
             runs={byAgent}
             hideAgentHeaders={scopeLocked}
+            onScopeTo={scopeLocked ? undefined : onScope}
           />
         ))}
       </div>
@@ -630,6 +631,7 @@ const RowView = memo(function RowView({
   modelId,
   runs,
   hideAgentHeaders,
+  onScopeTo,
 }: {
   row: Row;
   turns: Record<string, TokenUsage>;
@@ -639,6 +641,10 @@ const RowView = memo(function RowView({
   runs: Map<string, AgentRun>;
   /** The surrounding window already names the run — don't repeat it per block. */
   hideAgentHeaders?: boolean;
+  /** Filter the trace to this run. Lives on the run header because that is
+   *  where "isolate what I am already reading" is the obvious gesture —
+   *  clicking a run in the roster or the strip OPENS it instead. */
+  onScopeTo?: (agentId: string) => void;
 }) {
   if (row.kind === "turn") {
     const u = turns[row.turnId];
@@ -716,6 +722,8 @@ const RowView = memo(function RowView({
       : null;
     return (
       <div
+        onClick={onScopeTo ? () => onScopeTo(row.agentId) : undefined}
+        title={onScopeTo ? "Show only this run" : undefined}
         style={{
           margin: "14px 14px 6px 22px",
           padding: "9px 12px",
@@ -723,6 +731,7 @@ const RowView = memo(function RowView({
           borderLeft: `3px solid var(--cv-tool-task)`,
           borderRadius: "0 6px 6px 0",
           background: tint("var(--cv-tool-task)", 0.06),
+          cursor: onScopeTo ? "pointer" : undefined,
         }}
       >
         <div style={{ display: "flex", gap: 10, alignItems: "baseline", flexWrap: "wrap" }}>

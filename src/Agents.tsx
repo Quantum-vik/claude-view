@@ -125,18 +125,27 @@ export function Agents({
   vid,
   sessionModel,
   selected,
-  onSelect,
 }: {
   vid: string;
   /** The session's dominant model — the parent half of the partition. */
   sessionModel: string | null;
   /** The run the panel is currently scoped to, if any. */
   selected: string | null;
-  /** Selecting a run scopes the trace and command log to it (#25). */
-  onSelect: (agentId: string | null) => void;
 }) {
   const { roster, loading } = useRoster(vid);
   const [sort, setSort] = useState<{ key: SortKey; dir: 1 | -1 }>({ key: "usd", dir: -1 });
+  const [failed, setFailed] = useState<string | null>(null);
+
+  /** Open a run in its own window. Errors are shown, never swallowed: a click
+   *  that silently does nothing reads as a broken button. */
+  const open = useCallback(
+    (agentId: string) => {
+      invoke("open_agent_window", { viewerId: vid, agentId }).catch((e) =>
+        setFailed(String(e)),
+      );
+    },
+    [vid],
+  );
 
   const priced = useMemo(() => priceRoster(roster, sessionModel), [roster, sessionModel]);
 
@@ -228,6 +237,24 @@ export function Agents({
         )}
       </p>
 
+      {failed && (
+        <div
+          onClick={() => setFailed(null)}
+          style={{
+            margin: "0 0 12px",
+            padding: "7px 11px",
+            background: T.errorTint,
+            border: `1px solid ${T.errorBorder}`,
+            borderRadius: 6,
+            color: T.errorText,
+            font: `11.5px ${T.mono}`,
+            cursor: "pointer",
+          }}
+        >
+          Couldn’t open that run: {failed} (click to dismiss)
+        </div>
+      )}
+
       <table style={{ width: "100%", borderCollapse: "collapse" }}>
         <thead>
           <tr>
@@ -266,10 +293,9 @@ export function Agents({
             <Row
               key={r.id}
               run={r}
-              vid={vid}
               maxUsd={maxUsd}
               selected={selected === r.id}
-              onSelect={() => onSelect(selected === r.id ? null : r.id)}
+              onOpen={() => open(r.id)}
             />
           ))}
         </tbody>
@@ -288,26 +314,27 @@ export function Agents({
 
 function Row({
   run,
-  vid,
   maxUsd,
   selected,
-  onSelect,
+  onOpen,
 }: {
   run: PricedRun;
-  vid: string;
   maxUsd: number;
   selected: boolean;
-  onSelect: () => void;
+  /** Clicking a run means "open it" — anywhere on the row, not only the
+   *  button. The button stays because it NAMES the action; a bare row click is
+   *  not a discoverable affordance on its own. */
+  onOpen: () => void;
 }) {
   const [hover, setHover] = useState(false);
   const label = runLabel(run);
 
   return (
     <tr
-      onClick={onSelect}
+      onClick={onOpen}
       onMouseEnter={() => setHover(true)}
       onMouseLeave={() => setHover(false)}
-      title={label}
+      title={`${label}\n\nClick to open this run in its own window.`}
       style={{
         cursor: "pointer",
         background: selected
@@ -391,7 +418,7 @@ function Row({
         <button
           onClick={(e) => {
             e.stopPropagation();
-            void invoke("open_agent_window", { viewerId: vid, agentId: run.id }).catch(() => {});
+            onOpen();
           }}
           title={`Open ${runLabel(run)} in its own window`}
           style={{

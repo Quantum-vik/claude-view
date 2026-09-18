@@ -15,10 +15,16 @@
  * sessions. Costing a permanent 30px to say "no agents" would be a bad trade
  * for the common case.
  *
- * Clicking a run opens it in its own window; clicking `main` clears any scope
- * back to the whole session.
+ * Clicking a run OPENS it in its own window — that is what a person clicking a
+ * subagent is asking for. Filtering the panels to a run lives on the trace's own
+ * run header, where you are already reading that run's work. An earlier version
+ * had this backwards: click filtered, double-click opened, and nobody found the
+ * double-click.
+ *
+ * Clicking `main` clears any active filter back to the whole session.
  */
 
+import { useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { T, tint } from "./tokens";
 import { useRoster } from "./Agents";
@@ -51,6 +57,16 @@ export default function AgentStrip({
   onShowAll?: () => void;
 }) {
   const { roster } = useRoster(vid);
+  const [failed, setFailed] = useState<string | null>(null);
+
+  const open = (agentId: string) => {
+    // Never swallowed: a click that silently does nothing is indistinguishable
+    // from a click that did not register, and the reader blames the button.
+    invoke("open_agent_window", { viewerId: vid, agentId }).catch((e) =>
+      setFailed(String(e)),
+    );
+  };
+
   if (roster.runs.length === 0) return null;
 
   // Working runs first — they are the reason to glance at this at all — then
@@ -118,14 +134,11 @@ export default function AgentStrip({
         return (
           <button
             key={r.id}
-            onClick={() => onScope(on ? null : r.id)}
-            onDoubleClick={() =>
-              void invoke("open_agent_window", { viewerId: vid, agentId: r.id }).catch(() => {})
-            }
+            onClick={() => open(r.id)}
             title={
               `${runLabel(r)}\n${r.agentType ?? "agent"} · ${r.status}` +
               (live && idle != null ? ` · ${formatDuration(idle)} quiet` : "") +
-              `\n\nClick to filter the panels to this run. Double-click to open it in its own window.`
+              `\n\nClick to open this run in its own window.`
             }
             style={{
               ...CHIP,
@@ -164,6 +177,16 @@ export default function AgentStrip({
           }}
         >
           +{hidden}
+        </button>
+      )}
+
+      {failed && (
+        <button
+          onClick={() => setFailed(null)}
+          title={`${failed} (click to dismiss)`}
+          style={{ ...CHIP, flexShrink: 0, color: T.error, borderColor: T.errorBorder }}
+        >
+          couldn’t open ✕
         </button>
       )}
 
