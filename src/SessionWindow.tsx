@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import Terminal from "./Terminal";
 import Timeline, { TimelineEvent } from "./Timeline";
+import Trace from "./Trace";
 import { ConnectionStatus } from "./ws";
 import { DragHandle, clamp } from "./Resizer";
 import { T, tint } from "./tokens";
@@ -90,7 +91,10 @@ function breadcrumb(cwd: string): { parent: string; name: string } {
 // Sidebar width: the terminal-style command log reads best around 470px.
 const SIDEBAR_DEFAULT = 470;
 const SIDEBAR_MIN = 320;
-const SIDEBAR_MAX = 640;
+// The command log was sized for a gutter. The trace panel is meant to be
+// able to take the window, so the ceiling is a share of it rather than a
+// fixed width that predates the panel carrying prose.
+const SIDEBAR_MAX = Math.max(640, Math.round(window.innerWidth * 0.82));
 const SIDEBAR_KEY = "cv.sidebarWidth";
 
 function savedSidebarWidth(): number {
@@ -214,6 +218,28 @@ export default function SessionWindow(props: SessionWindowProps = {}) {
   const [agentState, setAgentState] = useState<AgentState>("unknown");
   const [connStatus, setConnStatus] = useState<ConnectionStatus>("connecting");
   const [sidebarOpen, setSidebarOpen] = useState(true);
+  // Which panel the sidebar shows. The command log stays the default: it is
+  // what existing users know, and the trace is the newer, heavier view.
+  const [panel, setPanel] = useState<"timeline" | "trace">(() => {
+    // An explicit ?panel= wins, so a window can be opened straight onto the
+    // trace — the same way vid/port/token/cwd already configure this window.
+    const wanted = params.get("panel");
+    if (wanted === "trace" || wanted === "timeline") return wanted;
+    try {
+      return localStorage.getItem("cv.panel") === "trace" ? "trace" : "timeline";
+    } catch {
+      return "timeline";
+    }
+  });
+  const showPanel = useCallback((p: "timeline" | "trace") => {
+    setPanel(p);
+    setSidebarOpen(true);
+    try {
+      localStorage.setItem("cv.panel", p);
+    } catch {
+      /* private window / blocked storage — the choice just won't persist */
+    }
+  }, []);
   // Committed width (used at mount); live width mutates the DOM directly
   // during drags so a resize never re-renders the tree per mousemove.
   const [sidebarWidth, setSidebarWidth] = useState(savedSidebarWidth);
@@ -801,15 +827,38 @@ export default function SessionWindow(props: SessionWindowProps = {}) {
             );
           })()}
 
+        {/* Panel switch: command log (hook/transcript cards) vs full trace. */}
+        <button
+          onClick={() => showPanel("trace")}
+          title="Everything Claude did: prompts, replies, thinking, tools, subagents, and cost"
+          style={{
+            background: sidebarOpen && panel === "trace" ? T.accent : T.surface2,
+            border:
+              sidebarOpen && panel === "trace" ? "none" : `1px solid ${T.borderStrong}`,
+            borderRadius: 8,
+            color: sidebarOpen && panel === "trace" ? T.accentInk : T.text,
+            cursor: "pointer",
+            fontSize: 12,
+            fontWeight: 600,
+            padding: "5px 12px",
+            flexShrink: 0,
+            whiteSpace: "nowrap",
+            fontFamily: T.serif,
+          }}
+        >
+          Trace
+        </button>
+
         {/* Sidebar toggle */}
         <button
-          onClick={() => setSidebarOpen((v) => !v)}
+          onClick={() => (sidebarOpen && panel === "timeline" ? setSidebarOpen(false) : showPanel("timeline"))}
           title={sidebarOpen ? "Hide the command log" : "Show the command log"}
           style={{
-            background: sidebarOpen ? T.accent : T.surface2,
-            border: sidebarOpen ? "none" : `1px solid ${T.borderStrong}`,
+            background: sidebarOpen && panel === "timeline" ? T.accent : T.surface2,
+            border:
+              sidebarOpen && panel === "timeline" ? "none" : `1px solid ${T.borderStrong}`,
             borderRadius: 8,
-            color: sidebarOpen ? T.accentInk : T.text,
+            color: sidebarOpen && panel === "timeline" ? T.accentInk : T.text,
             cursor: "pointer",
             fontSize: 12,
             fontWeight: 600,
@@ -864,7 +913,11 @@ export default function SessionWindow(props: SessionWindowProps = {}) {
               flexDirection: "column",
             }}
           >
-            <Timeline events={events} />
+            {panel === "trace" ? (
+              <Trace vid={vid} modelId={liveModel} />
+            ) : (
+              <Timeline events={events} />
+            )}
           </div>
         )}
 

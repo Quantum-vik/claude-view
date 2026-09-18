@@ -262,6 +262,48 @@ fn is_executable(_meta: &std::fs::Metadata) -> bool {
 /// opener — which could *execute* a bundle/script — is used only as a fallback
 /// and only for an allowlist of inert document types.
 #[tauri::command]
+fn read_trace(
+    state: State<'_, AppState>,
+    viewer_id: String,
+    after: Option<String>,
+    limit: Option<usize>,
+) -> Result<serde_json::Value, String> {
+    // The webview talks to the backend through commands, not through the local
+    // HTTP server: that server exists for hooks and scripting, and the webview
+    // is a different origin from 127.0.0.1:<port>, so a fetch would need a CORS
+    // layer we have no reason to open. `GET /trace/:id` stays for scripting.
+    let session = state
+        .registry
+        .get(&viewer_id)
+        .ok_or_else(|| "no such session".to_string())?;
+
+    let cursor = match after.as_deref() {
+        Some(raw) => crate::trace::Cursor::decode(raw).ok_or("malformed cursor")?,
+        None => crate::trace::Cursor::default(),
+    };
+    let sid = session.session_id.read().clone();
+    let path = crate::trace::locate_for(&session.cwd, sid.as_deref(), session.spawned_at);
+
+    match crate::trace::read_page(
+        path.as_deref(),
+        &cursor,
+        limit.unwrap_or(crate::trace::DEFAULT_LIMIT),
+    ) {
+        Ok(page) => serde_json::to_value(page).map_err(|e| e.to_string()),
+        // A typed absence, so the panel can say WHICH failure it is rather than
+        // rendering "nothing happened" for "I cannot see".
+        Err(why) => Ok(serde_json::json!({
+            "unavailable": why,
+            "entries": [],
+            "cursor": cursor.encode(),
+            "hasMore": false,
+            "sources": [],
+            "turns": {},
+        })),
+    }
+}
+
+#[tauri::command]
 fn open_path(path: String, cwd: Option<String>) -> Result<(), String> {
     use std::path::{Path, PathBuf};
 
@@ -606,6 +648,7 @@ fn main() {
             dock_session,
             close_session,
             get_conn_info,
+            read_trace,
             open_path,
             open_url,
             hooks_status,

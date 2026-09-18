@@ -129,6 +129,12 @@ pub struct TracePage {
     pub has_more: bool,
     /// Which transcripts were read — the parent plus every subagent found.
     pub sources: Vec<String>,
+    /// Per-turn token usage for the turns appearing in this page, keyed the
+    /// same way the cost ledger keys them, so a turn's entries and its price
+    /// line up. De-duplicated **last-wins** within the page for the same reason
+    /// the ledger is: a turn arrives as many records, and `output_tokens` grows
+    /// across them.
+    pub turns: BTreeMap<String, crate::transcript::TokenUsage>,
 }
 
 /// Why a trace could not be read.
@@ -171,8 +177,17 @@ pub fn read_page(
     let mut entries = Vec::new();
     let mut sources = vec!["parent".to_string()];
     let mut has_more = false;
+    let mut turns: BTreeMap<String, crate::transcript::TokenUsage> = BTreeMap::new();
 
-    let (n, more) = read_file(parent, None, after.get(""), limit, &mut entries, &mut next)?;
+    let (n, more) = read_file(
+        parent,
+        None,
+        after.get(""),
+        limit,
+        &mut entries,
+        &mut next,
+        &mut turns,
+    )?;
     has_more |= more;
     let mut budget = limit.saturating_sub(n);
 
@@ -184,7 +199,7 @@ pub fn read_page(
             continue;
         }
         let start = after.get(&sub.agent_id);
-        match read_sub(&sub, start, budget, &mut entries, &mut next) {
+        match read_sub(&sub, start, budget, &mut entries, &mut next, &mut turns) {
             Ok((n, more)) => {
                 has_more |= more;
                 budget = budget.saturating_sub(n);
@@ -200,20 +215,32 @@ pub fn read_page(
         cursor: next.encode(),
         has_more,
         sources,
+        turns,
     })
 }
 
+#[allow(clippy::too_many_arguments)]
 fn read_sub(
     sub: &SubagentFile,
     start: u64,
     limit: usize,
     out: &mut Vec<Entry>,
     next: &mut Cursor,
+    turns: &mut BTreeMap<String, crate::transcript::TokenUsage>,
 ) -> Result<(usize, bool), Unavailable> {
-    read_file(&sub.path, Some(&sub.agent_id), start, limit, out, next)
+    read_file(
+        &sub.path,
+        Some(&sub.agent_id),
+        start,
+        limit,
+        out,
+        next,
+        turns,
+    )
 }
 
 /// Read up to `limit` entries from one transcript, starting at `start` bytes.
+#[allow(clippy::too_many_arguments)]
 fn read_file(
     path: &Path,
     agent_id: Option<&str>,
@@ -221,6 +248,7 @@ fn read_file(
     limit: usize,
     out: &mut Vec<Entry>,
     next: &mut Cursor,
+    turns: &mut BTreeMap<String, crate::transcript::TokenUsage>,
 ) -> Result<(usize, bool), Unavailable> {
     let key = agent_id.unwrap_or("").to_string();
     let file = fs::File::open(path).map_err(|_| Unavailable::Unreadable)?;
@@ -262,6 +290,16 @@ fn read_file(
                     let before = out.len();
                     parse_line(&v, at, agent_id, out);
                     produced += out.len() - before;
+                    // Last-wins, matching the ledger: within a turn the input
+                    // side is identical across records but output grows.
+                    if let Some(u) = crate::transcript::TokenUsage::parse(&v) {
+                        if let Some(id) = v["requestId"]
+                            .as_str()
+                            .or_else(|| v["message"]["id"].as_str())
+                        {
+                            turns.insert(id.to_string(), u);
+                        }
+                    }
                 }
             }
             Err(_) => break,
