@@ -8,6 +8,7 @@ mod past_sessions;
 mod pty;
 mod server;
 mod session;
+mod trace;
 mod transcript;
 
 use std::sync::Arc;

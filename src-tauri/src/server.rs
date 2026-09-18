@@ -41,6 +41,7 @@ pub fn router(registry: Arc<Registry>, token: String, app: tauri::AppHandle, por
         )
         .route("/terminals", post(terminals_handler))
         .route("/past_sessions", get(past_sessions_handler))
+        .route("/trace/:id", get(trace_handler))
         .with_state(state)
 }
 
@@ -163,6 +164,70 @@ async fn terminals_handler(
 #[derive(Deserialize)]
 struct WsQuery {
     token: Option<String>,
+}
+
+/// Query for `GET /trace/:id`.
+#[derive(Deserialize)]
+struct TraceQuery {
+    /// Opaque cursor from a previous page. Absent = start of the session.
+    after: Option<String>,
+    limit: Option<usize>,
+    /// Accepted in the query string as well as the header, so the route is
+    /// usable from a plain `curl` the same way `/ws/:id` already is.
+    token: Option<String>,
+}
+
+/// `GET /trace/:id?after=<cursor>&limit=<n>` — a page of the session's trace,
+/// read straight off disk.
+///
+/// Per issue #18 the transcript is authoritative and nothing is cached: the
+/// largest real transcript here parses in 46 ms, so a cache would be all the
+/// invalidation cost of a cache for no measurable gain.
+///
+/// An unreadable trace is a TYPED failure, never an empty page. Rendering
+/// "nothing happened" for "I cannot see" is a lie the viewer cannot detect.
+async fn trace_handler(
+    Path(id): Path<String>,
+    Query(q): Query<TraceQuery>,
+    State(state): State<ServerState>,
+    headers: HeaderMap,
+) -> Result<axum::Json<Value>, (StatusCode, String)> {
+    let via_query = q.token.as_deref() == Some(state.token.as_str());
+    if !via_query && !check_token(&state, &headers) {
+        return Err((StatusCode::UNAUTHORIZED, "bad token".into()));
+    }
+    let session = state
+        .registry
+        .get(&id)
+        .ok_or((StatusCode::NOT_FOUND, "no such session".into()))?;
+
+    let cursor = match q.after.as_deref() {
+        Some(raw) => crate::trace::Cursor::decode(raw)
+            .ok_or((StatusCode::BAD_REQUEST, "malformed cursor".into()))?,
+        None => crate::trace::Cursor::default(),
+    };
+
+    // Resolve the transcript exactly as the tailer does, so a page and the live
+    // push can never disagree about which file a session owns.
+    let sid = session.session_id.read().clone();
+    let path = crate::trace::locate_for(&session.cwd, sid.as_deref(), session.spawned_at);
+
+    match crate::trace::read_page(
+        path.as_deref(),
+        &cursor,
+        q.limit.unwrap_or(crate::trace::DEFAULT_LIMIT),
+    ) {
+        Ok(page) => Ok(axum::Json(json!(page))),
+        Err(why) => Ok(axum::Json(json!({
+            "unavailable": why,
+            "entries": [],
+            // Hand back the cursor unchanged so a poller keeps its position
+            // through a transient read failure instead of restarting.
+            "cursor": cursor.encode(),
+            "hasMore": false,
+            "sources": [],
+        }))),
+    }
 }
 
 async fn ws_handler(

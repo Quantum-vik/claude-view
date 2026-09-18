@@ -513,7 +513,7 @@ const START_SLACK_MS: u64 = 3_000;
 /// session was spawned. Without the start-time gate, a different (possibly
 /// private) session already running in the same directory could be picked up
 /// and its commands leaked into this window's timeline.
-fn locate(cwd: &str, session_id: Option<&str>, after_ms: u64) -> Option<PathBuf> {
+pub fn locate(cwd: &str, session_id: Option<&str>, after_ms: u64) -> Option<PathBuf> {
     let projects = dirs::home_dir()?.join(".claude").join("projects");
     let dirs = fs::read_dir(&projects).ok()?;
 
@@ -601,7 +601,7 @@ fn head_info(path: &Path, cwd: &str) -> Option<(bool, u64)> {
 
 /// Parse "2026-07-10T17:34:34.014Z" to epoch milliseconds. No dependency on a
 /// datetime crate — the transcript format is fixed.
-fn parse_iso_ms(s: &str) -> Option<u64> {
+pub fn parse_iso_ms(s: &str) -> Option<u64> {
     let (date, rest) = s.split_once('T')?;
     let mut dp = date.split('-');
     let y: i64 = dp.next()?.parse().ok()?;
