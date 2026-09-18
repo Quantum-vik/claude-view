@@ -46,8 +46,14 @@ dev:
     npm run tauri dev
 
 # Build the downloadable Linux artifacts (.deb + .AppImage).
+#
+# APPIMAGE_EXTRACT_AND_RUN=1 is not optional on Arch (and most modern distros):
+# linuxdeploy is itself an AppImage and mounts via FUSE *2*, but Arch ships only
+# fusermount3. Without it the deb succeeds and the AppImage dies with the
+# singularly unhelpful `failed to run linuxdeploy`. Extracting instead of
+# mounting needs no root and no fuse2 package.
 package:
-    npm run tauri build -- --bundles deb,appimage
+    APPIMAGE_EXTRACT_AND_RUN=1 npm run tauri build -- --bundles deb,appimage
 
 # Repackage the release binary as an Arch .pkg.tar.zst (needs `package` first).
 package-arch-bin:

@@ -24,8 +24,13 @@ system WebKit.
 ## Building
 
 ```bash
-npm run tauri build -- --bundles deb,appimage
+APPIMAGE_EXTRACT_AND_RUN=1 npm run tauri build -- --bundles deb,appimage
 ```
+
+**That env var is required on Arch**, and harmless everywhere else. linuxdeploy
+is an AppImage that mounts itself via FUSE **2**; Arch ships only `fusermount3`,
+so without it the `.deb` builds fine and the AppImage fails with `failed to run
+linuxdeploy`. Extracting instead of mounting avoids needing root or `fuse2`.
 
 Artifacts land in `src-tauri/target/release/bundle/{deb,appimage}/`.
 
