@@ -725,6 +725,7 @@ export default function Terminal({
       )}
       {searchOpen && (
         <div
+          className="cv-field"
           style={{
             position: "absolute",
             top: 8,

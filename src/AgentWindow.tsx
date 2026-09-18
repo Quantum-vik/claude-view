@@ -213,12 +213,12 @@ function StatusPill({ status, idle }: { status: RunStatus; idle: number | null }
       }}
     >
       <span
+        className={status === "running" ? "cv-pulse" : undefined}
         style={{
           width: 6,
           height: 6,
           borderRadius: 99,
           background: "currentColor",
-          animation: status === "running" ? "pulseDot 1.4s ease-in-out infinite" : undefined,
         }}
       />
       {word}

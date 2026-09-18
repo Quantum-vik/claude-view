@@ -209,6 +209,7 @@ export default function AgentStrip({
 function Dot({ color, filled, pulse }: { color: string; filled: boolean; pulse?: boolean }) {
   return (
     <span
+      className={pulse ? "cv-pulse" : undefined}
       style={{
         width: 7,
         height: 7,
@@ -216,7 +217,6 @@ function Dot({ color, filled, pulse }: { color: string; filled: boolean; pulse?:
         borderRadius: 99,
         background: filled ? color : "transparent",
         border: filled ? "none" : `1.5px solid ${color}`,
-        animation: pulse ? "pulseDot 1.4s ease-in-out infinite" : undefined,
       }}
     />
   );

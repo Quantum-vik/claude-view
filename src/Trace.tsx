@@ -286,6 +286,7 @@ const ToolCard = memo(function ToolCard({ row }: { row: ToolRow }) {
           style={{
             color: T.text,
             fontFamily: T.mono,
+            fontSize: 12,
             whiteSpace: "pre-wrap",
             wordBreak: "break-word",
           }}
@@ -763,13 +764,12 @@ const RowView = memo(function RowView({
               }}
             >
               <span
+                className={run.status === "running" ? "cv-pulse" : undefined}
                 style={{
                   width: 6,
                   height: 6,
                   borderRadius: 99,
                   background: "currentColor",
-                  animation:
-                    run.status === "running" ? "pulseDot 1.4s ease-in-out infinite" : undefined,
                 }}
               />
               {run.status}

@@ -323,6 +323,7 @@ export default function Timeline({ events, agentScope = null, onScope }: Timelin
         }}
       >
         <div
+          className="cv-field"
           style={{
             display: "flex",
             alignItems: "center",
@@ -556,7 +557,7 @@ const SingleLine = memo(function SingleLine({
         }}
       >
         {isRunning ? (
-          <span style={{ display: "inline-block", animation: "pulseDot 1.1s ease-in-out infinite" }}>
+          <span className="cv-pulse" style={{ display: "inline-block" }}>
             ●
           </span>
         ) : (

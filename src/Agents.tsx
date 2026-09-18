@@ -205,7 +205,20 @@ export function Agents({
   const maxUsd = Math.max(...priced.runs.map((r) => r.usd ?? 0), 0);
 
   return (
-    <div style={{ padding: "12px 14px 40px" }}>
+    // height + an inner scroller, matching Trace. The parent is
+    // `overflow: hidden; display: flex; flexDirection: column`
+    // (SessionWindow.tsx), so without this the roster silently truncates at the
+    // fold — the one view whose whole justification is showing EVERY run.
+    <div
+      style={{
+        display: "flex",
+        flexDirection: "column",
+        height: "100%",
+        minWidth: 0,
+        overflow: "auto",
+        padding: "12px 14px 40px",
+      }}
+    >
       <p
         style={{
           margin: "0 0 14px",
@@ -412,9 +425,9 @@ function Row({
         )}
       </td>
       <td style={{ ...CELL, textAlign: "right", whiteSpace: "nowrap" }}>
-        {/* An explicit control, not a row-click: "open this run" is the thing
-            people came here to do, and an invisible affordance is one nobody
-            finds. Row-click still scopes the panels; this opens the run. */}
+        {/* The row itself already opens the run — this button exists to NAME
+            that action, because a bare row click is not a discoverable
+            affordance. Scoping the panels lives on the trace's run header. */}
         <button
           onClick={(e) => {
             e.stopPropagation();
@@ -484,13 +497,13 @@ function StatusPill({ status, idle }: { status: RunStatus; idle?: number | null 
       }}
     >
       <span
+        className={status === "running" ? "cv-pulse" : undefined}
         style={{
           width: 6,
           height: 6,
           borderRadius: 99,
           background: color,
           flex: "0 0 6px",
-          animation: status === "running" ? "pulseDot 1.4s ease-in-out infinite" : undefined,
         }}
       />
       {STATUS_TEXT[status]}

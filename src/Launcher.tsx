@@ -1169,16 +1169,15 @@ export default function Launcher() {
       >
         <span
           title={stateTitle(s)}
+          // One moving dot is a focus cue; ten would be noise — only the
+          // selected session pulses, exactly as before.
+          className={!s.ended && selected ? "cv-pulse" : undefined}
           style={{
             width: 9,
             height: 9,
             borderRadius: "50%",
             background: stateColor(s),
             flexShrink: 0,
-            // One moving dot is a focus cue; ten would be noise — only the
-            // selected session pulses, exactly as before.
-            animation:
-              !s.ended && selected ? "pulseDot 1.6s ease-in-out infinite" : undefined,
           }}
         />
         <div style={{ flex: 1, overflow: "hidden" }}>
@@ -1457,7 +1456,9 @@ export default function Launcher() {
         </div>
 
         {/* Search-first */}
-        <div style={searchWrapStyle}>
+        {/* cv-field: the ring goes on the wrapper, because the <input> sets
+            outline:none and the wrapper is what reads as the field. */}
+        <div className="cv-field" style={searchWrapStyle}>
           <span
             style={{ color: T.searchGlyph, fontFamily: T.mono, fontSize: 12, flexShrink: 0 }}
           >
@@ -1527,13 +1528,13 @@ export default function Launcher() {
                   }}
                 >
                   <span
+                    className="cv-pulse"
                     style={{
                       display: "inline-block",
                       width: 6,
                       height: 6,
                       borderRadius: "50%",
                       background: summaryColor(liveCounts),
-                      animation: "pulseDot 1.6s ease-in-out infinite",
                     }}
                   />
                   {stateSummary(liveCounts)}

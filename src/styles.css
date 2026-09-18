@@ -241,3 +241,49 @@ button:focus-visible {
   outline: 2px solid var(--cv-accent);
   outline-offset: 2px;
 }
+
+/* ── Quality floor (issue #27) ───────────────────────────────────────────── */
+
+/* The live-dot pulse, as a class rather than nine inline `animation` strings.
+   A media query cannot override an inline style, so this conversion is the
+   prerequisite for honouring reduced motion — not a tidy-up. */
+.cv-pulse {
+  animation: pulseDot var(--cv-pulse, 1.6s) ease-in-out infinite;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  /* The ENCODING has to survive the accommodation. `animation: none` alone
+     would leave a running dot identical to a finished one — the pulse is the
+     only thing distinguishing them. A hollow ring keeps "running" legible
+     without moving anything. */
+  .cv-pulse {
+    animation: none;
+    background: transparent !important;
+    box-shadow: inset 0 0 0 1.5px currentColor;
+  }
+  /* Nothing else in the app animates on its own, but a blanket cap keeps any
+     future addition honest. */
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+}
+
+/* Three search inputs set `outline: none` on the <input> itself, so focus lands
+   invisibly — including on the ⌘K target, the most keyboard-driven control in
+   the app. The ring goes on the wrapper, which is the thing that looks like a
+   field. */
+.cv-field:focus-within {
+  outline: 2px solid var(--cv-accent);
+  outline-offset: 1px;
+}
+
+/* A hover-revealed control that is still tab-reachable is a control a keyboard
+   user activates blind. Reveal it on focus too. */
+.cv-line:focus-within .cv-copy {
+  opacity: 1;
+}

@@ -52,9 +52,18 @@ export default function ContextMeter({ tokens, modelId, width = 54, compact = fa
   return (
     <span
       title={title}
+      // The one number that says a session is about to run out of room was
+      // tooltip-only on a non-focusable span — unreachable to a screen reader.
+      role="progressbar"
+      aria-label="Context window used"
+      aria-valuemin={0}
+      aria-valuemax={window}
+      aria-valuenow={tokens}
+      aria-valuetext={title}
       style={{ display: "inline-flex", alignItems: "center", gap: 6, flexShrink: 0 }}
     >
       <span
+        aria-hidden="true"
         style={{
           width,
           height: 4,

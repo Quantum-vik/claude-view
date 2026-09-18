@@ -56,6 +56,25 @@ export function DragHandle({
   return (
     <div
       title={title ?? "Drag to resize"}
+      // The core layout decision of the app was pointer-only. The callback
+      // contract is already delta-shaped, so arrow keys reuse it unchanged —
+      // nothing downstream has to know a keyboard moved the handle.
+      role="separator"
+      aria-orientation="vertical"
+      aria-label={title ?? "Resize panel"}
+      tabIndex={0}
+      onKeyDown={(e) => {
+        const step = e.shiftKey ? 64 : 16;
+        if (e.key === "ArrowLeft") {
+          e.preventDefault();
+          cb.current(-step);
+          endCb.current?.();
+        } else if (e.key === "ArrowRight") {
+          e.preventDefault();
+          cb.current(step);
+          endCb.current?.();
+        }
+      }}
       onPointerDown={(e) => {
         active.current = true;
         last.current = e.clientX;

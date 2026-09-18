@@ -721,13 +721,13 @@ export default function SessionWindow(props: SessionWindowProps = {}) {
           }}
         >
           <span
+            className={live.pulse ? "cv-pulse" : undefined}
             style={{
               display: "inline-block",
               width: 8,
               height: 8,
               borderRadius: "50%",
               background: live.color,
-              animation: live.pulse ? "pulseDot 1.6s ease-in-out infinite" : undefined,
             }}
           />
           {live.label}
