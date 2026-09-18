@@ -49,6 +49,20 @@ one spawned by another run is depth 2. Depth is a property of the run, not of wh
 its record is stored — records stay flat however deep the nesting goes.
 _Avoid_: nesting level, generation
 
+### What changed
+
+**Baseline**:
+The commit a session's changes are measured from — HEAD as it stood when the
+session started. Not "the last commit": nine commits can land during one evening,
+and measuring from the newest would show almost nothing.
+_Avoid_: base, starting point, HEAD
+
+**Changed during the session**:
+A file that differs from the baseline while the session was open. Deliberately
+says nothing about *who* changed it — git cannot separate the model's edits from
+the user's, and claiming otherwise would assert what the data cannot support.
+_Avoid_: Claude's changes, edited by the agent, authored
+
 ### The panel
 
 **Trace**:
