@@ -54,6 +54,12 @@ export const T = {
   modelViolet: "var(--cv-model-violet)", // opus
 
   // Type — Lora for headings/labels/buttons, IBM Plex Mono for log/terminal.
+  //
+  // The rule that generalises it, now that the panel carries prose as well as
+  // chrome: SERIF IS FOR HUMAN LANGUAGE, MONO IS FOR MACHINE LANGUAGE. User
+  // prompts and assistant messages (and Claude's own thinking) are serif; tool
+  // names, commands, output, timestamps, durations and token counts are mono.
+  // A tool's error message is mono; a sentence Claude wrote about it is serif.
   ui: "system-ui, -apple-system, 'Segoe UI', sans-serif",
   serif: "'Lora', Georgia, serif",
   mono: "'IBM Plex Mono', ui-monospace, Menlo, Monaco, monospace",

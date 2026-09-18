@@ -27,9 +27,13 @@ header{display:flex;align-items:center;gap:14px;padding:9px 14px;background:var(
 .stat.alert b{color:var(--running)}
 main{display:flex;min-height:calc(100vh - 47px)}
 #rail{width:34px;flex:0 0 34px;background:var(--sidebar);border-right:1px solid var(--border);
-  display:flex;flex-direction:column;align-items:center;padding-top:10px;gap:8px;cursor:pointer}
+  display:flex;flex-direction:column;align-items:center;padding-top:10px;gap:8px;cursor:e-resize}
+#rail:hover{background:color-mix(in srgb,var(--accent) 8%,var(--sidebar))}
+#grip{width:5px;flex:0 0 5px;cursor:col-resize;background:var(--border);opacity:.5}
+#grip:hover,#grip.dragging{opacity:1;background:var(--accent)}
+body:not(.term-open) #grip{display:none}
 #rail span{writing-mode:vertical-rl;font-size:10px;color:var(--faint);letter-spacing:.14em;text-transform:uppercase}
-#term{display:none;width:44%;flex:0 0 44%;background:#000;border-right:1px solid var(--border);
+#term{display:none;width:44%;flex:0 0 44%;background:#000;
   padding:10px;color:#cfc7b6;white-space:pre-wrap;overflow:auto;font-size:12px}
 body.term-open #term{display:block}
 body.term-open #rail{display:none}
@@ -48,6 +52,7 @@ body.term-open #rail{display:none}
 .turnhead{display:flex;gap:10px;align-items:baseline;padding:7px 14px 3px;font-size:10.5px;color:var(--faint)}
 .turnhead .cost{margin-left:auto;font-variant-numeric:tabular-nums;color:var(--dim)}
 .turnhead .cost b{color:var(--accent);font-weight:600}
+.turnhead .why{cursor:help;color:var(--faint);border-bottom:1px dotted var(--faint);margin-left:5px}
 .e{display:flex;gap:9px;padding:3px 14px;align-items:baseline}
 .e:hover{background:color-mix(in srgb,var(--accent) 5%,transparent)}
 .g{width:12px;flex:0 0 12px;text-align:center;color:var(--faint);font-size:11px}
@@ -59,6 +64,8 @@ body.term-open #rail{display:none}
 .k-thinking .body{color:var(--faint);font:italic 12.5px/1.6 var(--serif);max-width:80ch;white-space:pre-wrap}
 .k-thinking summary{cursor:pointer;color:var(--faint);font:11px var(--mono);list-style:none}
 .k-thinking summary::-webkit-details-marker{display:none}
+/* Serif = human language, mono = machine language. Thinking is Claude's own
+   words, so it is serif like assistant prose -- just dimmed. */
 .tool .cmd{color:var(--text);white-space:pre-wrap;word-break:break-word}
 .tool .name{font-weight:600}
 .out{margin:4px 0 6px;padding:7px 10px;background:var(--s1);border-left:2px solid var(--border);
@@ -96,14 +103,15 @@ table.mix td.c{text-align:right;font-variant-numeric:tabular-nums;color:var(--fa
 </header>
 
 <main>
-  <div id="rail" onclick="document.body.classList.add('term-open')" title="Show the terminal">
+  <div id="rail" title="Drag right, or click, to bring the terminal back">
     <span>▸ terminal</span>
   </div>
+  <div id="grip" title="Drag to resize — drag fully left to collapse"></div>
   <div id="term">$ claude --dangerously-skip-permissions
 <span style="color:#6f675a">› the terminal is still here, still interactive, still the only place
   you can type — and the only place a foreground build scrolls live.</span>
 <span style="color:#8aab7a">▌</span>
-    <div style="margin-top:14px"><button onclick="document.body.classList.remove('term-open')"
+    <div style="margin-top:14px"><button onclick="collapseTerm()"
       style="background:var(--s2);border:1px solid var(--border);color:var(--text);padding:4px 9px;border-radius:5px;cursor:pointer;font:11px var(--mono)">◂ collapse</button></div>
   </div>
 
@@ -132,6 +140,9 @@ table.mix td.c{text-align:right;font-variant-numeric:tabular-nums;color:var(--fa
 const DATA = /*__FIXTURE__*/null;
 const PRICE = {input:5, cacheRead:0.5, cacheWrite5m:6.25, cacheWrite1h:10, output:25}; // opus-5 $/MTok
 const KINDS = {prompt:'▍', assistant:'✻', thinking:'◦', tool:'›'};
+const THINK_INLINE_MAX = 600;   // above this, collapse; real data maxes out at 364
+const TERM_MIN = 180;           // drag narrower than this and it snaps to the rail
+const TERM_KEY = 'cv.proto.termWidth';
 const TOOLC = t => /bash|shell/i.test(t)?'var(--bash)':/edit|write|multiedit/i.test(t)?'var(--edit)'
   :/^read$/i.test(t)?'var(--read)':/grep|glob/i.test(t)?'var(--grep)'
   :/web/i.test(t)?'var(--web)':/task|agent/i.test(t)?'var(--task)':'var(--dim)';
@@ -186,13 +197,13 @@ function render(){
         const c=at.reduce((a,t)=>a+costOf(t.usage),0), k=at.reduce((a,t)=>a+tot(t.usage)+t.usage.output,0);
         html+=`<div class="sub"><div class="subhead">» subagent <b>${esc(e.agent.agentType||'agent')}</b>
           <span class="badge">${esc((e.agent.description||'').slice(0,60))}</span>
-          <span class="cost">${fmtTok(k)} · <b style="color:var(--accent)">${fmtUsd(c)}</b> — measured, not amortized</span></div>`;
+          <span class="cost">${fmtTok(k)} · <b style="color:var(--accent)">${fmtUsd(c)}</b></span></div>`;
       }
     }
     if(e.turnId!==curTurn && !agentKey){
       curTurn=e.turnId; const t=turnById[e.turnId];
       if(t) html+=`<div class="turnhead">turn <span style="color:var(--dim)">${String(e.turnId).slice(0,14)}…</span>
-        <span class="cost">${fmtTok(tot(t.usage)+t.usage.output)} tokens · <b>${fmtUsd(costOf(t.usage))}</b></span></div>`;
+        <span class="cost">${fmtTok(tot(t.usage)+t.usage.output)} tokens · <b>${fmtUsd(costOf(t.usage))}</b><span class="why" title="Cost is recorded per turn, not per tool call, so individual tool rows show no price — splitting a turn across its tool calls would be inventing data. A subagent row does show a price: its cost is measured from the subagent's own transcript.">?</span></span></div>`;
     }
     // fold consecutive same-tool successes
     if(e.kind==='tool'&&e.status==='success'){
@@ -212,7 +223,18 @@ function entryHtml(e){
   const ts=`<span class="ts">${hhmm(e.ts)}</span>`;
   if(e.kind==='prompt') return `<div class="e k-prompt">${ts}<span class="g" style="color:var(--accent)">▍</span><div class="body">${esc(e.text)}</div></div>`;
   if(e.kind==='assistant') return `<div class="e k-assistant">${ts}<span class="g" style="color:var(--violet)">✻</span><div class="body">${esc(e.text)}</div></div>`;
-  if(e.kind==='thinking') return `<div class="e k-thinking">${ts}<span class="g">◦</span><div class="body"><details><summary>thinking — ${(e.text||'').length} chars</summary>${esc(e.text)}</details></div></div>`;
+  if(e.kind==='thinking'){
+    const t=(e.text||'').trim();
+    // Measured over 1,015 real blocks: median length 0, p75 0, max 364. Three
+    // quarters are EMPTY, so a disclosure would render hundreds of clickable
+    // rows with nothing inside. Drop those outright.
+    if(!t) return '';
+    // Collapse only past a threshold today's data never reaches -- the branch
+    // exists so the design survives a CLI that does persist full reasoning.
+    if(t.length<=THINK_INLINE_MAX)
+      return `<div class="e k-thinking">${ts}<span class="g">◦</span><div class="body">${esc(t)}</div></div>`;
+    return `<div class="e k-thinking">${ts}<span class="g">◦</span><div class="body"><details><summary>thinking — ${t.length} chars</summary>${esc(t)}</details></div></div>`;
+  }
   const col=TOOLC(e.tool), mark=e.status==='error'?'✗':'✓';
   const markc=e.status==='error'?'var(--error)':'var(--success)';
   let out='';
@@ -223,6 +245,58 @@ function entryHtml(e){
     ${e.status==='error'?' <span class="badge" style="color:var(--error)">error</span>':''}
     ${out}</div></div>`;
 }
+// ── Terminal width: ONE control, not two ───────────────────────────────────
+// The rail is not an alternative to the resizer, it is the resizer's zero
+// position. Dragging narrower than TERM_MIN snaps to the rail; the rail drags
+// (or clicks) back out to the remembered width. Mirrors SessionWindow.tsx's
+// existing DragHandle + clamp + cv.sidebarWidth persistence.
+const termEl = document.getElementById('term');
+const grip = document.getElementById('grip');
+const rail = document.getElementById('rail');
+
+function savedTermWidth(){
+  const v = Number(localStorage.getItem(TERM_KEY));
+  return Number.isFinite(v) && v >= TERM_MIN ? v : Math.round(innerWidth * 0.44);
+}
+function openTerm(px){
+  const w = Math.max(TERM_MIN, Math.min(px ?? savedTermWidth(), innerWidth - 320));
+  termEl.style.flex = `0 0 ${w}px`;
+  termEl.style.width = w + 'px';
+  document.body.classList.add('term-open');
+  try{ localStorage.setItem(TERM_KEY, String(w)); }catch(e){}
+}
+function collapseTerm(){ document.body.classList.remove('term-open'); }
+
+let dragging = false;
+function onDrag(ev){
+  if(!dragging) return;
+  const x = ev.clientX;
+  // Narrower than the minimum is not refused — it collapses. That is the whole
+  // point: zero width is a position on the same axis, not a different mode.
+  if(x < TERM_MIN){ collapseTerm(); }
+  else { openTerm(x); }
+}
+function endDrag(){
+  if(!dragging) return;
+  dragging = false; grip.classList.remove('dragging');
+  document.body.style.userSelect = '';
+  removeEventListener('mousemove', onDrag); removeEventListener('mouseup', endDrag);
+}
+grip.addEventListener('mousedown', e=>{
+  dragging = true; grip.classList.add('dragging');
+  document.body.style.userSelect = 'none';
+  addEventListener('mousemove', onDrag); addEventListener('mouseup', endDrag);
+  e.preventDefault();
+});
+// The rail drags open from zero, and clicking it restores the remembered width.
+rail.addEventListener('mousedown', e=>{
+  dragging = true; grip.classList.add('dragging');
+  document.body.style.userSelect = 'none';
+  addEventListener('mousemove', onDrag); addEventListener('mouseup', endDrag);
+  e.preventDefault();
+});
+rail.addEventListener('click', ()=>{ if(!document.body.classList.contains('term-open')) openTerm(); });
+
 document.querySelectorAll('.tab').forEach(t=>t.onclick=()=>{
   document.querySelectorAll('.tab').forEach(x=>x.dataset.on='0');
   t.dataset.on='1'; filter=t.dataset.f; render();
