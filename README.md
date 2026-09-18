@@ -2,8 +2,23 @@
 
 A desktop app that opens a **dedicated window for each Claude Code CLI session** and mirrors that
 session's terminal **in real time, character-by-character** — every command, its live scrolling
-output, and Claude's messages — plus a **structured command-timeline sidebar** driven by Claude
-Code hooks.
+output, and Claude's messages — beside a **panel that is the readable, costed record of everything
+the session did**: the full trace, every subagent run, and what each turn cost.
+
+The panel has three views:
+
+| View | What it shows |
+|---|---|
+| **Log** | One card per tool call — command, output, status, duration. The default. |
+| **Trace** | Everything: prompts, replies, thinking, tool calls and their full output, nested subagent runs, with **cost on each turn**. Searchable, filterable, exportable to Markdown or JSON. |
+| **Agents** | Every subagent the session spawned — what it was asked to do, its type, model, status, tool count, duration and **notional cost**. Selecting one scopes the Trace and the Log to it. |
+
+The launcher adds a **spend** rollup across every session on the machine — today, all time, split
+by model, directory and day.
+
+**Every dollar figure is notional**: what the tokens would have cost at published API list prices.
+On a Claude subscription you are billed a flat rate, so these are not bills. Unpriced models show
+their tokens and withhold dollars rather than guessing.
 
 ## Permissions: sessions skip approval prompts by default
 
@@ -30,7 +45,7 @@ drawn, so nothing ever puts a session into the `blocked` state because of one. A
 mid-task has already run the command — a stricter setup would have stopped there and asked you
 first. That is the trade this default makes; the toggle is how you take the other side of it.
 
-## How it works (the two layers)
+## How it works (the three layers)
 
 Claude Code's observability channels (hooks, Agent SDK, `stream-json`, transcripts, OTel) only
 emit tool output **after** a command finishes — none stream live output. So:
@@ -38,7 +53,16 @@ emit tool output **after** a command finishes — none stream live output. So:
 | Layer | Source | Latency |
 |---|---|---|
 | **Live terminal mirror** | `claude` spawned inside a PTY the app owns (`portable-pty`) → raw bytes → binary WebSocket → xterm.js | Instant, char-by-char |
-| **Command timeline sidebar** | Claude Code `command` hooks → bundled bridge script → HTTP POST to the app's local server | Per-command |
+| **Trace, cost, agent runs** | The session transcript on disk (`~/.claude/projects/…`), tailed — plus one file per subagent run | ~0.2s behind the event |
+| **Session state** | Claude Code hooks → bundled bridge script → HTTP POST to the app's local server | Per-event |
+
+The transcript owns the trace and all cost accounting, because it is the only source that sees a
+subagent's work at all. Hooks stay for the two things a transcript cannot express: that a session
+is **waiting on you**, and that a turn **ended**.
+
+**One thing the panel cannot take from the terminal:** the output of a tool call *while it is
+still running*. No channel carries it. Finished output the panel shows in full — including the
+part the terminal truncates to three lines.
 
 The app **launches** sessions (so it owns their terminals) and **observes** them (via hooks).
 Multiple concurrent sessions each get their own native window, correlated by
@@ -75,9 +99,11 @@ Installers/bundles land in `src-tauri/target/release/bundle/`.
 (The bundled icon is a placeholder; replace `src-tauri/icons/icon.png` — and add an `.icns`/`.ico`
 via `npx tauri icon` — before shipping.)
 
-## Enable the timeline sidebar (hooks)
+## Enable session state (hooks)
 
-The live terminal works with no setup. The sidebar needs Claude Code hooks:
+The live terminal, the trace, cost and the agent roster all work with **no setup** — they read the
+transcript Claude Code already writes. Hooks add one thing on top: knowing when a session is
+waiting on you rather than working.
 
 1. In the launcher window, click **Install** under *Hooks* (asks nothing else; it's reversible).
    This:
@@ -96,7 +122,7 @@ argument), so large tool outputs are never truncated by `ARG_MAX`.
 readable by every process Claude spawns). The bridge script reads it from the 0600
 `~/.claude/claude-view/instance.json` instead. **If you installed hooks before this change, click
 Install again** to refresh the bridge script — otherwise the old script can't authenticate and the
-timeline stays empty.
+session state stays `unknown`.
 
 ## Using it
 
@@ -174,16 +200,28 @@ Where the spec was silent (or allowed a choice), these defaults were picked:
 claude-view/
 ├─ src-tauri/                 Rust backend
 │  ├─ src/main.rs             Tauri setup, commands, spawns axum
-│  ├─ src/server.rs           axum routes: /ws/:id, /hooks, /bind
-│  ├─ src/pty.rs              portable-pty spawn, reader thread, resize
-│  ├─ src/session.rs          registry, correlation, timeline state
+│  ├─ src/server.rs           axum routes: /ws/:id, /hooks, /bind, /trace/:id
+│  ├─ src/pty.rs              portable-pty spawn, reader thread, resize, transcript tailer
+│  ├─ src/session.rs          registry, correlation, timeline state, cost ledger
+│  ├─ src/transcript.rs       transcript parsing, token usage, subagent discovery
+│  ├─ src/trace.rs            paged trace reader (parent + every subagent file)
+│  ├─ src/agents.rs           the agent-run roster: discovery, cost partition, status
+│  ├─ src/export.rs           whole-trace export to Markdown / JSON
+│  ├─ src/rollup.rs           cross-session spend, de-duplicated across transcripts
 │  ├─ src/hooks_install.rs    settings.json merge/remove + bridge script install
 │  └─ scripts/                claude-view-hook.sh / .ps1 (bridge)
 ├─ src/                       React + TS frontend
-│  ├─ SessionWindow.tsx       per-session layout (terminal + sidebar)
+│  ├─ SessionWindow.tsx       per-session layout (terminal + panel)
 │  ├─ Terminal.tsx            xterm.js + fit/webgl/search + WS wiring
-│  ├─ Timeline.tsx            command cards
+│  ├─ Timeline.tsx            the Log view — command cards
+│  ├─ Trace.tsx               the Trace view — every kind, nested runs, cost per turn
+│  ├─ Agents.tsx              the Agents view — the run roster
+│  ├─ agents.ts / cost.ts     pricing the roster and the rollup
+│  ├─ pricing.ts              the model price table, with its AS_OF date
+│  ├─ Spend.tsx               launcher spend rollup
 │  ├─ Launcher.tsx            main window (new session, list, hooks)
 │  └─ ws.ts                   binary WebSocket client with reconnect
+├─ CONTEXT.md                 the domain glossary — run vs type, turn, notional cost
+├─ prototypes/                throwaway UI prototypes, rebuilt from your own corpus
 └─ README.md
 ```
