@@ -28,14 +28,36 @@
 //! $164.12 — the same figure the ledger produces. The zero is a property of
 //! *that* session, not a guarantee, which is exactly why the fold is global.
 //!
-//! # Status is provisional
+//! # Status, and the trap in it
 //!
-//! [`Status`] is derived from the only exact signal available today: the parent
-//! holds a `tool_result` for the run's task call. That cannot distinguish a run
-//! that is still going from one whose session was killed mid-flight. Issue #23
-//! settles the real model once the termination and discovery research lands;
-//! until then `Running` means "no result yet", which is a weaker claim than the
-//! word suggests.
+//! The obvious rule — "the parent holds a `tool_result` for the task call, so
+//! the run finished" — is **wrong for the common case**, and wrong in the
+//! direction that looks fine. Measured across every task call on this machine:
+//! **40 of 43 carry `toolUseResult.status == "async_launched"`**, which is
+//! written when the run is *launched*, not when it ends. Keying completion off
+//! the result's existence marks a background run "done" the instant it starts,
+//! and the 11-run reference session cannot catch it because every run there had
+//! genuinely finished.
+//!
+//! Completion comes instead from a **task notification** the parent writes when
+//! a run stops: a `<task-id>` equal to the run's agent id, and a `<status>` of
+//! `completed` / `stopped` / `killed` / `failed`. Verified exact — 11 of 11
+//! runs in the reference session carry one, and in a live session the only run
+//! without one was the agent still running at the time.
+//!
+//! Two traps, both from the research on #20:
+//!
+//! - The notification is written in **three** record shapes (`user`,
+//!   `attachment`, `queue-operation`) and repeated 2–3× per stop, so it is
+//!   matched by scanning raw text and deduped by agent id.
+//! - `stop_reason` on the child is **not** a terminal signal, so it is not used
+//!   here: a run can be resumed through `SendMessage` with no second task call,
+//!   and `end_turn` would then read as finished while it is working again.
+//!
+//! What remains unknowable: a run whose session was killed outright leaves no
+//! notification, so it looks exactly like one still thinking. [`Status::Running`]
+//! therefore means "no stop signal", which is a weaker claim than the word
+//! suggests. Issue #23 settles whether that earns a staleness rule.
 
 use std::collections::{HashMap, HashSet};
 use std::fs;
@@ -54,10 +76,17 @@ use crate::transcript::{parse_iso_ms, subagents_for, TokenUsage};
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Status {
-    /// The parent holds a `tool_result` for this run's task call. Exact.
+    /// The parent wrote a task notification with `<status>completed</status>`.
+    /// The run reached its own end — which does NOT mean it succeeded at the
+    /// job, only that it stopped of its own accord.
     Done,
-    /// No result yet. Means "still running" OR "the session died mid-run" —
-    /// the two are indistinguishable from the record. Do not present this as a
+    /// Notified `stopped` or `killed`: ended before finishing, by interruption
+    /// or by the harness.
+    Stopped,
+    /// Notified `failed`.
+    Failed,
+    /// No stop notification. Means "still running" OR "the session died
+    /// mid-run" — indistinguishable from the record. Do not present this as a
     /// stronger claim than it is.
     Running,
     /// No sidecar `toolUseId`, so the run cannot be tied to a task call at all
@@ -122,6 +151,17 @@ pub struct Roster {
     pub duplicates_folded: usize,
 }
 
+/// What the parent's `toolUseResult` says about one task call.
+#[derive(Default, Clone)]
+struct TaskResult {
+    /// `toolUseResult.status`: `"completed"` is a real end; `"async_launched"`
+    /// is only a launch receipt.
+    status: Option<String>,
+    /// `toolUseResult.resolvedModel` — present on every task call observed,
+    /// and the only model a run that never produced a turn has.
+    resolved_model: Option<String>,
+}
+
 /// One folded turn: the last record wins, and it carries where it came from.
 struct Turn {
     agent_id: Option<String>,
@@ -167,8 +207,11 @@ pub fn read_roster(parent: &Path) -> Result<Roster, Unavailable> {
     let mut seen_in: HashMap<String, HashSet<String>> = HashMap::new();
     let mut counts: HashMap<String, Counts> = HashMap::new();
     let mut parent_counts = Counts::default();
-    // Task calls the parent has already received a result for.
-    let mut resolved: HashSet<String> = HashSet::new();
+    // What the parent's tool_result says about each task call. NOT "is it
+    // finished" — for an async run the result lands at launch.
+    let mut resolved: HashMap<String, TaskResult> = HashMap::new();
+    // Stop notifications, by agent id. THIS is the completion signal.
+    let mut notified: HashMap<String, String> = HashMap::new();
 
     scan(
         parent,
@@ -177,6 +220,7 @@ pub fn read_roster(parent: &Path) -> Result<Roster, Unavailable> {
         &mut seen_in,
         &mut parent_counts,
         &mut resolved,
+        Some(&mut notified),
     )
     .map_err(|_| Unavailable::Unreadable)?;
 
@@ -185,7 +229,7 @@ pub fn read_roster(parent: &Path) -> Result<Roster, Unavailable> {
         let mut c = Counts::default();
         // A child's own tool_results are its business; only the parent's
         // resolve task calls, so children never contribute to `resolved`.
-        let mut ignored = HashSet::new();
+        let mut ignored = HashMap::new();
         if scan(
             &sub.path,
             Some(&sub.agent_id),
@@ -193,6 +237,7 @@ pub fn read_roster(parent: &Path) -> Result<Roster, Unavailable> {
             &mut seen_in,
             &mut c,
             &mut ignored,
+            None,
         )
         .is_ok()
         {
@@ -228,17 +273,31 @@ pub fn read_roster(parent: &Path) -> Result<Roster, Unavailable> {
     for sub in subs {
         let c = counts.remove(&sub.agent_id).unwrap_or_default();
         let (turns_n, usage) = per_agent.remove(&sub.agent_id).unwrap_or_default();
-        let status = match &sub.tool_use_id {
-            None => Status::Unknown,
-            Some(t) if resolved.contains(t) => Status::Done,
-            Some(_) => Status::Running,
+        let task = sub.tool_use_id.as_ref().and_then(|t| resolved.get(t));
+        let status = match notified.get(&sub.agent_id).map(String::as_str) {
+            Some("completed") => Status::Done,
+            Some("stopped") | Some("killed") => Status::Stopped,
+            Some("failed") => Status::Failed,
+            // A synchronous run is the one case the tool_result itself ends —
+            // `async_launched` is only a receipt (40 of 43 task calls).
+            _ if task.map(|t| t.status.as_deref() == Some("completed")) == Some(true) => {
+                Status::Done
+            }
+            // No stop signal at all. If there is no task call either, nothing
+            // could ever have reported on it.
+            _ if sub.tool_use_id.is_none() => Status::Unknown,
+            _ => Status::Running,
         };
-        // Plurality model, ties broken by name so the row never flickers.
+        // Plurality of the run's own turns, ties broken by name so the row
+        // never flickers. A run that produced no turn at all — a spawn that
+        // died before answering — has none, so fall back to the parent's
+        // `resolvedModel`, which is recorded on every task call observed.
         let model = c
             .models
             .iter()
             .max_by(|a, b| a.1.cmp(b.1).then(b.0.cmp(a.0)))
-            .map(|(m, _)| m.clone());
+            .map(|(m, _)| m.clone())
+            .or_else(|| task.and_then(|t| t.resolved_model.clone()));
         out.runs.push(AgentRun {
             id: sub.agent_id,
             agent_type: sub.agent_type,
@@ -272,7 +331,8 @@ fn scan(
     turns: &mut HashMap<String, Turn>,
     seen_in: &mut HashMap<String, HashSet<String>>,
     counts: &mut Counts,
-    resolved: &mut HashSet<String>,
+    resolved: &mut HashMap<String, TaskResult>,
+    mut notified: Option<&mut HashMap<String, String>>,
 ) -> std::io::Result<()> {
     let file = fs::File::open(path)?;
     let source = agent_id.unwrap_or("").to_string();
@@ -284,6 +344,18 @@ fn scan(
         if line.trim().is_empty() {
             continue;
         }
+        // Stop notifications are matched on the RAW line: the same
+        // notification is written in three different record shapes (`user`,
+        // `attachment`, `queue-operation`) and repeated 2-3x per stop, so
+        // chasing the shapes is more fragile than reading the text.
+        if let Some(n) = notified.as_deref_mut() {
+            if line.contains("task-notification") {
+                if let Some((agent, status)) = parse_notification(&line) {
+                    n.insert(agent, status);
+                }
+            }
+        }
+
         let Ok(v) = serde_json::from_str::<Value>(&line) else {
             continue;
         };
@@ -297,7 +369,16 @@ fn scan(
                     Some("tool_use") => counts.tools += 1,
                     Some("tool_result") => {
                         if let Some(id) = b["tool_use_id"].as_str() {
-                            resolved.insert(id.to_string());
+                            let tur = &v["toolUseResult"];
+                            resolved.insert(
+                                id.to_string(),
+                                TaskResult {
+                                    status: tur["status"].as_str().map(str::to_string),
+                                    resolved_model: tur["resolvedModel"]
+                                        .as_str()
+                                        .map(str::to_string),
+                                },
+                            );
                         }
                     }
                     _ => {}
@@ -336,6 +417,29 @@ fn scan(
         }
     }
     Ok(())
+}
+
+/// Pull `(task-id, status)` out of a task notification. The task id of an
+/// agent notification IS the run's agent id.
+///
+/// Hand-rolled rather than regex: the payload is embedded in a JSON string, so
+/// it arrives escaped, and the two tags are adjacent enough that a scan is
+/// clearer than an escaped pattern.
+fn parse_notification(line: &str) -> Option<(String, String)> {
+    let between = |hay: &str, open: &str, close: &str| -> Option<String> {
+        let i = hay.find(open)? + open.len();
+        let j = hay[i..].find(close)? + i;
+        Some(hay[i..j].to_string())
+    };
+    let id = between(line, "<task-id>", "</task-id>")?;
+    // Status follows the id in the envelope; search from there so a line
+    // carrying two notifications does not cross-pair them.
+    let after = line.split_at(line.find(&id)? + id.len()).1;
+    let status = between(after, "<status>", "</status>")?;
+    if id.is_empty() || status.is_empty() {
+        return None;
+    }
+    Some((id, status))
 }
 
 fn add(into: &mut TokenUsage, u: &TokenUsage) {
@@ -426,17 +530,38 @@ mod tests {
         ));
     }
 
+    /// A parent `tool_result` for a task call, carrying its `toolUseResult`.
+    fn task_result(tool_use_id: &str, status: &str, ts: &str) -> String {
+        format!(
+            r#"{{"timestamp":"{ts}","message":{{"content":[{{"type":"tool_result","tool_use_id":"{tool_use_id}"}}]}},"toolUseResult":{{"status":"{status}","resolvedModel":"claude-opus-5[1m]","agentId":"x"}}}}"#
+        )
+    }
+
+    /// The parent's stop notification for a run. Written in three record
+    /// shapes in reality; one is enough to prove the matcher.
+    fn notification(agent: &str, status: &str, ts: &str) -> String {
+        let body = format!(
+            "<task-notification><task-id>{agent}</task-id><status>{status}</status></task-notification>"
+        );
+        let v = serde_json::json!({
+            "timestamp": ts,
+            "type": "user",
+            "message": { "role": "user", "content": body },
+        });
+        v.to_string()
+    }
+
     #[test]
-    fn a_run_is_done_only_when_the_parent_resolved_its_task_call() {
+    fn a_completed_task_result_means_done() {
         let d = tmp("status");
         let p = d.join("s1.jsonl");
-        // The parent resolves toolu_A but not toolu_B.
+        // The parent COMPLETED toolu_A but only launched toolu_B.
         fs::write(
             &p,
             format!(
                 "{}\n{}\n",
                 turn("r1", "claude-opus-5", 10, 5, "2026-09-18T10:00:00Z"),
-                r#"{"timestamp":"2026-09-18T10:05:00Z","message":{"content":[{"type":"tool_result","tool_use_id":"toolu_A"}]}}"#
+                task_result("toolu_A", "completed", "2026-09-18T10:05:00Z"),
             ),
         )
         .unwrap();
@@ -481,9 +606,110 @@ mod tests {
 
         let r = read_roster(&p).unwrap();
         let by = |id: &str| r.runs.iter().find(|x| x.id == id).unwrap().status;
-        assert_eq!(by("aaa"), Status::Done, "parent holds its result");
-        assert_eq!(by("bbb"), Status::Running, "no result yet");
+        assert_eq!(
+            by("aaa"),
+            Status::Done,
+            "a SYNCHRONOUS result does end the run"
+        );
+        assert_eq!(by("bbb"), Status::Running, "no result at all");
         assert_eq!(by("ccc"), Status::Unknown, "no task call to resolve");
+    }
+
+    #[test]
+    fn an_async_launch_receipt_is_not_a_completion() {
+        // THE trap. `toolUseResult.status: "async_launched"` is written when a
+        // background run STARTS — 40 of 43 task calls on this machine carry it.
+        // Treating the result's existence as completion marks every background
+        // run "done" the instant it spawns, and a corpus of finished runs
+        // cannot catch it.
+        let d = tmp("async");
+        let p = d.join("s1.jsonl");
+        fs::write(
+            &p,
+            format!(
+                "{}\n{}\n{}\n{}\n",
+                turn("r1", "claude-opus-5", 10, 5, "2026-09-18T10:00:00Z"),
+                task_result("toolu_A", "async_launched", "2026-09-18T10:00:05Z"),
+                task_result("toolu_B", "async_launched", "2026-09-18T10:00:06Z"),
+                // aaa stopped; bbb never did.
+                notification("aaa", "completed", "2026-09-18T10:02:30Z"),
+            ),
+        )
+        .unwrap();
+        let sd = sub_dir(&p);
+        // aaa finished — its own last assistant record says so.
+        write_run(
+            &sd,
+            "s1",
+            "aaa",
+            Some("toolu_A"),
+            &format!(
+                "{}\n",
+                sub_turn("aaa", "r2", "claude-opus-5", 1, 1, "2026-09-18T10:01:00Z")
+            ),
+        );
+        // bbb was launched and has produced a turn, but never ended.
+        write_run(
+            &sd,
+            "s1",
+            "bbb",
+            Some("toolu_B"),
+            &format!(
+                "{}\n",
+                sub_turn("bbb", "r3", "claude-opus-5", 1, 1, "2026-09-18T10:01:00Z")
+            ),
+        );
+
+        let r = read_roster(&p).unwrap();
+        let by = |id: &str| r.runs.iter().find(|x| x.id == id).unwrap().status;
+        assert_eq!(by("aaa"), Status::Done, "its stop notification ended it");
+        assert_eq!(
+            by("bbb"),
+            Status::Running,
+            "a launch receipt must never read as a completion"
+        );
+    }
+
+    #[test]
+    fn a_run_that_never_answered_still_gets_a_row_and_a_model() {
+        // Observed for real: a run spawned against a broken model wrote its
+        // prompt and 24KB of attachments, then produced no assistant turn at
+        // all. It is a legitimate state, not a read failure — and the only
+        // model it has is the parent's `resolvedModel`.
+        let d = tmp("silent");
+        let p = d.join("s1.jsonl");
+        fs::write(
+            &p,
+            format!(
+                "{}\n{}\n",
+                turn("r1", "claude-opus-5", 10, 5, "2026-09-18T10:00:00Z"),
+                task_result("toolu_A", "async_launched", "2026-09-18T10:00:05Z"),
+            ),
+        )
+        .unwrap();
+        let sd = sub_dir(&p);
+        write_run(
+            &sd,
+            "s1",
+            "aaa",
+            Some("toolu_A"),
+            &format!(
+                "{}\n",
+                sidechain(
+                    "aaa",
+                    r#"{"timestamp":"2026-09-18T10:00:06Z","type":"user","message":{"role":"user","content":"go"}}"#
+                )
+            ),
+        );
+        let run = &read_roster(&p).unwrap().runs[0];
+        assert_eq!(run.turns, 0, "it never answered");
+        assert_eq!(run.tools, 0);
+        assert_eq!(
+            run.model.as_deref(),
+            Some("claude-opus-5[1m]"),
+            "falls back to the parent's resolvedModel"
+        );
+        assert_eq!(run.status, Status::Running, "no completion signal");
     }
 
     #[test]
@@ -696,14 +922,18 @@ mod tests {
                     p.display()
                 );
                 for run in &r.runs {
+                    // NOT asserted: that a run has turns. A run spawned against
+                    // a broken model writes its prompt and never answers, which
+                    // is a real state this corpus contains. Asserting otherwise
+                    // is what first flagged it as a bug.
+                    assert!(run.ended_at >= run.started_at, "time runs forwards");
+                    assert!(run.depth >= 1, "depth is 1-based");
                     assert!(
-                        run.turns > 0 || run.tools > 0,
-                        "a discovered run with no turns and no tools is a read bug: {} in {}",
+                        run.started_at > 0,
+                        "a discovered run always has at least one timestamped record: {} in {}",
                         run.id,
                         p.display()
                     );
-                    assert!(run.ended_at >= run.started_at, "time runs forwards");
-                    assert!(run.depth >= 1, "depth is 1-based");
                 }
                 // The partition: parent turns and run turns are disjoint, and
                 // together they are every folded turn. A key counted on both
@@ -714,10 +944,24 @@ mod tests {
                     "a session that spawned runs has parent turns too: {}",
                     p.display()
                 );
-                assert!(
-                    run_turns > 0,
-                    "runs with no turns at all means attribution failed: {}",
-                    p.display()
+                let _ = run_turns;
+                // The stop notification must actually resolve real runs. A
+                // regression here shows up as a roster where everything is
+                // "running" forever, or where everything is "done" instantly.
+                let unresolved = r
+                    .runs
+                    .iter()
+                    .filter(|x| x.status == Status::Running)
+                    .count();
+                eprintln!(
+                    "     statuses: {} done, {} stopped, {} failed, {} running/unknown",
+                    r.runs.iter().filter(|x| x.status == Status::Done).count(),
+                    r.runs
+                        .iter()
+                        .filter(|x| x.status == Status::Stopped)
+                        .count(),
+                    r.runs.iter().filter(|x| x.status == Status::Failed).count(),
+                    unresolved,
                 );
                 eprintln!(
                     "  {}: {} runs, parent {} turns, runs {} turns, {} folded duplicates",
@@ -730,5 +974,68 @@ mod tests {
             }
         }
         eprintln!("checked {checked} real session(s) with agent runs");
+    }
+
+    /// Dump a real roster as the JSON the command actually sends, so the
+    /// viewer can be rendered against it. Opt-in: set CV_DUMP_ROSTER=<path>.
+    #[test]
+    fn dump_roster_json() {
+        let Ok(dest) = std::env::var("CV_DUMP_ROSTER") else {
+            return;
+        };
+        let root = PathBuf::from(std::env::var("HOME").unwrap()).join(".claude/projects");
+        let mut best: Option<(usize, Roster, String)> = None;
+        for proj in fs::read_dir(&root).unwrap().flatten() {
+            let Ok(files) = fs::read_dir(proj.path()) else {
+                continue;
+            };
+            for f in files.flatten() {
+                let p = f.path();
+                if p.extension().and_then(|e| e.to_str()) != Some("jsonl") {
+                    continue;
+                }
+                if !p.with_extension("").join("subagents").is_dir() {
+                    continue;
+                }
+                let Ok(r) = read_roster(&p) else { continue };
+                let n = r.runs.len();
+                if best.as_ref().map(|b| n > b.0).unwrap_or(true) {
+                    let model = p.display().to_string();
+                    best = Some((n, r, model));
+                }
+            }
+        }
+        let (_, roster, from) = best.expect("a session with runs");
+        fs::write(&dest, serde_json::to_string_pretty(&roster).unwrap()).unwrap();
+        eprintln!("dumped {} runs from {from} -> {dest}", roster.runs.len());
+    }
+
+    /// Dump a trace page that straddles a subagent boundary, so the promoted
+    /// run header can be rendered. Opt-in: CV_DUMP_TRACE=<path>.
+    #[test]
+    fn dump_trace_json() {
+        let Ok(dest) = std::env::var("CV_DUMP_TRACE") else {
+            return;
+        };
+        let p = PathBuf::from(std::env::var("HOME").unwrap())
+            .join(".claude/projects/-home-quantumvik/44d945fe-203a-46dd-9f3d-e248cc3108ae.jsonl");
+        if !p.exists() {
+            return;
+        }
+        // Page until a subagent entry shows up, then keep that page.
+        let mut cursor = crate::trace::Cursor::default();
+        for _ in 0..40 {
+            let page = crate::trace::read_page(Some(&p), &cursor, 400).unwrap();
+            let has_agent = page.entries.iter().any(|e| e.agent_id.is_some());
+            cursor = crate::trace::Cursor::decode(&page.cursor).unwrap();
+            if has_agent || !page.has_more {
+                fs::write(&dest, serde_json::to_string_pretty(&page).unwrap()).unwrap();
+                eprintln!(
+                    "dumped {} entries (agents: {has_agent}) -> {dest}",
+                    page.entries.len()
+                );
+                return;
+            }
+        }
     }
 }

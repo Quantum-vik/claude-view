@@ -178,6 +178,14 @@ fn spawn_in_pty(
     cmd.cwd(&cwd);
     cmd.env("TERM", "xterm-256color");
     cmd.env("COLORTERM", "truecolor");
+    // Claude Code sets this on sessions it spawns itself, and a process that
+    // sees it writes NO transcript. It is inherited, so launching claude-view
+    // from inside a Claude Code session hands the marker to every terminal
+    // this app opens — and the trace, the cost ledger and the agent roster are
+    // all silently, permanently empty, with the app looking broken rather than
+    // misconfigured. A PTY a human is typing into is not a nested agent run,
+    // so the marker does not belong here.
+    cmd.env_remove("CLAUDE_CODE_CHILD_SESSION");
 
     let mut child = pair
         .slave

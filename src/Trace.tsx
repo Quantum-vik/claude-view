@@ -28,6 +28,8 @@ import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { save } from "@tauri-apps/plugin-dialog";
 import { T, tint, toolFamily } from "./tokens";
+import { useRoster } from "./Agents";
+import { runLabel, shorten, formatDuration, formatRunUsd, type AgentRun } from "./agents";
 import { formatUsd, type TokenUsage } from "./cost";
 import { CAVEAT, costOfTurn } from "./pricing";
 
@@ -327,10 +329,15 @@ interface Props {
   vid: string;
   /** The session's model, for pricing turns. */
   modelId: string | null;
+  /** The agent run the panel is scoped to, held above the panels so it
+   *  survives switching between the trace and the command log (#25). */
+  agentScope: string | null;
+  onScope: (agentId: string | null) => void;
 }
 
-export default function Trace({ vid, modelId }: Props) {
+export default function Trace({ vid, modelId, agentScope, onScope }: Props) {
   const { entries, turns, unavailable, loading, sources } = useTrace(vid);
+  const { roster } = useRoster(vid);
   const [filter, setFilter] = useState<Filter>("all");
   const [query, setQuery] = useState("");
   const [exporting, setExporting] = useState<string | null>(null);
@@ -372,9 +379,23 @@ export default function Trace({ vid, modelId }: Props) {
   const [exportError, setExportError] = useState<string | null>(null);
   const [exported, setExported] = useState<string | null>(null);
 
+  const byAgent = useMemo(() => {
+    const m = new Map<string, AgentRun>();
+    for (const r of roster.runs) m.set(r.id, r);
+    return m;
+  }, [roster.runs]);
+  const scopedRun = agentScope ? byAgent.get(agentScope) : undefined;
+
+  // Scope narrows the stream to one run before kind and query touch it. The
+  // three compose as AND, which is the only unsurprising answer.
+  const scoped = useMemo(
+    () => (agentScope ? entries.filter((e) => e.agentId === agentScope) : entries),
+    [entries, agentScope],
+  );
+
   const rows = useMemo(
-    () => buildRows(entries, turns, filter, query),
-    [entries, turns, filter, query],
+    () => buildRows(scoped, turns, filter, query),
+    [scoped, turns, filter, query],
   );
 
   const tabs: Array<[Filter, string]> = [
@@ -416,10 +437,48 @@ export default function Trace({ vid, modelId }: Props) {
             {label}
           </span>
         ))}
+        {agentScope && (
+          <span
+            title={scopedRun ? runLabel(scopedRun) : agentScope}
+            style={{
+              display: "inline-flex",
+              alignItems: "center",
+              gap: 6,
+              background: tint("var(--cv-tool-task)", 0.15),
+              border: `1px solid ${tint("var(--cv-tool-task)", 0.45)}`,
+              borderRadius: 999,
+              padding: "2px 4px 2px 9px",
+              fontSize: 11,
+              fontFamily: T.serif,
+              color: "var(--cv-tool-task)",
+              whiteSpace: "nowrap",
+              flexShrink: 0,
+            }}
+          >
+            {/* Middle-truncated: an agent description's identifying token is
+                at the END, so a right-ellipsis makes runs indistinguishable. */}
+            {shorten(scopedRun ? runLabel(scopedRun) : `agent-${agentScope.slice(0, 12)}`, 30)}
+            <button
+              onClick={() => onScope(null)}
+              title="Show the whole session again"
+              style={{
+                background: "none",
+                border: "none",
+                color: "inherit",
+                cursor: "pointer",
+                fontSize: 13,
+                lineHeight: 1,
+                padding: "1px 5px",
+              }}
+            >
+              ✕
+            </button>
+          </span>
+        )}
         <input
           value={query}
           onChange={(e) => setQuery(e.target.value)}
-          placeholder="search the whole trace…"
+          placeholder={agentScope ? "search within this run…" : "search the whole trace…"}
           style={{
             flex: 1,
             maxWidth: 360,
@@ -516,8 +575,30 @@ export default function Trace({ vid, modelId }: Props) {
             Reading the transcript…
           </div>
         )}
+        {!unavailable && !loading && rows.length === 0 && (
+          <div
+            style={{
+              padding: 20,
+              color: T.textDim,
+              font: `13px ${T.serif}`,
+              maxWidth: "58ch",
+              lineHeight: 1.6,
+            }}
+          >
+            {/* Naming the filter matters: "no thinking in this run" and "no
+                match for that word" are different facts, and a reader who
+                cannot tell them apart concludes the panel is broken. */}
+            {entries.length === 0
+              ? "Nothing in the trace yet."
+              : scoped.length === 0
+                ? `Nothing from ${scopedRun ? runLabel(scopedRun) : "this run"} in the trace yet.`
+                : query.trim()
+                  ? `No match for “${query.trim()}”${agentScope ? " within this run" : ""}${filter !== "all" ? ` among ${filter}` : ""}.`
+                  : `No ${filter} ${agentScope ? "in this run" : "in this session"}.`}
+          </div>
+        )}
         {rows.map((r) => (
-          <RowView key={r.key} row={r} turns={turns} modelId={modelId} />
+          <RowView key={r.key} row={r} turns={turns} modelId={modelId} runs={byAgent} />
         ))}
       </div>
     </div>
@@ -528,10 +609,14 @@ const RowView = memo(function RowView({
   row,
   turns,
   modelId,
+  runs,
 }: {
   row: Row;
   turns: Record<string, TokenUsage>;
   modelId: string | null;
+  /** Roster metadata by agent id, so a run's block can open with what it was
+   *  asked to do instead of a hex prefix. */
+  runs: Map<string, AgentRun>;
 }) {
   if (row.kind === "turn") {
     const u = turns[row.turnId];
@@ -593,23 +678,103 @@ const RowView = memo(function RowView({
   }
 
   if (row.kind === "agent") {
+    // Promoted from a hairline to a real section opening (#22). The prototype's
+    // spine and band both lost to this: identity and cost belong exactly where
+    // the run's work appears, not in a rail beside it.
+    const run = runs.get(row.agentId);
+    const usd = run?.model
+      ? costOfTurn(run.model, {
+          input: run.usage.input,
+          cacheWrite5m: run.usage.cacheWrite5m,
+          cacheWrite1h: run.usage.cacheWrite1h,
+          cacheRead: run.usage.cacheRead,
+          output: run.usage.output,
+        })
+      : null;
     return (
       <div
         style={{
-          display: "flex",
-          gap: 9,
-          alignItems: "baseline",
-          margin: "8px 0 2px 22px",
-          padding: "6px 10px",
-          borderLeft: `2px solid var(--cv-tool-task)`,
-          background: tint("var(--cv-tool-task)", 0.05),
-          fontSize: 11,
-          fontFamily: T.mono,
-          color: "var(--cv-tool-task)",
+          margin: "14px 14px 6px 22px",
+          padding: "9px 12px",
+          border: `1px solid ${tint("var(--cv-tool-task)", 0.4)}`,
+          borderLeft: `3px solid var(--cv-tool-task)`,
+          borderRadius: "0 6px 6px 0",
+          background: tint("var(--cv-tool-task)", 0.06),
         }}
       >
-        » subagent <b>{row.agentId.slice(0, 12)}</b>
-        <span style={{ marginLeft: "auto", color: T.textFaint }}>{row.count} entries</span>
+        <div style={{ display: "flex", gap: 10, alignItems: "baseline", flexWrap: "wrap" }}>
+          {/* The description is human language, so serif — the rule tokens.ts
+              already sets for the panel. */}
+          <span style={{ fontFamily: T.serif, fontSize: 14, lineHeight: 1.35, color: T.text }}>
+            {run ? runLabel(run) : `agent-${row.agentId.slice(0, 12)}`}
+          </span>
+          {run && (
+            <span
+              title={
+                run.status === "running"
+                  ? "No result for this run's task call yet — still running, or the session ended mid-run. The transcript cannot tell those apart."
+                  : run.status === "unknown"
+                    ? "No task call recorded for this run, so whether it finished is unknowable."
+                    : "The parent session recorded a result for this run's task call."
+              }
+              style={{
+                display: "inline-flex",
+                alignItems: "center",
+                gap: 5,
+                font: `10.5px ${T.mono}`,
+                color:
+                  run.status === "done"
+                    ? T.success
+                    : run.status === "running"
+                      ? T.running
+                      : T.textFaint,
+              }}
+            >
+              <span
+                style={{
+                  width: 6,
+                  height: 6,
+                  borderRadius: 99,
+                  background: "currentColor",
+                  animation:
+                    run.status === "running" ? "pulseDot 1.4s ease-in-out infinite" : undefined,
+                }}
+              />
+              {run.status}
+            </span>
+          )}
+        </div>
+        <div
+          style={{
+            display: "flex",
+            gap: 12,
+            alignItems: "baseline",
+            marginTop: 5,
+            font: `10.5px ${T.mono}`,
+            color: T.textFaint,
+            flexWrap: "wrap",
+          }}
+        >
+          {run?.agentType && <span style={{ color: "var(--cv-tool-task)" }}>{run.agentType}</span>}
+          {run?.model && <span>{run.model.replace(/^claude-/, "").replace(/-\d{8}$/, "")}</span>}
+          {run && run.endedAt > run.startedAt && (
+            <span>{formatDuration(run.endedAt - run.startedAt)}</span>
+          )}
+          <span>{run ? `${run.tools} tools` : `${row.count} entries`}</span>
+          {/* A subagent block is the ONE place a cost figure sits on something
+              that is not a turn — and only because it is measured from the
+              run's own transcript, never amortized (#15). */}
+          {usd !== null && (
+            <span style={{ marginLeft: "auto", color: T.textDim }}>
+              {/* Same formatter as the roster: a run showing $3.00 here and
+                  $2.995 there is one number in two dialects. */}
+              <b style={{ color: T.accent, fontVariantNumeric: "tabular-nums" }}>
+                {formatRunUsd(usd)}
+              </b>{" "}
+              measured
+            </span>
+          )}
+        </div>
       </div>
     );
   }

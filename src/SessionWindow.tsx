@@ -3,7 +3,12 @@ import { invoke } from "@tauri-apps/api/core";
 import Terminal from "./Terminal";
 import Timeline, { TimelineEvent } from "./Timeline";
 import Trace from "./Trace";
+import { Agents } from "./Agents";
 import { ConnectionStatus } from "./ws";
+
+/** Which view the side panel shows. The command log stays the default: it is
+ *  what existing users know, and both the trace and the roster are newer. */
+type Panel = "timeline" | "trace" | "agents";
 import { DragHandle, clamp } from "./Resizer";
 import { T, tint } from "./tokens";
 import ContextMeter from "./ContextMeter";
@@ -220,18 +225,40 @@ export default function SessionWindow(props: SessionWindowProps = {}) {
   const [sidebarOpen, setSidebarOpen] = useState(true);
   // Which panel the sidebar shows. The command log stays the default: it is
   // what existing users know, and the trace is the newer, heavier view.
-  const [panel, setPanel] = useState<"timeline" | "trace">(() => {
+  const [panel, setPanel] = useState<Panel>(() => {
     // An explicit ?panel= wins, so a window can be opened straight onto the
     // trace — the same way vid/port/token/cwd already configure this window.
     const wanted = params.get("panel");
-    if (wanted === "trace" || wanted === "timeline") return wanted;
+    if (wanted === "trace" || wanted === "timeline" || wanted === "agents") return wanted;
     try {
-      return localStorage.getItem("cv.panel") === "trace" ? "trace" : "timeline";
+      const saved = localStorage.getItem("cv.panel");
+      return saved === "trace" || saved === "agents" ? saved : "timeline";
     } catch {
       return "timeline";
     }
   });
-  const showPanel = useCallback((p: "timeline" | "trace") => {
+
+  // Which agent run the panel is scoped to (#25). Held HERE, above both the
+  // trace and the command log, so flipping between them keeps the scope: a
+  // filter that silently resets on a tab change is worse than no filter,
+  // because the user goes on believing it is applied.
+  //
+  // Deliberately NOT persisted to localStorage, unlike the panel choice. Panel
+  // is a preference; scope is about one session's content, and restoring a
+  // stale run id onto a different session would empty the panel and read as
+  // data loss.
+  const [agentScope, setAgentScope] = useState<string | null>(() => params.get("agent"));
+
+  // Keep ?agent= in the URL so "look at what this run did" is a shareable,
+  // reload-stable link, the same way ?panel= already is.
+  useEffect(() => {
+    const url = new URL(window.location.href);
+    if (agentScope) url.searchParams.set("agent", agentScope);
+    else url.searchParams.delete("agent");
+    window.history.replaceState(null, "", url);
+  }, [agentScope]);
+
+  const showPanel = useCallback((p: Panel) => {
     setPanel(p);
     setSidebarOpen(true);
     try {
@@ -849,6 +876,27 @@ export default function SessionWindow(props: SessionWindowProps = {}) {
           Trace
         </button>
 
+        <button
+          onClick={() => showPanel("agents")}
+          title="Every subagent this session spawned: what it was asked to do, what it cost, and whether it has finished"
+          style={{
+            background: sidebarOpen && panel === "agents" ? T.accent : T.surface2,
+            border:
+              sidebarOpen && panel === "agents" ? "none" : `1px solid ${T.borderStrong}`,
+            borderRadius: 8,
+            color: sidebarOpen && panel === "agents" ? T.accentInk : T.text,
+            cursor: "pointer",
+            fontSize: 12,
+            fontWeight: 600,
+            padding: "5px 12px",
+            flexShrink: 0,
+            whiteSpace: "nowrap",
+            fontFamily: T.serif,
+          }}
+        >
+          Agents
+        </button>
+
         {/* Sidebar toggle */}
         <button
           onClick={() => (sidebarOpen && panel === "timeline" ? setSidebarOpen(false) : showPanel("timeline"))}
@@ -914,9 +962,16 @@ export default function SessionWindow(props: SessionWindowProps = {}) {
             }}
           >
             {panel === "trace" ? (
-              <Trace vid={vid} modelId={liveModel} />
+              <Trace vid={vid} modelId={liveModel} agentScope={agentScope} onScope={setAgentScope} />
+            ) : panel === "agents" ? (
+              <Agents
+                vid={vid}
+                sessionModel={liveModel}
+                selected={agentScope}
+                onSelect={setAgentScope}
+              />
             ) : (
-              <Timeline events={events} />
+              <Timeline events={events} agentScope={agentScope} onScope={setAgentScope} />
             )}
           </div>
         )}

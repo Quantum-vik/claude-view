@@ -19,6 +19,12 @@ export interface TimelineEvent {
 
 interface TimelineProps {
   events: TimelineEvent[];
+  /** The agent run the panel is scoped to (#25). Held above the panels in
+   *  SessionWindow, so scoping here and flipping to the trace keeps it. The
+   *  command log is the DEFAULT panel — scoping only the trace would mean most
+   *  users never meet the feature. */
+  agentScope?: string | null;
+  onScope?: (agentId: string | null) => void;
 }
 
 type Filter = "all" | "ok" | "running" | "error";
@@ -87,10 +93,18 @@ const PREVIEW_OK = `color-mix(in srgb, ${T.success} 40%, ${T.textFaint})`;
 
 /** Filter by status tab + case-insensitive search over command+output+tool,
  *  then order newest-first. Applied BEFORE folding. Pure — exported for tests. */
-export function filterEvents(events: TimelineEvent[], filter: Filter, query: string): TimelineEvent[] {
+export function filterEvents(
+  events: TimelineEvent[],
+  filter: Filter,
+  query: string,
+  agentScope?: string | null,
+): TimelineEvent[] {
   const q = query.trim().toLowerCase();
   return [...events]
     .filter((e) => {
+      // Scope first: it narrows to one run, then status and query apply
+      // within it. The three compose as AND.
+      if (agentScope && e.agentId !== agentScope) return false;
       if (filter === "ok" && !(e.status === "success" || e.status === "interrupted")) return false;
       if (filter === "running" && e.status !== "running") return false;
       if (filter === "error" && e.status !== "error") return false;
@@ -146,7 +160,7 @@ export function buildRows(filtered: TimelineEvent[], grouping: boolean): Row[] {
   return out;
 }
 
-export default function Timeline({ events }: TimelineProps) {
+export default function Timeline({ events, agentScope = null, onScope }: TimelineProps) {
   // The log body scrolls inside this component — a direct ref avoids walking
   // the DOM for a scroll parent on every websocket message.
   const scrollRef = useRef<HTMLDivElement>(null);
@@ -238,7 +252,10 @@ export default function Timeline({ events }: TimelineProps) {
   }, []);
 
   // Filter + search (newest-first), then fold consecutive same-tool runs.
-  const filtered = useMemo(() => filterEvents(events, filter, query), [events, filter, query]);
+  const filtered = useMemo(
+    () => filterEvents(events, filter, query, agentScope),
+    [events, filter, query, agentScope],
+  );
   const rows = useMemo(() => buildRows(filtered, grouping), [filtered, grouping]);
 
   // "X of Y" counts folded runs by their child count, so it reflects real lines.
@@ -317,6 +334,47 @@ export default function Timeline({ events }: TimelineProps) {
           }}
         >
           <span style={{ color: T.searchGlyph, fontSize: 12, flexShrink: 0 }}>⌕</span>
+          {/* The scope came from the Agents panel, so it has to be VISIBLE and
+              removable here: a filtered log with no pill reads as a session
+              that did less than it did (#25). */}
+          {agentScope && (
+            <span
+              title={`Scoped to agent-${agentScope}`}
+              style={{
+                display: "inline-flex",
+                alignItems: "center",
+                gap: 4,
+                background: tint("var(--cv-tool-task)", 0.15),
+                border: `1px solid ${tint("var(--cv-tool-task)", 0.45)}`,
+                borderRadius: 999,
+                padding: "1px 3px 1px 8px",
+                fontSize: 10.5,
+                fontFamily: T.mono,
+                color: "var(--cv-tool-task)",
+                whiteSpace: "nowrap",
+                flexShrink: 0,
+              }}
+            >
+              » agent-{agentScope.slice(0, 8)}
+              {onScope && (
+                <button
+                  onClick={() => onScope(null)}
+                  title="Show the whole session again"
+                  style={{
+                    background: "none",
+                    border: "none",
+                    color: "inherit",
+                    cursor: "pointer",
+                    fontSize: 12,
+                    lineHeight: 1,
+                    padding: "1px 4px",
+                  }}
+                >
+                  ✕
+                </button>
+              )}
+            </span>
+          )}
           <input
             className="cv-timeline-input"
             value={query}
