@@ -1,0 +1,67 @@
+#!/usr/bin/env bash
+# Run claude-view with a restricted view of the filesystem.
+#
+# Why: every session this app launches runs `claude --dangerously-skip-permissions`
+# unless you turn that off, so Claude writes, edits and deletes files and runs
+# shell commands without asking. This narrows what "files" can mean.
+#
+# The whole home directory is REPLACED by a tmpfs, then three things are bound
+# back in: ~/.claude (transcripts + credentials, read-write), ~/.claude.json,
+# and the one workspace you name. Everything else you own is invisible.
+#
+# Usage:  claude-view-sandboxed [workspace-dir]     (default: $PWD)
+set -euo pipefail
+
+WORKSPACE="$(realpath "${1:-$PWD}")"
+APP="${CLAUDE_VIEW_BIN:-/usr/bin/claude-view}"
+[ -x "$APP" ] || { echo "not executable: $APP" >&2; exit 1; }
+[ -d "$WORKSPACE" ] || { echo "no such directory: $WORKSPACE" >&2; exit 1; }
+
+# The `claude` CLI the app spawns. It must be reachable inside, and it is a real
+# ELF binary, so its whole install tree comes along read-only.
+CLAUDE_BIN="$(command -v claude || true)"
+[ -n "$CLAUDE_BIN" ] || { echo "claude not found on PATH" >&2; exit 1; }
+CLAUDE_DIR="$(dirname "$(realpath "$CLAUDE_BIN")")"
+
+RT="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"
+
+args=(
+  --unshare-all --share-net          # network stays: the CLI talks to the API
+  --die-with-parent
+  --new-session                      # no TIOCSTI injection into the host tty
+
+  --ro-bind /usr /usr                # system + WebKit/GTK, read-only
+  --ro-bind /etc /etc
+  --symlink usr/lib /lib  --symlink usr/lib /lib64
+  --symlink usr/bin /bin  --symlink usr/bin /sbin
+  --ro-bind /opt /opt
+
+  --proc /proc  --dev /dev
+  # /etc/resolv.conf is a symlink into /run on systemd hosts; without this DNS
+  # silently fails and the CLI cannot reach the API.
+  --ro-bind-try /run/systemd/resolve /run/systemd/resolve
+  --dev-bind /dev/dri /dev/dri       # GPU for the webview
+  --ro-bind /sys /sys                # ...and the device metadata mesa reads
+  --tmpfs /tmp
+  --tmpfs "$HOME"                    # <- the home directory disappears here
+
+  --ro-bind "$CLAUDE_DIR" "$CLAUDE_DIR"
+  --bind "$HOME/.claude" "$HOME/.claude"
+  --bind "$HOME/.claude.json" "$HOME/.claude.json"
+  --bind "$WORKSPACE" "$WORKSPACE"
+
+  --tmpfs "$RT"
+  --ro-bind "$RT/bus" "$RT/bus"      # notifications
+  --setenv XDG_RUNTIME_DIR "$RT"
+  --setenv WEBKIT_DISABLE_DMABUF_RENDERER 1
+  --chdir "$WORKSPACE"
+)
+
+# Display: Wayland where there is one, X11 otherwise.
+if [ -n "${WAYLAND_DISPLAY:-}" ] && [ -e "$RT/${WAYLAND_DISPLAY}" ]; then
+  args+=( --ro-bind "$RT/${WAYLAND_DISPLAY}" "$RT/${WAYLAND_DISPLAY}" )
+else
+  args+=( --ro-bind /tmp/.X11-unix /tmp/.X11-unix )
+fi
+
+exec bwrap "${args[@]}" "$APP" "${@:2}"
