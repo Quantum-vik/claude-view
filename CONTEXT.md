@@ -63,6 +63,14 @@ says nothing about *who* changed it — git cannot separate the model's edits fr
 the user's, and claiming otherwise would assert what the data cannot support.
 _Avoid_: Claude's changes, edited by the agent, authored
 
+**Commit span**:
+The unit a session's changes drill down to — the files and lines carried by one
+commit made during the session. Chosen over the turn because commits already
+exist in git history: they cost nothing to find and work for past sessions,
+where a per-turn capture would have to be recorded live and never could be.
+A session that makes no commits has no spans, and says so.
+_Avoid_: per-turn diff, turn diff, snapshot
+
 ### The panel
 
 **Trace**:
