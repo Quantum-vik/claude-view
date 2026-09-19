@@ -23,6 +23,15 @@ by model, directory and day.
 On a Claude subscription you are billed a flat rate, so these are not bills. Unpriced models show
 their tokens and withhold dollars rather than guessing.
 
+## Documentation
+
+| | |
+|---|---|
+| **[Architecture — HLD & LLD](docs/ARCHITECTURE.md)** | The full design: the three-layer model and why it is forced, all 14 Rust modules and 25 TypeScript files, the 24 IPC commands, 8 HTTP routes and the WebSocket protocol, every on-disk format, eight runtime flows, and an honest list of what an audit found. 11 diagrams. |
+| **[Interactive system diagram ↗](https://quantum-vik.github.io/claude-view/diagrams/architecture.html)** | The whole runtime in one picture — pan, zoom, search, guided views, export. Source: [`docs/diagrams/`](docs/diagrams/) |
+| **[CONTEXT.md](CONTEXT.md)** | The domain glossary — run vs type, turn, replay, baseline, hosted vs watched, and what "live" is allowed to mean. |
+| **[docs/agents/](docs/agents/)** | Agent-facing notes: the issue tracker, triage labels, domain conventions. |
+
 ## Permissions: sessions skip approval prompts by default
 
 **Every session claude-view launches runs `claude --dangerously-skip-permissions` unless you turn
@@ -152,10 +161,15 @@ session state stays `unknown`.
 
 ## Architecture
 
-> **📐 Full design document: [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md)** — HLD and LLD, every module, every
-> interface, every runtime flow, and an honest list of what an audit of this codebase actually found.
-> There is also an **interactive diagram** at [`docs/diagrams/architecture.html`](docs/diagrams/architecture.html)
-> (pan, zoom, search, guided views, PNG/SVG export — open it in a browser).
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/diagrams/architecture-dark.png">
+  <img alt="claude-view system architecture — the viewer, the axum server, the session registry, the PTY layer and the transcript tailer inside one process; claude, the hook bridge, the discovery file and the transcripts outside it" src="docs/diagrams/architecture-light.png">
+</picture>
+
+<p align="center">
+  <b><a href="https://quantum-vik.github.io/claude-view/diagrams/architecture.html">↗ Open the interactive version</a></b>
+  &nbsp;·&nbsp; pan, zoom, search, three guided views, PNG/SVG export
+</p>
 
 One OS process hosts everything: the Rust backend, the loopback server, every PTY child, and every webview.
 Windows are **not** separate processes.
