@@ -1,0 +1,193 @@
+{
+  "schema_version": 1,
+  "diagram_type": "lifecycle",
+  "meta": {
+    "title": "LLD \u2014 session state, and what may claim a session ended",
+    "quality_profile": "showcase",
+    "viewBox": [
+      1000,
+      570
+    ],
+    "views": [
+      {
+        "id": "turn",
+        "label": "One turn",
+        "focus": [
+          "idle",
+          "working"
+        ],
+        "note": "Only Stop ends a turn. PostToolUse stays Working: the tool finished, the turn did not."
+      },
+      {
+        "id": "dialog",
+        "label": "The dialog problem",
+        "focus": [
+          "working",
+          "dialog",
+          "blocked"
+        ],
+        "note": "Hooks are blind to dialogs, so the viewer reports its parsed screen into a second variable."
+      },
+      {
+        "id": "end",
+        "label": "Ending",
+        "focus": [
+          "working",
+          "ended"
+        ],
+        "note": "SessionEnd fires on a live process. Only the PTY waiter thread is authoritative."
+      }
+    ]
+  },
+  "lanes": [
+    {
+      "id": "main",
+      "label": "Hook-driven state"
+    },
+    {
+      "id": "screen",
+      "label": "What only the screen can see"
+    }
+  ],
+  "states": [
+    {
+      "id": "unknown",
+      "type": "start",
+      "label": "Unknown",
+      "sublabel": "before the first hook",
+      "lane": "main",
+      "col": 0,
+      "step": "01"
+    },
+    {
+      "id": "idle",
+      "type": "active",
+      "label": "Idle",
+      "sublabel": "not mid-turn",
+      "lane": "main",
+      "col": 1,
+      "step": "02"
+    },
+    {
+      "id": "working",
+      "type": "active",
+      "label": "Working",
+      "sublabel": "prompt or tool in flight",
+      "lane": "main",
+      "col": 2,
+      "step": "03",
+      "tag": "PostToolUse stays here"
+    },
+    {
+      "id": "blocked",
+      "type": "waiting",
+      "label": "Blocked",
+      "sublabel": "waiting on a human",
+      "lane": "main",
+      "col": 3,
+      "step": "04"
+    },
+    {
+      "id": "ended",
+      "type": "success",
+      "label": "Ended",
+      "sublabel": "exit code known",
+      "lane": "main",
+      "col": 4,
+      "step": "05",
+      "tag": "authoritative"
+    },
+    {
+      "id": "dialog",
+      "type": "decision",
+      "label": "Dialog on screen",
+      "sublabel": "trust \u00b7 permission \u00b7 plan",
+      "lane": "screen",
+      "col": 0,
+      "tag": "viewer-reported"
+    }
+  ],
+  "transitions": [
+    {
+      "id": "start",
+      "from": "unknown",
+      "to": "idle",
+      "label": "SessionStart",
+      "labelAt": [
+        171,
+        202
+      ]
+    },
+    {
+      "id": "prompt",
+      "from": "idle",
+      "to": "working",
+      "label": "UserPromptSubmit",
+      "variant": "emphasis",
+      "labelAt": [
+        325,
+        202
+      ]
+    },
+    {
+      "id": "stop",
+      "from": "working",
+      "to": "idle",
+      "label": "Stop",
+      "route": "top-channel"
+    },
+    {
+      "id": "exit",
+      "from": "working",
+      "to": "ended",
+      "label": "PTY waiter",
+      "variant": "emphasis",
+      "route": "top-channel"
+    },
+    {
+      "id": "sees",
+      "from": "working",
+      "to": "dialog",
+      "label": "viewer reports",
+      "variant": "security",
+      "route": "drop",
+      "labelAt": [
+        402,
+        250
+      ]
+    },
+    {
+      "id": "outranks",
+      "from": "dialog",
+      "to": "blocked",
+      "label": "outranks Working",
+      "variant": "security"
+    }
+  ],
+  "cards": [
+    {
+      "dot": "emerald",
+      "title": "Two signals, merged",
+      "items": [
+        "Hooks see turn boundaries, and are blind to dialogs",
+        "The screen sees dialogs, and cannot tell thinking from done"
+      ]
+    },
+    {
+      "dot": "amber",
+      "title": "Blocked is opt-in",
+      "items": [
+        "Most Notifications are the ~60 s idle ping",
+        "Blocking on all of them would redden every quiet session"
+      ]
+    },
+    {
+      "dot": "rose",
+      "title": "What may say \u201cended\u201d",
+      "items": [
+        "SessionEnd fires on a live process \u2014 it ends nothing",
+        "Only the PTY waiter thread is authoritative"
+      ]
+    }
+  ]
+}

@@ -4,7 +4,17 @@
 
 Version 1.6.0 · Rust 2021 + React 18 · ~11,300 lines of Rust across 14 modules, ~21,100 lines of TypeScript across 25 files, 162 Rust tests.
 
-> **[↗ Open the interactive system diagram](https://quantum-vik.github.io/claude-view/diagrams/architecture.html)** — pan, zoom, search, three guided views, PNG/SVG export. Its source spec is [`diagrams/architecture.spec.json`](diagrams/architecture.spec.json).
+### The diagram set
+
+Five interactive diagrams — pan, zoom, search, guided views, PNG/SVG export. Each ships with the `.spec.json` it was generated from, so it can be regenerated or diffed rather than redrawn.
+
+| | Diagram | Answers |
+|---|---|---|
+| **HLD** | [System architecture ↗](https://quantum-vik.github.io/claude-view/diagrams/architecture.html) | What runs where, and what sits outside the process |
+| **HLD** | [How a session becomes each view ↗](https://quantum-vik.github.io/claude-view/diagrams/hld-dataflow.html) | Produce → capture → read → derive → present, and why three paths |
+| **LLD** | [The read path ↗](https://quantum-vik.github.io/claude-view/diagrams/lld-read-path.html) | Nine modules over one set of files, and the two leaves |
+| **LLD** | [The frontend ↗](https://quantum-vik.github.io/claude-view/diagrams/lld-frontend.html) | One bundle, four roots, three transports |
+| **LLD** | [Session state ↗](https://quantum-vik.github.io/claude-view/diagrams/lld-session-state.html) | Two signals merged, and what may say a session ended |
 
 | | |
 |---|---|
@@ -36,6 +46,14 @@ So a faithful live mirror cannot be built from any official channel. It has to c
 
 ### 1.2 The three-layer model
 
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="diagrams/hld-dataflow-dark.png">
+  <img alt="How a session's data becomes each view" src="diagrams/hld-dataflow-light.png">
+</picture>
+
+*Each layer answers a question no other layer can, at a latency the others cannot match* — **[open the interactive version ↗](https://quantum-vik.github.io/claude-view/diagrams/hld-dataflow.html)**
+
+
 Each layer answers a question no other layer can, at a latency the others cannot match:
 
 | Layer | Source | Carries | Latency |
@@ -51,6 +69,14 @@ There is a fourth signal that belongs to neither: **the rendered screen**. Hooks
 **One thing no layer can supply:** the output of a tool call *while it is still running*. No channel carries it. Finished output the panel shows in full, including the part the terminal truncated.
 
 ### 1.3 System context
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="diagrams/architecture-dark.png">
+  <img alt="claude-view system architecture" src="diagrams/architecture-light.png">
+</picture>
+
+*The whole runtime. Everything inside the boundary is one OS process* — **[open the interactive version ↗](https://quantum-vik.github.io/claude-view/diagrams/architecture.html)**
+
 
 ```mermaid
 graph TB
@@ -212,6 +238,14 @@ Fonts are vendored offline in `public/fonts/`: **Lora** (serif) and **IBM Plex M
 ## 3. Structure
 
 ### 3.1 Module dependency graph
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="diagrams/lld-read-path-dark.png">
+  <img alt="The nine modules of the read path" src="diagrams/lld-read-path-light.png">
+</picture>
+
+*Nine modules reading one set of files. `changes.rs` and `git.rs` import no other crate module* — **[open the interactive version ↗](https://quantum-vik.github.io/claude-view/diagrams/lld-read-path.html)**
+
 
 `main.rs` declares exactly **14** modules. The graph is close to a DAG with two deliberate leaves:
 
@@ -552,6 +586,14 @@ Normalization happens server-side in Rust; the shell stays dependency-free.
 ## 5. Low-level design — frontend
 
 ### 5.1 Shape
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="diagrams/lld-frontend-dark.png">
+  <img alt="Frontend component and transport map" src="diagrams/lld-frontend-light.png">
+</picture>
+
+*One bundle, four roots chosen by query string, three strictly divided transports* — **[open the interactive version ↗](https://quantum-vik.github.io/claude-view/diagrams/lld-frontend.html)**
+
 
 `src/main.tsx` is 32 lines. It calls `initTheme()` **at module scope**, before `createRoot`, so the theme's CSS custom properties are on `:root` before the first paint — no white flash, no unthemed frame. Then it reads `window.location.search` and renders exactly one of four roots. Nothing navigates afterward.
 
@@ -968,6 +1010,14 @@ Rust owns the tailer and therefore the de-duplication, so it counts tokens and o
 A run is costed at **its own** model's rate, not by a session-wide token proportion: on the reference session the haiku run made the most tool calls of any run for **$0.113**, against opus runs up to **$3.715**.
 
 ### 9.4 Two signals merged, never mixed
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="diagrams/lld-session-state-dark.png">
+  <img alt="Session state machine" src="diagrams/lld-session-state-light.png">
+</picture>
+
+*Hook state and screen state live in two fields precisely so they cannot overwrite each other* — **[open the interactive version ↗](https://quantum-vik.github.io/claude-view/diagrams/lld-session-state.html)**
+
 
 ```mermaid
 stateDiagram-v2
