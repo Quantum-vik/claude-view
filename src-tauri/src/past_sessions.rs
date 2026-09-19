@@ -62,6 +62,34 @@ fn repo_ident(cwd: &str, cache: &mut RepoCache) -> Option<RepoInfo> {
 /// Scan every project transcript and return sessions newest-first. Only the
 /// head of each JSONL file is read (cwd + first user message), so this stays
 /// fast even with hundreds of sessions.
+/// Sessions run from a scratch directory, which the launcher hides.
+///
+/// Agent tooling works in temp directories constantly — a research agent, a
+/// throwaway experiment, a scratchpad — and every one of them leaves a
+/// transcript behind. Measured on one machine: **21 of 24** project directories
+/// were `/tmp` throwaways, so the launcher's list was almost entirely noise
+/// with the real repos buried in it.
+///
+/// Hiding is safe here in a way it would not be elsewhere: `/tmp` does not
+/// survive a reboot, so these sessions are ephemeral by construction. Nothing
+/// is deleted — the transcripts stay on disk and a session still running in a
+/// temp directory is unaffected, since that list is built from live processes
+/// rather than from this scan.
+fn is_scratch(cwd: &str) -> bool {
+    let p = Path::new(cwd);
+    // $TMPDIR first: honouring it is what makes this correct on a machine that
+    // puts temp somewhere other than /tmp, macOS being the common case.
+    if let Some(tmp) = std::env::var_os("TMPDIR") {
+        let tmp = Path::new(&tmp);
+        if !tmp.as_os_str().is_empty() && p.starts_with(tmp) {
+            return true;
+        }
+    }
+    ["/tmp", "/var/tmp", "/private/tmp", "/private/var/folders"]
+        .iter()
+        .any(|root| p.starts_with(root))
+}
+
 pub fn list() -> Result<Vec<PastSession>, String> {
     let projects = dirs::home_dir()
         .ok_or("could not resolve home directory")?
@@ -105,6 +133,9 @@ pub fn list() -> Result<Vec<PastSession>, String> {
             let Some(cwd) = cwd else {
                 continue; // unreadable/empty transcript — not resumable, skip
             };
+            if is_scratch(&cwd) {
+                continue;
+            }
             // The tail gives the session's CURRENT model + context size. Prefer
             // the tail model for both the chip and the meter's window, since a
             // session may have switched models (e.g. fable → opus).
@@ -278,6 +309,71 @@ fn truncate(s: &str, max_chars: usize) -> String {
 
 #[cfg(test)]
 mod tests {
+
+    /// Opt-in: `CV_DUMP_SESSIONS=1 cargo test dump_sessions -- --nocapture`.
+    /// Counts what the launcher shows against what is on disk.
+    #[test]
+    fn dump_sessions() {
+        if std::env::var("CV_DUMP_SESSIONS").is_err() {
+            return;
+        }
+        let shown = list().unwrap();
+        let projects = dirs::home_dir().unwrap().join(".claude/projects");
+        let mut total = 0;
+        let mut scratch = 0;
+        for d in fs::read_dir(&projects).unwrap().flatten() {
+            if !d.path().is_dir() {
+                continue;
+            }
+            total += 1;
+            if d.file_name().to_string_lossy().starts_with("-tmp") {
+                scratch += 1;
+            }
+        }
+        eprintln!("project dirs on disk: {total}  (scratch-looking: {scratch})");
+        eprintln!("sessions the launcher shows: {}", shown.len());
+        let mut dirs_shown: Vec<_> = shown.iter().map(|s| s.cwd.clone()).collect();
+        dirs_shown.sort();
+        dirs_shown.dedup();
+        eprintln!("distinct cwds shown: {}", dirs_shown.len());
+        for c in dirs_shown.iter().take(12) {
+            eprintln!("  {c}");
+        }
+        assert!(
+            !shown.iter().any(|s| is_scratch(&s.cwd)),
+            "a scratch session reached the launcher"
+        );
+    }
+
+    /// 21 of 24 project directories on one real machine were `/tmp`
+    /// throwaways left by agent tooling. The launcher is for finding your work.
+    #[test]
+    fn scratch_directories_are_hidden_from_the_launcher() {
+        assert!(is_scratch("/tmp/rd21-w1"));
+        assert!(is_scratch("/tmp/claude-1000/x/scratchpad"));
+        assert!(is_scratch("/var/tmp/build"));
+        assert!(is_scratch("/private/var/folders/ab/cd/T/agent"));
+    }
+
+    #[test]
+    fn real_work_is_never_hidden() {
+        assert!(!is_scratch("/home/u/WorkPersonal/claude-view"));
+        assert!(!is_scratch("/home/u/code/app"));
+        // A path that merely CONTAINS the word is not a temp path — matching on
+        // a substring rather than a path prefix would hide real repos.
+        assert!(!is_scratch("/home/u/tmp-notes"));
+        assert!(!is_scratch("/home/u/projects/tmpfs-experiments"));
+        assert!(!is_scratch("/opt/tmp-tools/src"));
+    }
+
+    #[test]
+    fn tmpdir_is_honoured_where_temp_is_not_slash_tmp() {
+        // macOS puts it under /var/folders; a machine can put it anywhere.
+        std::env::set_var("TMPDIR", "/scratchvol/ephemeral");
+        assert!(is_scratch("/scratchvol/ephemeral/run-4/work"));
+        assert!(!is_scratch("/scratchvol/keepme"));
+        std::env::remove_var("TMPDIR");
+    }
     use super::*;
 
     /// A path that cannot exist, so `git::discover` is guaranteed to miss.
