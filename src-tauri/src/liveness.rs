@@ -109,6 +109,19 @@ fn scan_tail(path: &Path) -> Option<String> {
     Some(order.iter().rev().find_map(|id| open.get(id).cloned())?)
 }
 
+/// [`probe`], but skipping the tail read for a file that is plainly cold.
+///
+/// The launcher scans every transcript on the machine. Reading 400 KB of each to
+/// discover that a three-week-old session is not running would cost megabytes a
+/// poll; beyond [`IDLE_MS`] the answer cannot be anything but `NoLongerLive`, so
+/// the read is skipped rather than performed and discarded.
+pub fn probe_recent(path: &Path, mtime_ms: u64, now_ms: u64) -> Liveness {
+    if now_ms.saturating_sub(mtime_ms) > IDLE_MS {
+        return Liveness::NoLongerLive;
+    }
+    probe(path, mtime_ms, now_ms)
+}
+
 /// Judge a watched session from its transcript.
 ///
 /// `mtime_ms` is the file's modification time — the cheap signal, taken by the

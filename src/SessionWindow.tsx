@@ -226,6 +226,10 @@ export default function SessionWindow(props: SessionWindowProps = {}) {
   const token = props.token ?? params.get("token") ?? "";
   // URLSearchParams already percent-decodes values.
   const cwd = props.cwd ?? params.get("cwd") ?? "";
+  /** A session claude-view did not launch (#40): read from its transcript, with
+   *  no process behind it. Read-only by construction — there is no PTY to type
+   *  into or resize — exactly as an agent run's window already is. */
+  const watched = params.get("watched") === "1";
   // A standalone window is always "the visible pane" — only the launcher's tab
   // mode has hidden-but-mounted sessions, and it passes this explicitly.
   const isVisible = props.isVisible ?? true;
@@ -642,7 +646,50 @@ export default function SessionWindow(props: SessionWindowProps = {}) {
   // Ended and connection trouble outrank the agent state — a "working" badge on
   // a dead socket would be a lie. With hooks off the state stays "unknown" and
   // this reads "Live", exactly as it did before.
-  const live = ended
+  /** Nothing pushes for a watched session — no process to report an exit, no
+   *  hooks to report a turn — so the window asks. Same cadence as the roster. */
+  const [watchState, setWatchState] = useState<{ state: string; tool?: string } | null>(null);
+  useEffect(() => {
+    if (!watched || !vid) return;
+    let alive = true;
+    const pull = () =>
+      invoke("session_liveness", { viewerId: vid })
+        .then((v) => alive && setWatchState(v as { state: string; tool?: string }))
+        .catch(() => {});
+    void pull();
+    const t = setInterval(pull, 1500);
+    return () => {
+      alive = false;
+      clearInterval(t);
+    };
+  }, [watched, vid]);
+
+  // A watched session receives no hooks (#41), so `agentState` stays Unknown
+  // for life and the default branch below would label it "Live" — a claim
+  // nothing supports. Its liveness is read from the transcript instead, and it
+  // is never called "ended": a file that stopped growing may have ended,
+  // crashed, or be thinking (see CONTEXT.md).
+  const live = watched
+    ? {
+        color:
+          watchState?.state === "live"
+            ? T.success
+            : watchState?.state === "guessed"
+              ? T.running
+              : T.idle,
+        label:
+          watchState?.state === "live"
+            ? watchState.tool
+              ? `live · ${watchState.tool}`
+              : "live"
+            : watchState?.state === "guessed"
+              ? "live?"
+              : watchState?.state === "idle"
+                ? "idle"
+                : "no longer live",
+        pulse: watchState?.state === "live",
+      }
+    : ended
     ? { color: T.idle, label: "ended", pulse: false }
     : connStatus === "connecting"
     ? { color: T.running, label: "connecting…", pulse: false }
@@ -965,10 +1012,13 @@ export default function SessionWindow(props: SessionWindowProps = {}) {
           <div
             ref={sidebarRef}
             style={{
-              width: sidebarWidth,
+              // A watched session has no terminal beside the panel, so the
+              // panel takes the window rather than leaving 700px of dead
+              // background next to a 470px column.
+              width: watched ? "100%" : sidebarWidth,
               flexShrink: 0,
               background: T.sidebar,
-              borderRight: `1px solid ${T.border}`,
+              borderRight: watched ? "none" : `1px solid ${T.border}`,
               overflow: "hidden",
               display: "flex",
               flexDirection: "column",
@@ -1000,7 +1050,7 @@ export default function SessionWindow(props: SessionWindowProps = {}) {
         {/* Drag handle between log and terminal. Widths apply straight to the
             DOM during the drag (no per-mousemove React render); the final
             width commits + persists on mouseup. */}
-        {sidebarOpen && (
+        {sidebarOpen && !watched && (
           <DragHandle
             title="Drag to resize the command log"
             onResize={(dx) => {
@@ -1014,7 +1064,10 @@ export default function SessionWindow(props: SessionWindowProps = {}) {
           />
         )}
 
-        {/* Terminal area */}
+        {/* Terminal area. A watched session has no PTY, so there is nothing to
+            attach to and nothing to type into: the panel takes the whole
+            window rather than leaving a dead pane beside it. */}
+        {!watched && (
         <div style={{ flex: 1, overflow: "hidden", background: T.bg }}>
           {vid && port && token ? (
             <Terminal
@@ -1040,6 +1093,7 @@ export default function SessionWindow(props: SessionWindowProps = {}) {
             </div>
           )}
         </div>
+        )}
       </div>
 
       {/* Model + effort popover */}
