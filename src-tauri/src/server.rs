@@ -15,6 +15,7 @@ use crate::pty;
 use crate::session::{
     cap_command, now_ms, push_timeline, AgentState, Registry, Session, TimelineEvent,
 };
+use crate::transcript::describe_input;
 
 #[derive(Clone)]
 pub struct ServerState {
@@ -34,7 +35,6 @@ pub fn router(registry: Arc<Registry>, token: String, app: tauri::AppHandle, por
     Router::new()
         .route("/ws/:id", get(ws_handler))
         .route("/hooks", post(hooks_handler))
-        .route("/bind", post(bind_handler))
         .route(
             "/sessions",
             post(sessions_handler).get(list_sessions_handler),
@@ -188,12 +188,9 @@ struct ChangesQuery {
 /// `GET /trace/:id?after=<cursor>&limit=<n>` — a page of the session's trace,
 /// read straight off disk.
 ///
-/// Per issue #18 the transcript is authoritative and nothing is cached: the
-/// largest real transcript here parses in 46 ms, so a cache would be all the
-/// invalidation cost of a cache for no measurable gain.
-///
-/// An unreadable trace is a TYPED failure, never an empty page. Rendering
-/// "nothing happened" for "I cannot see" is a lie the viewer cannot detect.
+/// The body is `trace::page_json`, the same call `main.rs::read_trace` makes, and
+/// is serialised verbatim. It used to be a second implementation of that
+/// contract and had already drifted: this route's payload was missing `turns`.
 async fn trace_handler(
     Path(id): Path<String>,
     Query(q): Query<TraceQuery>,
@@ -208,34 +205,14 @@ async fn trace_handler(
         .registry
         .get(&id)
         .ok_or((StatusCode::NOT_FOUND, "no such session".into()))?;
-
-    let cursor = match q.after.as_deref() {
-        Some(raw) => crate::trace::Cursor::decode(raw)
-            .ok_or((StatusCode::BAD_REQUEST, "malformed cursor".into()))?,
-        None => crate::trace::Cursor::default(),
-    };
-
-    // Resolve the transcript exactly as the tailer does, so a page and the live
-    // push can never disagree about which file a session owns.
     let sid = session.session_id.read().clone();
-    let path = crate::trace::locate_for(&session.cwd, sid.as_deref(), session.spawned_at);
-
-    match crate::trace::read_page(
-        path.as_deref(),
-        &cursor,
-        q.limit.unwrap_or(crate::trace::DEFAULT_LIMIT),
-    ) {
-        Ok(page) => Ok(axum::Json(json!(page))),
-        Err(why) => Ok(axum::Json(json!({
-            "unavailable": why,
-            "entries": [],
-            // Hand back the cursor unchanged so a poller keeps its position
-            // through a transient read failure instead of restarting.
-            "cursor": cursor.encode(),
-            "hasMore": false,
-            "sources": [],
-        }))),
-    }
+    Ok(axum::Json(crate::trace::page_json(
+        &session.cwd,
+        sid.as_deref(),
+        session.spawned_at,
+        q.after.as_deref(),
+        q.limit,
+    )))
 }
 
 /// `GET /changes/:id` — what the session changed on disk, for scripting.
@@ -262,7 +239,7 @@ async fn changes_handler(
 
     if let Some(path) = q.path.as_deref() {
         let patch = crate::changes::patch(cwd, session.spawned_at, path)
-            .map_err(|e| (StatusCode::NOT_FOUND, e))?;
+            .map_err(|why| (StatusCode::NOT_FOUND, why.as_str().to_string()))?;
         return Ok(axum::Json(json!({ "path": path, "patch": patch })));
     }
     Ok(axum::Json(json!(crate::changes::read(
@@ -282,6 +259,31 @@ async fn ws_handler(
     }
     let session = state.registry.get(&id).ok_or(StatusCode::NOT_FOUND)?;
     Ok(ws.on_upgrade(move |socket| handle_ws(socket, session)))
+}
+
+/// Every card the session still remembers, plus how many it has forgotten.
+///
+/// Sent on connect and again after a control-channel lag: both are "you may
+/// have missed cards", and the client upserts by id, so a resend is idempotent.
+fn timeline_snapshot(session: &Session) -> Value {
+    let timeline = session.timeline.lock();
+    json!({
+        "type": "timeline_snapshot",
+        "events": &*timeline,
+    })
+}
+
+/// The `agent_state` frame for the session as it stands *now*, in the exact
+/// shape `Session::set_state` broadcasts — same `seq`, so a viewer that keeps a
+/// high-water mark treats a replay as the state it already has, not a regression.
+fn state_frame(session: &Session, reason: &str) -> Value {
+    json!({
+        "type": "agent_state",
+        "state": session.effective_state().as_str(),
+        "reason": reason,
+        "seq": session.state_seq.load(Ordering::Acquire),
+        "since": session.state_since.load(Ordering::Acquire),
+    })
 }
 
 async fn handle_ws(socket: WebSocket, session: Arc<Session>) {
@@ -306,17 +308,7 @@ async fn handle_ws(socket: WebSocket, session: Arc<Session>) {
     if !scrollback.is_empty() && tx.send(Message::Binary(scrollback)).await.is_err() {
         return;
     }
-    let snapshot = {
-        let timeline = session.timeline.lock();
-        json!({
-            "type": "timeline_snapshot",
-            "events": &*timeline,
-            // Cards already evicted by TIMELINE_CAP. Without this the viewer
-            // can't tell a session that ran 12 commands from one that ran 5012
-            // — it just shows the tail as if it were the whole history.
-            "elided": session.timeline_elided.load(Ordering::Relaxed),
-        })
-    };
+    let snapshot = timeline_snapshot(&session);
     if tx.send(Message::Text(snapshot.to_string())).await.is_err() {
         return;
     }
@@ -338,6 +330,22 @@ async fn handle_ws(socket: WebSocket, session: Arc<Session>) {
         let _ = tx
             .send(Message::Text(
                 json!({ "type": "usage", "input": u.input, "output": u.output }).to_string(),
+            ))
+            .await;
+    }
+    // State and cost are edge-triggered exactly like `usage` above, so without a
+    // replay every reconnect resets the badge to "Live" and blanks the spend
+    // until the next hook fires — which for an idle session may be never.
+    let _ = tx
+        .send(Message::Text(state_frame(&session, "replay").to_string()))
+        .await;
+    let rollup = session.ledger.lock().rollup();
+    // Skipped when nothing is ledgered yet: a zeroed rollup would print $0.00
+    // where "not costed yet" is the truth.
+    if rollup.turns > 0 {
+        let _ = tx
+            .send(Message::Text(
+                json!({ "type": "cost", "rollup": rollup }).to_string(),
             ))
             .await;
     }
@@ -382,7 +390,27 @@ async fn handle_ws(socket: WebSocket, session: Arc<Session>) {
                             break;
                         }
                     }
-                    Err(RecvError::Lagged(_)) => continue,
+                    // The ring buffer dropped control frames for this viewer.
+                    // A missed timeline card is cosmetic; a missed `exit` leaves
+                    // a finished session showing as live forever. Resend what is
+                    // cumulative — snapshot, state, exit — so the viewer
+                    // converges instead of silently diverging.
+                    Err(RecvError::Lagged(_)) => {
+                        let snapshot = timeline_snapshot(&send_session);
+                        let state = state_frame(&send_session, "resync");
+                        if tx.send(Message::Text(snapshot.to_string())).await.is_err()
+                            || tx.send(Message::Text(state.to_string())).await.is_err()
+                        {
+                            break;
+                        }
+                        if send_session.is_ended() {
+                            let code = send_session.exit_code.read().unwrap_or(0);
+                            let exit = json!({ "type": "exit", "code": code });
+                            if tx.send(Message::Text(exit.to_string())).await.is_err() {
+                                break;
+                            }
+                        }
+                    }
                     Err(RecvError::Closed) => break,
                 },
             }
@@ -426,31 +454,6 @@ fn check_token(state: &ServerState, headers: &HeaderMap) -> bool {
         .get("x-claude-view-token")
         .and_then(|v| v.to_str().ok())
         == Some(state.token.as_str())
-}
-
-/// Explicit bind endpoint (spec §7b). The bundled bridge script normally posts
-/// everything to /hooks and SessionStart is bound there, but this route honors
-/// the contract for custom bridges.
-async fn bind_handler(
-    State(state): State<ServerState>,
-    headers: HeaderMap,
-    body: String,
-) -> StatusCode {
-    if !check_token(&state, &headers) {
-        return StatusCode::UNAUTHORIZED;
-    }
-    let Ok(v) = serde_json::from_str::<Value>(&body) else {
-        return StatusCode::BAD_REQUEST;
-    };
-    let viewer_id = v["viewer_id"]
-        .as_str()
-        .map(str::to_string)
-        .or_else(|| header_viewer_id(&headers));
-    let (Some(vid), Some(sid)) = (viewer_id, v["session_id"].as_str()) else {
-        return StatusCode::BAD_REQUEST;
-    };
-    do_bind(&state.registry, &vid, sid);
-    StatusCode::OK
 }
 
 fn header_viewer_id(headers: &HeaderMap) -> Option<String> {
@@ -651,26 +654,6 @@ fn parse_dialog(v: &Value) -> Option<String> {
     Some(kind.chars().take(DIALOG_KIND_CAP).collect())
 }
 
-/// Best-effort human-readable subject for a tool call card.
-fn describe_input(tool_name: &str, tool_input: &Value) -> Option<String> {
-    if tool_name == "Bash" {
-        return tool_input["command"].as_str().map(str::to_string);
-    }
-    for key in [
-        "file_path",
-        "path",
-        "pattern",
-        "query",
-        "url",
-        "description",
-    ] {
-        if let Some(s) = tool_input[key].as_str() {
-            return Some(s.to_string());
-        }
-    }
-    None
-}
-
 /// Pull a human-readable result out of tool_response, whose shape varies by
 /// tool and Claude Code version (string, object, or content-block array).
 fn extract_output(resp: &Value) -> Option<String> {
@@ -740,7 +723,6 @@ pub(crate) fn apply_pre_tool_use(
     let event = TimelineEvent {
         agent_id: None,
         id,
-        kind: "command".into(),
         tool: tool.clone(),
         command: describe_input(&tool, &v["tool_input"]).map(|c| cap_command(&c)),
         status: "running".into(),
@@ -811,7 +793,6 @@ fn apply_post_tool_use_with_output(
             id: tool_use_id
                 .map(str::to_string)
                 .unwrap_or_else(|| Uuid::new_v4().to_string()),
-            kind: "command".into(),
             tool: tool.clone(),
             command: describe_input(&tool, &v["tool_input"]).map(|c| cap_command(&c)),
             status: status.into(),
@@ -846,11 +827,10 @@ pub(crate) fn settle_running(timeline: &mut [TimelineEvent], ts: u64) -> Vec<Tim
 
 fn on_pre_tool_use(session: &Arc<Session>, v: &Value) {
     let ts = now_ms();
-    let (event, dropped) = {
+    let (event, _) = {
         let mut timeline = session.timeline.lock();
         apply_pre_tool_use(&mut timeline, v, ts)
     };
-    session.note_elided(dropped);
     session.send_control(json!({ "type": "timeline", "event": event }));
 }
 
@@ -860,11 +840,10 @@ fn on_post_tool_use(session: &Arc<Session>, v: &Value) {
     // would otherwise hold the timeline mutex through a heavy allocation and
     // stall concurrent hook handlers.
     let output = extract_output(&v["tool_response"]);
-    let (event, dropped) = {
+    let (event, _) = {
         let mut timeline = session.timeline.lock();
         apply_post_tool_use_with_output(&mut timeline, v, ts, output)
     };
-    session.note_elided(dropped);
     session.send_control(json!({ "type": "timeline", "event": event }));
 }
 
@@ -920,7 +899,6 @@ mod tests {
         TimelineEvent {
             agent_id: None,
             id: id.into(),
-            kind: "command".into(),
             tool: "Read".into(),
             command: Some("src/lib.rs".into()),
             status: "success".into(),

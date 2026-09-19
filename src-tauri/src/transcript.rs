@@ -75,6 +75,25 @@ impl TokenUsage {
         self.input + self.cache_read + self.cache_write_5m + self.cache_write_1h
     }
 
+    /// Field-by-field accumulate. Replaces the hand-written copies of these
+    /// five lines in session.rs, rollup.rs, agents.rs and export.rs — a sixth
+    /// token kind meant remembering every one of them, or silently dropping it
+    /// from whichever total was forgotten.
+    pub fn add(&mut self, other: &TokenUsage) {
+        self.input += other.input;
+        self.cache_read += other.cache_read;
+        self.cache_write_5m += other.cache_write_5m;
+        self.cache_write_1h += other.cache_write_1h;
+        self.output += other.output;
+    }
+
+    /// Every token field summed — input side plus output. Not occupancy (that
+    /// is [`TokenUsage::context_tokens`]) and never a price: it answers only
+    /// "how many tokens moved", for a row that shows one number.
+    pub fn total(&self) -> u64 {
+        self.context_tokens() + self.output
+    }
+
     pub fn is_zero(&self) -> bool {
         self.context_tokens() == 0 && self.output == 0
     }
@@ -252,22 +271,34 @@ fn read_new(path: &Path, offset: &mut u64) -> Option<Vec<Record>> {
 
     let mut out = Vec::new();
     let mut consumed = *offset;
-    let mut line = String::new();
+    let mut buf = Vec::new();
     loop {
-        line.clear();
-        match reader.read_line(&mut line) {
+        buf.clear();
+        // Bytes, not `read_line`: a non-UTF-8 line (a torn multi-byte write, a
+        // corrupted flush) makes `read_line` return InvalidData *without*
+        // saying how many bytes it already swallowed. That looked like EOF and
+        // left the offset parked before the bad line, so the tailer re-read it
+        // on every poll, forever, while reporting it had reached the end.
+        // `read_until` always reports the count, so we advance past it.
+        match reader.read_until(b'\n', &mut buf) {
             Ok(0) => break,
             Ok(n) => {
                 // Only advance the durable offset past COMPLETE lines, so a
                 // half-flushed final line is re-read next poll.
-                if !line.ends_with('\n') {
+                if buf.last() != Some(&b'\n') {
                     break;
                 }
                 consumed += n as u64;
-                if let Ok(v) = serde_json::from_str::<Value>(&line) {
+                // Lossy on purpose: a line whose text is mostly intact still
+                // parses and still yields its records, and one that does not is
+                // skipped rather than ending the poll. Borrowed (no allocation)
+                // whenever the bytes are already valid UTF-8 — the normal case.
+                if let Ok(v) = serde_json::from_str::<Value>(&String::from_utf8_lossy(&buf)) {
                     parse_record(&v, &mut out);
                 }
             }
+            // A genuine I/O error: stop here, but keep the offset we reached so
+            // the next poll resumes after the last complete line.
             Err(_) => break,
         }
     }
@@ -326,7 +357,9 @@ fn parse_record(v: &Value, out: &mut Vec<Record>) {
 }
 
 /// tool_result content is either a string or an array of `{type:text,text}`.
-fn flatten_content(content: &Value) -> Option<String> {
+///
+/// `pub` because trace.rs had its own line-for-line copy of the same two arms.
+pub fn flatten_content(content: &Value) -> Option<String> {
     const CAP: usize = 4000;
     let text = match content {
         Value::String(s) => s.clone(),
@@ -348,7 +381,16 @@ fn flatten_content(content: &Value) -> Option<String> {
     Some(out)
 }
 
-fn describe_input(tool: &str, input: &Value) -> Option<String> {
+/// The one-line subject of a tool call: what the card shows next to the tool
+/// name. `Bash` is command-only and never falls through — a `description`
+/// standing in for the command would read as if a different thing had run.
+///
+/// The key order is a precedence list, not a set: `file_path` before `path`
+/// before `pattern`, so a tool that sends several gets the most specific.
+///
+/// `pub` because server.rs (hooks) and trace.rs each carried a copy with this
+/// exact key list; those are deleted in favour of this one.
+pub fn describe_input(tool: &str, input: &Value) -> Option<String> {
     if tool == "Bash" {
         return input["command"].as_str().map(str::to_string);
     }
@@ -640,6 +682,44 @@ pub fn parse_iso_ms(s: &str) -> Option<u64> {
 
     let secs = days * 86400 + (h * 3600 + mi * 60 + se) as i64;
     Some((secs as u64) * 1000 + millis)
+}
+
+/// Days since the Unix epoch → `(year, month, day)` UTC. Howard Hinnant's
+/// civil-from-days, the exact inverse of the days-from-civil block inside
+/// [`parse_iso_ms`], and the reason neither needs a datetime crate.
+///
+/// The same body was written out twice — `rollup::day_of` and
+/// `main::now_iso8601` — which is two chances to mistype `146_096`.
+pub fn civil_from_days(days: i64) -> (i64, u32, u32) {
+    let z = days + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z.rem_euclid(146_097);
+    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146_096) / 365;
+    let y = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 };
+    let y = if m <= 2 { y + 1 } else { y };
+    (y, m as u32, d as u32)
+}
+
+/// The replay-dedup key of ARCHITECTURE §9.2: `requestId`, else `message.id`,
+/// else `uuid` — the first one present wins. Borrowed out of `v`, so the caller
+/// decides whether to own it.
+///
+/// `requestId` leads because billing is per API request, which is what a cost
+/// column claims to report; it is absent only on `<synthetic>` turns, whose
+/// all-zero usage never parses anyway. `message.id` was never absent across
+/// 2,803 real records, and `uuid` is the backstop so a record is never counted
+/// twice for want of a key. Of the five hand-written copies only agents.rs had
+/// all three arms — rollup.rs, trace.rs and pty.rs each stopped at `message.id`,
+/// which is how a record with neither of the first two keys escaped the fold.
+pub fn dedup_key(v: &Value) -> Option<&str> {
+    v["requestId"]
+        .as_str()
+        .or_else(|| v["message"]["id"].as_str())
+        .or_else(|| v["uuid"].as_str())
 }
 
 #[cfg(test)]
@@ -950,6 +1030,122 @@ mod tests {
             output: None,
             ts: 0,
         }));
+    }
+
+    /// `add` must touch every field. The point of the helper is that a new
+    /// token kind cannot be forgotten at one of five call sites, so the test
+    /// asserts all five fields, not a total that could hide a missing one.
+    #[test]
+    fn add_accumulates_every_field_and_total_is_context_plus_output() {
+        let a = TokenUsage {
+            input: 1,
+            cache_read: 2,
+            cache_write_5m: 4,
+            cache_write_1h: 8,
+            output: 16,
+        };
+        let mut acc = TokenUsage::default();
+        acc.add(&a);
+        acc.add(&a);
+        assert_eq!(
+            acc,
+            TokenUsage {
+                input: 2,
+                cache_read: 4,
+                cache_write_5m: 8,
+                cache_write_1h: 16,
+                output: 32,
+            }
+        );
+        // total() is occupancy plus what was generated — nothing else.
+        assert_eq!(a.total(), 31);
+        assert_eq!(a.total(), a.context_tokens() + a.output);
+        assert_eq!(TokenUsage::default().total(), 0);
+    }
+
+    /// The exact inverse of the days-from-civil block in `parse_iso_ms`, so the
+    /// round trip is the strongest assertion available. Plus a leap day, which
+    /// is the one date the era arithmetic can get wrong.
+    #[test]
+    fn civil_from_days_round_trips_parse_iso_ms() {
+        for (iso, want) in [
+            ("2026-09-18T00:00:00.000Z", (2026, 9, 18)),
+            ("2024-02-29T23:59:59.000Z", (2024, 2, 29)), // leap day
+            ("2000-03-01T12:00:00.000Z", (2000, 3, 1)),  // century leap year, day after
+            ("1970-01-01T00:00:00.000Z", (1970, 1, 1)),  // the epoch itself
+        ] {
+            let ms = parse_iso_ms(iso).unwrap();
+            assert_eq!(civil_from_days((ms / 86_400_000) as i64), want, "{iso}");
+        }
+    }
+
+    /// §9.2: `requestId` → `message.id` → `uuid`, first present wins. Three of
+    /// the five hand-written copies stopped at `message.id`.
+    #[test]
+    fn dedup_key_prefers_request_id_then_message_id_then_uuid() {
+        let all: Value =
+            serde_json::from_str(r#"{"requestId":"req_1","uuid":"u_1","message":{"id":"msg_1"}}"#)
+                .unwrap();
+        assert_eq!(dedup_key(&all), Some("req_1"));
+
+        let no_req: Value =
+            serde_json::from_str(r#"{"uuid":"u_1","message":{"id":"msg_1"}}"#).unwrap();
+        assert_eq!(dedup_key(&no_req), Some("msg_1"));
+
+        let only_uuid: Value = serde_json::from_str(r#"{"uuid":"u_1","message":{}}"#).unwrap();
+        assert_eq!(dedup_key(&only_uuid), Some("u_1"));
+
+        // No key at all: the caller must skip the record, never invent one —
+        // a synthesised key would fold two unrelated turns into one.
+        let none: Value = serde_json::from_str(r#"{"type":"assistant","message":{}}"#).unwrap();
+        assert_eq!(dedup_key(&none), None);
+    }
+
+    /// A transcript line can be non-UTF-8 — a torn multi-byte write, a
+    /// corrupted flush. `read_line` reported InvalidData without saying how many
+    /// bytes it had swallowed, which read as EOF *and* parked the offset before
+    /// the bad line: the tailer then re-read that same line on every poll
+    /// forever and never saw anything after it.
+    #[test]
+    fn an_invalid_utf8_line_does_not_stall_the_tailer() {
+        let dir = std::env::temp_dir().join(format!("cv-badutf8-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("t.jsonl");
+
+        let good = |id: &str| {
+            format!(
+                r#"{{"type":"assistant","message":{{"content":[{{"type":"tool_use","id":"{id}","name":"Bash","input":{{"command":"echo hi"}}}}]}}}}"#
+            )
+        };
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(good("toolu_a").as_bytes());
+        bytes.push(b'\n');
+        bytes.extend_from_slice(b"{\"type\":\"user\",\"torn\":\"\xff\xfe\"}");
+        bytes.push(b'\n');
+        bytes.extend_from_slice(good("toolu_b").as_bytes());
+        bytes.push(b'\n');
+        fs::write(&path, &bytes).unwrap();
+
+        let mut offset = 0u64;
+        let records = read_new(&path, &mut offset).expect("file opens");
+        let ids: Vec<&str> = records
+            .iter()
+            .filter_map(|r| match r {
+                Record::Start { id, .. } => Some(id.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(ids, ["toolu_a", "toolu_b"], "both good lines must survive");
+        assert_eq!(
+            offset,
+            bytes.len() as u64,
+            "offset must advance past the undecodable line"
+        );
+        // Nothing appended: a second poll sees nothing. Before the fix this
+        // returned the line before the bad one, over and over.
+        assert!(read_new(&path, &mut offset).unwrap().is_empty());
+        let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]

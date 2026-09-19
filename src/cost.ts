@@ -12,7 +12,7 @@
  * So the wire carries tokens, never dollars.
  */
 
-import { CAVEAT, costOfTurn, type TurnTokens } from "./pricing";
+import { CAVEAT, costOfTurn } from "./pricing";
 
 /** Per-kind token counts, matching `TokenUsage` in src-tauri/src/transcript.rs. */
 export interface TokenUsage {
@@ -56,24 +56,6 @@ export interface PricedRollup {
   subagentShare: number;
 }
 
-const EMPTY: TokenUsage = {
-  input: 0,
-  cacheRead: 0,
-  cacheWrite5m: 0,
-  cacheWrite1h: 0,
-  output: 0,
-};
-
-function toTurnTokens(u: TokenUsage): TurnTokens {
-  return {
-    input: u.input,
-    cacheWrite5m: u.cacheWrite5m,
-    cacheWrite1h: u.cacheWrite1h,
-    cacheRead: u.cacheRead,
-    output: u.output,
-  };
-}
-
 /** Every token that was paid for, input side and output. */
 export function totalTokens(u: TokenUsage): number {
   return u.input + u.cacheRead + u.cacheWrite5m + u.cacheWrite1h + u.output;
@@ -100,7 +82,7 @@ export function priceRollup(r: CostRollup): PricedRollup {
   for (const m of r.byModel) {
     // "unknown" is the backend's placeholder for a turn whose transcript
     // carried no model id. Either way there is no price.
-    const priced = m.model === "unknown" ? null : costOfTurn(m.model, toTurnTokens(m.usage));
+    const priced = m.model === "unknown" ? null : costOfTurn(m.model, m.usage);
     if (priced === null) {
       unpricedTurns += m.turns;
       unpricedModels.push(m.model);
@@ -142,5 +124,3 @@ export function costLabel(p: PricedRollup): string {
     ? `${base} ${CAVEAT.unpricedRollupSuffix(p.unpricedTurns)}`
     : base;
 }
-
-export const EMPTY_USAGE = EMPTY;

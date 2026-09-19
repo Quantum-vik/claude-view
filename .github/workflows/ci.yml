@@ -23,7 +23,7 @@ jobs:
     # a 10x multiplier — Windows 2x, Linux 1x. The repo is public now, so
     # standard runners are free and cost is no longer the reason; the choice
     # stands on runner speed alone.) Platform-specific compilation is covered
-    # by the windows-check job below.
+    # by the windows-check and macos-check jobs below.
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
@@ -106,13 +106,56 @@ jobs:
         with:
           workspaces: src-tauri
 
-      # Same prerequisite as the `just build` recipe: tauri.conf.json points
-      # frontendDist at ../dist (gitignored), and generate_context!() reads
-      # it when src-tauri compiles.
+      - name: Install just
+        uses: extractions/setup-just@v4
+
+      # Prerequisite for any cargo command: tauri.conf.json points frontendDist
+      # at ../dist (gitignored), and generate_context!() reads it when src-tauri
+      # compiles. `just build` rather than a hand-rolled npm pair, so there is
+      # one definition of "build the frontend" shared with the `ci` job.
       - name: Build frontend
-        run: |
-          npm ci
-          npm run build
+        run: just build
+
+      - name: cargo check
+        working-directory: src-tauri
+        run: cargo check --all-targets --locked
+
+  macos-check:
+    name: cargo check (macOS)
+    runs-on: macos-latest
+    # Same argument as windows-check, for the other platform the `ci` job never
+    # compiles. macOS-divergent code this covers: the two #[cfg(target_os =
+    # "macos")] RunEvent arms in main.rs (Dock reopen, prevent_exit on
+    # last-window-close), the NSUserNotification sound names in `notify`
+    # ("Glass"/"Ping" exist only on macOS), the /opt/homebrew/bin probing in
+    # main.rs and pty.rs, the GNU-`date` shellout in changes.rs (BSD `date`
+    # takes different flags), and every #[cfg(unix)] libc path — which Linux
+    # does compile, but not against Apple's libc. Like windows-check it does
+    # not run the test suite, only proves these paths still compile, test-only
+    # ones included (hence `--all-targets`).
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Setup Node
+        uses: actions/setup-node@v7
+        with:
+          node-version: 20
+          cache: npm
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+
+      - name: Install just
+        uses: extractions/setup-just@v4
+
+      - name: Build frontend
+        run: just build
 
       - name: cargo check
         working-directory: src-tauri

@@ -28,7 +28,8 @@ use std::path::Path;
 use serde::Serialize;
 use serde_json::Value;
 
-use crate::transcript::TokenUsage;
+use crate::session::now_ms;
+use crate::transcript::{self, TokenUsage};
 
 /// One bucket of spend: a model, a repo, or a day.
 #[derive(Debug, Clone, Default, Serialize)]
@@ -70,39 +71,11 @@ pub struct Spend {
     pub scan_ms: u64,
 }
 
-fn add(acc: &mut TokenUsage, u: &TokenUsage) {
-    acc.input += u.input;
-    acc.cache_read += u.cache_read;
-    acc.cache_write_5m += u.cache_write_5m;
-    acc.cache_write_1h += u.cache_write_1h;
-    acc.output += u.output;
-}
-
-fn total_of(u: &TokenUsage) -> u64 {
-    u.input + u.cache_read + u.cache_write_5m + u.cache_write_1h + u.output
-}
-
-/// `1789707895039` → `2026-09-18`, UTC. Civil-from-days, matching the parser in
-/// transcript.rs rather than pulling in a datetime crate.
+/// `1789707895039` → `2026-09-18`, UTC — the inverse of the transcript parser,
+/// so a day bucket and a timestamp can never disagree.
 fn day_of(ms: u64) -> String {
-    let z = (ms / 86_400_000) as i64 + 719_468;
-    let era = z.div_euclid(146_097);
-    let doe = z.rem_euclid(146_097);
-    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146_096) / 365;
-    let y = yoe + era * 400;
-    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
-    let mp = (5 * doy + 2) / 153;
-    let d = doy - (153 * mp + 2) / 5 + 1;
-    let m = if mp < 10 { mp + 3 } else { mp - 9 };
-    let y = if m <= 2 { y + 1 } else { y };
+    let (y, m, d) = transcript::civil_from_days((ms / 86_400_000) as i64);
     format!("{y:04}-{m:02}-{d:02}")
-}
-
-fn now_ms() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_millis() as u64)
-        .unwrap_or(0)
 }
 
 /// One turn, as scanned.
@@ -125,10 +98,7 @@ fn scan_file(path: &Path, out: &mut Vec<Turn>) {
         let Some(usage) = TokenUsage::parse(&v) else {
             continue;
         };
-        let Some(key) = v["requestId"]
-            .as_str()
-            .or_else(|| v["message"]["id"].as_str())
-        else {
+        let Some(key) = transcript::dedup_key(&v) else {
             continue;
         };
         out.push(Turn {
@@ -137,7 +107,7 @@ fn scan_file(path: &Path, out: &mut Vec<Turn>) {
             model: v["message"]["model"].as_str().map(str::to_string),
             ts: v["timestamp"]
                 .as_str()
-                .and_then(crate::transcript::parse_iso_ms)
+                .and_then(transcript::parse_iso_ms)
                 .unwrap_or(0),
         });
     }
@@ -239,12 +209,12 @@ pub fn scan(root: &Path) -> Spend {
                 continue;
             }
             out.turns += 1;
-            add(&mut out.total, &t.usage);
+            out.total.add(&t.usage);
 
             let day = day_of(t.ts);
             if day == today {
                 out.today_turns += 1;
-                add(&mut out.today, &t.usage);
+                out.today.add(&t.usage);
             }
 
             for (map, k) in [
@@ -260,7 +230,7 @@ pub fn scan(root: &Path) -> Spend {
                     ..Default::default()
                 });
                 b.turns += 1;
-                add(&mut b.usage, &t.usage);
+                b.usage.add(&t.usage);
             }
         }
     }
@@ -269,7 +239,7 @@ pub fn scan(root: &Path) -> Spend {
         let mut v: Vec<Bucket> = map
             .into_values()
             .map(|mut b| {
-                b.tokens = total_of(&b.usage);
+                b.tokens = b.usage.total();
                 b
             })
             .collect();
@@ -484,9 +454,9 @@ mod tests {
 
     #[test]
     fn day_conversion_matches_the_transcript_parser() {
-        let ms = crate::transcript::parse_iso_ms("2026-09-18T23:59:59.000Z").unwrap();
+        let ms = transcript::parse_iso_ms("2026-09-18T23:59:59.000Z").unwrap();
         assert_eq!(day_of(ms), "2026-09-18");
-        let ms2 = crate::transcript::parse_iso_ms("2026-01-01T00:00:00.000Z").unwrap();
+        let ms2 = transcript::parse_iso_ms("2026-01-01T00:00:00.000Z").unwrap();
         assert_eq!(day_of(ms2), "2026-01-01");
     }
 
@@ -506,7 +476,7 @@ mod tests {
             s.scan_ms,
             s.turns,
             s.duplicates_skipped,
-            total_of(&s.total),
+            s.total.total(),
             s.by_repo.len()
         );
         if s.transcripts > 0 {

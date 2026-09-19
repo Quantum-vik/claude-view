@@ -2,7 +2,7 @@
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
   "description": "Default capability for all claude-view windows",
-  "windows": ["main", "session-*"],
+  "windows": ["main", "session-*", "agent-*"],
   "permissions": [
     "core:default",
     "core:window:allow-set-focus",

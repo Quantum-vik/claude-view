@@ -55,6 +55,9 @@ interface SessionInfo {
   cwd: string;
   ended: boolean;
   is_terminal: boolean;
+  /** A session claude-view did not launch: read from its transcript, with no
+   *  process behind it. Derived backend-side from `pty.is_none()`. */
+  watched: boolean;
   state: AgentState;
   /** Bumped on every real transition. */
   state_seq: number;
@@ -131,6 +134,10 @@ interface Tab {
   vid: string;
   cwd: string;
   isTerminal: boolean;
+  /** No PTY behind it — the pane must not offer a terminal, a resize handle or
+   *  a dock. Carried here because an embedded pane has no window URL to read
+   *  `?watched=1` from. */
+  watched: boolean;
 }
 
 /** Session-pane split layouts (tmux-style, minus tmux): one pane, two columns,
@@ -421,6 +428,7 @@ const TabPane = memo(function TabPane({
   token,
   cwd,
   isTerminal,
+  watched,
   isVisible,
 }: {
   vid: string;
@@ -428,6 +436,8 @@ const TabPane = memo(function TabPane({
   token: string;
   cwd: string;
   isTerminal: boolean;
+  /** Read-only session: no PTY to attach to. See Tab.watched. */
+  watched: boolean;
   /** Whether this tab currently occupies a pane slot. Every tab shares one
    *  document, so `document.hasFocus()` can't tell a background tab apart —
    *  SessionWindow needs this to target completion notifications. */
@@ -436,7 +446,15 @@ const TabPane = memo(function TabPane({
   return isTerminal ? (
     <TerminalWindow vid={vid} port={port} token={token} cwd={cwd} embedded />
   ) : (
-    <SessionWindow vid={vid} port={port} token={token} cwd={cwd} embedded isVisible={isVisible} />
+    <SessionWindow
+      vid={vid}
+      port={port}
+      token={token}
+      cwd={cwd}
+      watched={watched}
+      embedded
+      isVisible={isVisible}
+    />
   );
 });
 
@@ -728,7 +746,9 @@ export default function Launcher() {
   // "Dock" button routes through the backend's cv:dock event).
   useEffect(() => {
     const un = listen<{ vid: string; cwd: string; isTerminal: boolean }>("cv:dock", (e) => {
-      openInPane(e.payload.vid, e.payload.cwd, e.payload.isTerminal);
+      // `watched: false` is a fact here, not a default: the Dock button only
+      // renders on a session with a PTY, so a watched one cannot emit cv:dock.
+      openInPane(e.payload.vid, e.payload.cwd, e.payload.isTerminal, false);
     });
     return () => {
       un.then((f) => f());
@@ -827,9 +847,9 @@ export default function Launcher() {
   }
 
   /** Add a session as a tab (or focus its existing tab). */
-  function openInPane(vid: string, cwd: string, isTerminal = false) {
+  function openInPane(vid: string, cwd: string, isTerminal = false, watched = false) {
     setTabs((prev) =>
-      prev.some((t) => t.vid === vid) ? prev : [...prev, { vid, cwd, isTerminal }]
+      prev.some((t) => t.vid === vid) ? prev : [...prev, { vid, cwd, isTerminal, watched }]
     );
     focusTab(vid);
   }
@@ -842,8 +862,14 @@ export default function Launcher() {
     restoredTabs.current = true;
     try {
       const saved = JSON.parse(localStorage.getItem(TABS_KEY) ?? "[]") as Tab[];
-      const known = new Set(sessions.map((s) => s.viewer_id));
-      const valid = saved.filter((t) => t && known.has(t.vid));
+      const known = new Map(sessions.map((s) => [s.viewer_id, s]));
+      // `watched` comes from the live listing, never from the stored tab: it is
+      // derived per boot from `pty.is_none()`, and a tab written by an older
+      // build has no such field at all.
+      const valid = saved.flatMap((t) => {
+        const live = t && known.get(t.vid);
+        return live ? [{ ...t, watched: live.watched }] : [];
+      });
       if (valid.length) {
         setTabs(valid);
         tabsRef.current = valid;
@@ -950,7 +976,7 @@ export default function Launcher() {
         skipPermissions: skipPermsRef.current,
       });
       if (embedMode) {
-        openInPane(info.viewer_id, info.cwd);
+        openInPane(info.viewer_id, info.cwd, false, info.watched);
       }
       await refreshSessions();
     } catch (err) {
@@ -974,7 +1000,7 @@ export default function Launcher() {
         kind,
         openWindow: !embedMode,
       });
-      if (embedMode) openInPane(info.viewer_id, info.cwd, true);
+      if (embedMode) openInPane(info.viewer_id, info.cwd, true, info.watched);
       await refreshSessions();
     } catch (err) {
       setNewSessionError(String(err));
@@ -1014,7 +1040,7 @@ export default function Launcher() {
 
   async function handleFocus(s: SessionInfo) {
     if (embedMode) {
-      openInPane(s.viewer_id, s.cwd, s.is_terminal);
+      openInPane(s.viewer_id, s.cwd, s.is_terminal, s.watched);
       return;
     }
     try {
@@ -2359,6 +2385,7 @@ export default function Launcher() {
                     token={conn.token}
                     cwd={t.cwd}
                     isTerminal={t.isTerminal}
+                    watched={t.watched}
                     isVisible={visible}
                   />
                 </div>

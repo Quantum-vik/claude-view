@@ -210,6 +210,9 @@ interface SessionWindowProps {
   port?: string;
   token?: string;
   cwd?: string;
+  /** Embedded panes have no window URL to carry `?watched=1`, so the launcher
+   *  passes the flag it already has from `SessionInfo.watched`. */
+  watched?: boolean;
   embedded?: boolean;
   /** Is this session the pane the user can actually see? In tab mode every
    *  session is mounted at once and the inactive ones are hidden with
@@ -229,7 +232,7 @@ export default function SessionWindow(props: SessionWindowProps = {}) {
   /** A session claude-view did not launch (#40): read from its transcript, with
    *  no process behind it. Read-only by construction — there is no PTY to type
    *  into or resize — exactly as an agent run's window already is. */
-  const watched = params.get("watched") === "1";
+  const watched = props.watched ?? params.get("watched") === "1";
   // A standalone window is always "the visible pane" — only the launcher's tab
   // mode has hidden-but-mounted sessions, and it passes this explicitly.
   const isVisible = props.isVisible ?? true;
@@ -970,8 +973,9 @@ export default function SessionWindow(props: SessionWindowProps = {}) {
         })}
 
         {/* Popped-out window only: move this session back into the main app
-            as a tab (closes this window; the PTY keeps running). */}
-        {!props.embedded && vid && (
+            as a tab (closes this window; the PTY keeps running). A watched
+            session has no PTY to keep running, so there is nothing to dock. */}
+        {!props.embedded && !watched && vid && (
           <button
             onClick={() => invoke("dock_session", { viewerId: vid }).catch(() => {})}
             title="Move this session back into the main app as a tab"
