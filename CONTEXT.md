@@ -23,6 +23,25 @@ The earlier turns a resumed session rewrites verbatim into its new record. The s
 turn existing in two places is a replay, not two turns, and must be counted once.
 _Avoid_: duplicate, copy
 
+**Hosted session**:
+A session claude-view launched itself. It has a process behind it, so it can be
+typed into, resized and closed.
+_Avoid_: our session, local session
+
+**Watched session**:
+A session claude-view did not launch — started in a terminal — shown read-only
+from its transcript. It has no process behind it, so there is nothing to type
+into and nothing to resize; read-only by construction, not by policy, exactly as
+an agent run's window already is.
+_Avoid_: attached, mirrored, remote session
+
+**Live**:
+Claimed only where it is known. A hosted session is live while its process runs.
+A watched session is live only as far as its transcript says so — a file that
+stopped growing may have ended, crashed, or be thinking. The panel says "no
+longer live", never "ended", because the second is not knowable from disk.
+_Avoid_: running, active, ended (for a watched session)
+
 ### Agents
 
 **Agent run**:
