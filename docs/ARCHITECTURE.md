@@ -4,6 +4,8 @@
 
 Version 1.6.0 · Rust 2021 + React 18 · ~11,300 lines of Rust across 14 modules, ~21,100 lines of TypeScript across 25 files, 162 Rust tests.
 
+> **[↗ Open the interactive system diagram](https://quantum-vik.github.io/claude-view/diagrams/architecture.html)** — pan, zoom, search, three guided views, PNG/SVG export. Its source spec is [`diagrams/architecture.spec.json`](diagrams/architecture.spec.json).
+
 | | |
 |---|---|
 | **[1. High-level design](#1-high-level-design)** | what the system is, why it is shaped this way, the three-layer model |
@@ -303,7 +305,11 @@ claude-view/
 ├─ packaging/                       .deb / .AppImage / two Arch PKGBUILDs / the bwrap wrapper
 ├─ prototypes/                      throwaway single-file HTML prototypes, rebuilt from your own corpus
 ├─ scripts/                         dev.sh · reinstall.sh (macOS) · demo-timeline.sh
-├─ docs/                            this file · agents/{issue-tracker,triage-labels,domain,handoff}.md
+├─ docs/                            published to GitHub Pages from this directory
+│  ├─ ARCHITECTURE.md               this file
+│  ├─ index.html                    the Pages landing page
+│  ├─ diagrams/architecture.html    the interactive diagram (+ .spec.json, + light/dark PNGs)
+│  └─ agents/                       issue-tracker · triage-labels · domain · handoff
 ├─ CONTEXT.md                       the domain glossary — run vs type, turn, baseline, notional cost
 ├─ AGENTS.md                        agent-facing index
 └─ justfile                         build · lint · test · ci · package  (CI runs `just ci`)
