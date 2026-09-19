@@ -25,6 +25,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { T, tint } from "./tokens";
+import { Button, EmptyState, EmptyLine, Stat } from "./ui";
 
 export interface ChangedFile {
   path: string;
@@ -138,23 +139,11 @@ function Absent({ why }: { why: string }) {
     body: ["claude-view couldn’t work out what this session changed."],
   };
   return (
-    <div style={{ maxWidth: "46ch", margin: "14vh auto", padding: "0 20px" }}>
-      <h2 style={{ font: `600 15px ${T.serif}`, color: T.text, margin: "0 0 8px" }}>{m.head}</h2>
+    <EmptyState head={m.head}>
       {m.body.map((p) => (
-        <p key={p} style={{ font: `13px/1.65 ${T.serif}`, color: T.textDim, margin: "0 0 10px" }}>
-          {p}
-        </p>
+        <EmptyLine key={p}>{p}</EmptyLine>
       ))}
-    </div>
-  );
-}
-
-function Stat({ add, rem }: { add: number; rem: number }) {
-  return (
-    <span style={{ fontFamily: T.mono, fontSize: 10.5, whiteSpace: "nowrap" }}>
-      <span style={{ color: T.success }}>+{add}</span>{" "}
-      <span style={{ color: T.error }}>−{rem}</span>
-    </span>
+    </EmptyState>
   );
 }
 
@@ -235,14 +224,9 @@ export default function Changes({ vid }: { vid: string }) {
   if (cs.unavailable) return <Absent why={cs.unavailable} />;
   if (!cs.files.length)
     return (
-      <div style={{ maxWidth: "46ch", margin: "14vh auto", padding: "0 20px" }}>
-        <h2 style={{ font: `600 15px ${T.serif}`, color: T.text, margin: "0 0 8px" }}>
-          This session changed no files
-        </h2>
-        <p style={{ font: `13px/1.65 ${T.serif}`, color: T.textDim, margin: 0 }}>
-          Nothing on disk differs from where it started, at {cs.baseline}.
-        </p>
-      </div>
+      <EmptyState head="This session changed no files">
+        <EmptyLine>Nothing on disk differs from where it started, at {cs.baseline}.</EmptyLine>
+      </EmptyState>
     );
 
   return (
@@ -414,21 +398,7 @@ function DiffBody({
         <div style={{ color: T.textDim, font: `13px ${T.serif}`, marginBottom: 8 }}>
           {churnOf(file).toLocaleString()} changed lines, collapsed so it doesn’t bury the rest.
         </div>
-        <button
-          onClick={onExpand}
-          style={{
-            background: T.surface2,
-            border: `1px solid ${T.borderStrong}`,
-            borderRadius: 6,
-            color: T.text,
-            cursor: "pointer",
-            fontFamily: T.mono,
-            fontSize: 11.5,
-            padding: "4px 10px",
-          }}
-        >
-          Show the diff
-        </button>
+        <Button onClick={onExpand}>Show the diff</Button>
       </div>
     );
 

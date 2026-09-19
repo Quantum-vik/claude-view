@@ -6,6 +6,7 @@ import SessionWindow from "./SessionWindow";
 import TerminalWindow from "./TerminalWindow";
 import { DragHandle, clamp } from "./Resizer";
 import { T, tint } from "./tokens";
+import { Button } from "./ui";
 import ContextMeter from "./ContextMeter";
 import ThemeMenu from "./ThemeMenu";
 import Spend from "./Spend";
@@ -434,12 +435,14 @@ function SectionRow({
       }}
     >
       {collapsible && (
-        <span
+        <Button
+          variant="link"
           onClick={onToggle}
-          style={{ color: T.textFaint, fontSize: 9, cursor: "pointer", userSelect: "none" }}
+          aria-label={open ? "Collapse section" : "Expand section"}
+          style={{ color: T.textFaint, fontSize: 9, userSelect: "none" }}
         >
           {open ? "▼" : "▶"}
-        </span>
+        </Button>
       )}
       <h2
         onClick={onToggle}
@@ -1481,22 +1484,22 @@ export default function Launcher() {
               outline: "none",
             }}
           />
-          <span
+          <Button
+            variant="link"
             onClick={() => searchRef.current?.focus()}
+            aria-label="Search sessions"
             style={{
-              fontFamily: T.mono,
               fontSize: 10,
               color: T.textFaint,
               border: `1px solid ${T.border}`,
               borderRadius: 5,
               padding: "2px 6px",
-              cursor: "pointer",
               flexShrink: 0,
               whiteSpace: "nowrap",
             }}
           >
             ⌘K
-          </span>
+          </Button>
         </div>
 
         {/* Active now */}
@@ -2101,17 +2104,19 @@ export default function Launcher() {
                     )}
                     {name}
                   </span>
-                  <span
+                  <Button
+                    variant="link"
                     onClick={(e) => {
                       e.stopPropagation();
                       closeTab(t.vid);
                     }}
                     onPointerDown={(e) => e.stopPropagation()}
                     title="Close tab (session keeps running) — ⌘W"
-                    style={{ color: T.textFaint, fontSize: 12, padding: "0 2px", cursor: "pointer" }}
+                    aria-label="Close tab"
+                    style={{ color: T.textFaint, fontSize: 12, padding: "0 2px" }}
                   >
                     ✕
-                  </span>
+                  </Button>
                 </div>
               );
             })}

@@ -28,6 +28,7 @@ import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useStat
 import { invoke } from "@tauri-apps/api/core";
 import { save } from "@tauri-apps/plugin-dialog";
 import { T, tint, toolFamily } from "./tokens";
+import { Button, Stat } from "./ui";
 import type { ChangeSet, CommitSpan } from "./Changes";
 import { useRoster } from "./Agents";
 import type { TimelineEvent } from "./events";
@@ -666,22 +667,9 @@ export default function Trace({
         }}
       >
         {tabs.map(([f, label]) => (
-          <span
-            key={f}
-            onClick={() => setFilter(f)}
-            style={{
-              fontSize: 11,
-              padding: "3px 9px",
-              borderRadius: 999,
-              cursor: "pointer",
-              fontFamily: T.mono,
-              color: filter === f ? T.accent : T.textDim,
-              background: filter === f ? tint(T.accent, 0.15) : "transparent",
-              border: `1px solid ${filter === f ? T.borderAccent : "transparent"}`,
-            }}
-          >
+          <Button key={f} variant="chip" on={filter === f} onClick={() => setFilter(f)}>
             {label}
-          </span>
+          </Button>
         ))}
         {agentScope && !scopeLocked && (
           <span
@@ -922,8 +910,7 @@ function TurnChanges({ spans }: { spans: CommitSpan[] }) {
       <span>
         {n} file{n === 1 ? "" : "s"}
       </span>
-      <span style={{ color: T.success }}>+{add}</span>
-      <span style={{ color: T.error }}>−{rem}</span>
+      <Stat add={add} rem={rem} />
     </span>
   );
 }

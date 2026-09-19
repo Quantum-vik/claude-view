@@ -18,6 +18,7 @@
 import { useCallback, useEffect, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { T, tint } from "./tokens";
+import { Button } from "./ui";
 import { formatUsd, totalTokens, type TokenUsage } from "./cost";
 import { CAVEAT, costOfTurn } from "./pricing";
 
@@ -303,12 +304,9 @@ export default function Spend() {
               </>
             )}
             <br />
-            <span
-              onClick={() => void load()}
-              style={{ cursor: "pointer", color: T.accent }}
-            >
+            <Button variant="link" onClick={() => void load()}>
               {busy ? "rescanning…" : "↻ rescan"}
-            </span>
+            </Button>
           </div>
         </div>
       )}

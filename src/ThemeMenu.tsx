@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { T } from "./tokens";
+import { Button } from "./ui";
 import {
   allThemes,
   currentTheme,
@@ -250,16 +251,18 @@ function ThemeRow({
       </span>
       {active && <span style={{ color: T.accent, fontSize: 11, flexShrink: 0 }}>✓</span>}
       {onRemove && (
-        <span
+        <Button
+          variant="link"
           onClick={(e) => {
             e.stopPropagation();
             onRemove();
           }}
           title="Remove imported theme"
-          style={{ color: T.textFaint, fontSize: 11, padding: "0 2px", cursor: "pointer" }}
+          aria-label="Remove imported theme"
+          style={{ color: T.textFaint, fontSize: 11, padding: "0 2px" }}
         >
           ✕
-        </span>
+        </Button>
       )}
     </div>
   );
