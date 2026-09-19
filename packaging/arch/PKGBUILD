@@ -21,8 +21,10 @@ optdepends=('claude-code: the CLI this app launches and mirrors')
 makedepends=('rust' 'cargo' 'nodejs' 'npm' 'pkgconf')
 options=('!strip' '!debug')
 
-# Built from the working tree, not a released tarball: this repo is private.
-# Swap to a source=() entry pointing at a release tag when it goes public.
+# Built from the working tree, not a released tarball. This predates the repo
+# going public; the tree-build still works and is what the release script uses,
+# so it stays. Switching to a source=() entry pointing at a release tag is now
+# possible and would make this PKGBUILD reproducible from a clean checkout.
 _srcdir="$(cd "$startdir/../.." && pwd)"
 
 build() {
