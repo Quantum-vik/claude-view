@@ -277,6 +277,34 @@ fn scan_tail(path: &Path) -> (Option<u64>, Option<String>) {
     (context, model)
 }
 
+/// Text between two markers, or `None` if either is missing.
+fn between<'a>(hay: &'a str, open: &str, close: &str) -> Option<&'a str> {
+    let start = hay.find(open)? + open.len();
+    let end = hay[start..].find(close)? + start;
+    Some(hay[start..end].trim())
+}
+
+/// A slash command IS the prompt, so label the session with it.
+///
+/// The harness writes an invocation as a block of `<command-*>` tags, which the
+/// generic skip-anything-starting-with-`<` rule discards as injected chrome. For
+/// a session whose first prompt was `/wayfinder …` that threw away the only
+/// label in reach and the session vanished from the launcher entirely — worst
+/// for the long, heavily-resumed sessions most worth finding again.
+fn slash_command_label(text: &str) -> Option<String> {
+    let name = between(text, "<command-name>", "</command-name>")?;
+    if name.is_empty() {
+        return None;
+    }
+    let args = between(text, "<command-args>", "</command-args>").unwrap_or("");
+    let label = if args.is_empty() {
+        name.to_string()
+    } else {
+        format!("{name} {args}")
+    };
+    Some(truncate(&label, 140))
+}
+
 fn extract_user_text(v: &Value) -> Option<String> {
     if v["type"] != "user" || v["isMeta"].as_bool().unwrap_or(false) {
         return None;
@@ -292,9 +320,13 @@ fn extract_user_text(v: &Value) -> Option<String> {
         _ => None,
     }?;
     let text = text.trim();
-    // Skip harness-injected content (slash-command markers, caveat banners).
-    if text.is_empty() || text.starts_with('<') || text.starts_with("Caveat:") {
+    if text.is_empty() || text.starts_with("Caveat:") {
         return None;
+    }
+    // Harness-injected blocks start with a tag. A slash command is one of them
+    // and is worth reading; the rest (stdout echoes, reminders) are not.
+    if text.starts_with('<') {
+        return slash_command_label(text);
     }
     Some(truncate(text, 140))
 }
@@ -309,6 +341,34 @@ fn truncate(s: &str, max_chars: usize) -> String {
 
 #[cfg(test)]
 mod tests {
+
+    /// A 38 MB session vanished from the launcher because its first prompt was
+    /// `/wayfinder …`, written by the harness as `<command-*>` tags and thrown
+    /// away by the skip-anything-in-angle-brackets rule.
+    #[test]
+    fn a_slash_command_is_a_prompt_not_chrome() {
+        let raw = "<command-message>wayfinder</command-message>\n\
+                   <command-name>/wayfinder</command-name>\n\
+                   <command-args>improve trace and costing</command-args>";
+        assert_eq!(
+            slash_command_label(raw).as_deref(),
+            Some("/wayfinder improve trace and costing")
+        );
+    }
+
+    #[test]
+    fn a_slash_command_with_no_arguments_still_labels_the_session() {
+        let raw = "<command-name>/compact</command-name>\n<command-args></command-args>";
+        assert_eq!(slash_command_label(raw).as_deref(), Some("/compact"));
+    }
+
+    /// Everything else in angle brackets is genuinely chrome and stays hidden.
+    #[test]
+    fn other_injected_blocks_are_still_skipped() {
+        assert_eq!(slash_command_label("<local-command-stdout>ok</local-command-stdout>"), None);
+        assert_eq!(slash_command_label("<system-reminder>be good</system-reminder>"), None);
+        assert_eq!(slash_command_label("<command-name></command-name>"), None);
+    }
 
     /// Opt-in: `CV_DUMP_SESSIONS=1 cargo test dump_sessions -- --nocapture`.
     /// Counts what the launcher shows against what is on disk.
@@ -338,6 +398,13 @@ mod tests {
         eprintln!("distinct cwds shown: {}", dirs_shown.len());
         for c in dirs_shown.iter().take(12) {
             eprintln!("  {c}");
+        }
+        for x in shown.iter().take(6) {
+            eprintln!(
+                "  id={} preview={:?}",
+                &x.session_id[..8],
+                x.preview.as_deref().map(|p| &p[..p.len().min(40)])
+            );
         }
         assert!(
             !shown.iter().any(|s| is_scratch(&s.cwd)),
