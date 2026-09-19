@@ -6,6 +6,7 @@ mod agents;
 mod export;
 mod git;
 mod hooks_install;
+mod liveness;
 mod instance;
 mod past_sessions;
 mod pty;
@@ -425,6 +426,90 @@ fn read_agents(state: State<'_, AppState>, viewer_id: String) -> Result<serde_js
 /// Separate from `read_trace` for the same reason `read_agents` is: the trace is
 /// paged and positional, a change set is whole-session and keyed by path. It is
 /// also computed on demand rather than polled — a diff is reviewed, not watched.
+/// Watch a session claude-view did not launch (#40).
+///
+/// Read-only by construction: the registry entry has no PTY, so there is nothing
+/// to type into and nothing to resize. Every other command — the trace, the
+/// roster, the change set, cost — already works from `cwd` and `session_id`, so
+/// this adds an entry point rather than a second code path.
+///
+/// Hooks never arrive from such a session (#41), so it is discovered from disk
+/// and its liveness is read from the transcript.
+#[tauri::command]
+fn watch_session(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    cwd: String,
+    session_id: String,
+    open_window: Option<bool>,
+) -> Result<SessionInfo, String> {
+    let path = crate::trace::locate_for(&cwd, Some(&session_id), 0)
+        .ok_or_else(|| "no transcript for that session".to_string())?;
+
+    // The session's own start, not now. `spawned_at` is what the tailer pages
+    // from and what the change set derives its baseline from, so stamping it
+    // with the moment Watch was clicked would claim the session began then.
+    let meta = std::fs::metadata(&path).map_err(|e| format!("unreadable transcript: {e}"))?;
+    let started_at = meta
+        .created()
+        .or_else(|_| meta.modified())
+        .ok()
+        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or_else(crate::session::now_ms);
+
+    let vid = uuid::Uuid::new_v4().to_string();
+    let session = std::sync::Arc::new(crate::session::Session::watched(
+        vid.clone(),
+        cwd.clone(),
+        session_id,
+        started_at,
+    ));
+    state.registry.insert(session.clone());
+
+    if open_window.unwrap_or(true) {
+        let url = format!(
+            "index.html?vid={}&port={}&token={}&cwd={}&watched=1",
+            vid,
+            state.port,
+            state.token,
+            urlencoding::encode(&cwd)
+        );
+        WebviewWindowBuilder::new(&app, format!("session-{vid}"), WebviewUrl::App(url.into()))
+            .title(format!("Watching — {cwd}"))
+            .inner_size(1160.0, 740.0)
+            .build()
+            .map_err(|e| format!("failed to open window: {e}"))?;
+    }
+    Ok(session.info())
+}
+
+/// Whether a watched session is still going, read from its transcript.
+///
+/// Polled by the window rather than pushed, because nothing pushes: there is no
+/// process to report an exit and no hooks to report a turn (#41).
+#[tauri::command]
+fn session_liveness(
+    state: State<'_, AppState>,
+    viewer_id: String,
+) -> Result<serde_json::Value, String> {
+    let session = state
+        .registry
+        .get(&viewer_id)
+        .ok_or_else(|| "no such session".to_string())?;
+    let sid = session.session_id.read().clone();
+    let path = crate::trace::locate_for(&session.cwd, sid.as_deref(), session.spawned_at)
+        .ok_or_else(|| "no transcript".to_string())?;
+    let mtime = std::fs::metadata(&path)
+        .and_then(|m| m.modified())
+        .ok()
+        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0);
+    let state_ = crate::liveness::probe(&path, mtime, crate::session::now_ms());
+    serde_json::to_value(state_).map_err(|e| e.to_string())
+}
+
 #[tauri::command]
 fn read_changes(state: State<'_, AppState>, viewer_id: String) -> Result<serde_json::Value, String> {
     let session = state
@@ -885,6 +970,8 @@ fn main() {
             read_trace,
             read_agents,
             read_changes,
+            watch_session,
+            session_liveness,
             read_patch,
             open_agent_window,
             export_trace,

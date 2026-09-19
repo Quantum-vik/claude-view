@@ -292,7 +292,13 @@ async fn handle_ws(socket: WebSocket, session: Arc<Session>) {
     // would need, and the subscribe happens first, so an event can only be
     // duplicated (snapshot + broadcast) — never lost. The client upserts by id,
     // so a duplicate is idempotent.
-    let mut bytes_rx = session.bytes_tx.subscribe();
+    // A watched session has no PTY, so there are no raw bytes to relay — only
+    // control frames. Subscribing to a dummy channel keeps the select! loop
+    // below one shape instead of two.
+    let mut bytes_rx = match &session.pty {
+        Some(pty) => pty.bytes_tx.subscribe(),
+        None => tokio::sync::broadcast::channel::<Vec<u8>>(1).0.subscribe(),
+    };
     let mut control_rx = session.control_tx.subscribe();
 
     // Replay state: scrollback bytes, timeline snapshot, binding, ended flag.
