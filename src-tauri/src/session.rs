@@ -90,13 +90,9 @@ pub struct TimelineEvent {
     pub agent_id: Option<String>,
 }
 
-pub struct Session {
-    pub viewer_id: String,
-    pub cwd: String,
-    /// When the PTY was spawned (epoch ms) — used to locate this session's
-    /// transcript file among all projects.
-    pub spawned_at: u64,
-    pub session_id: RwLock<Option<String>>,
+/// The live half of a session: everything that exists only because a process is
+/// running. Absent for a watched session.
+pub struct Pty {
     /// Keystrokes from viewers go here; a dedicated writer thread owns the PTY
     /// writer and drains this channel, so blocking PTY writes never run on the
     /// async runtime.
@@ -107,6 +103,25 @@ pub struct Session {
     pub killer: Mutex<Option<Box<dyn ChildKiller + Send + Sync>>>,
     /// Raw PTY output fan-out to all connected viewers (binary WS frames).
     pub bytes_tx: broadcast::Sender<Vec<u8>>,
+}
+
+pub struct Session {
+    pub viewer_id: String,
+    pub cwd: String,
+    /// When the PTY was spawned (epoch ms) — used to locate this session's
+    /// transcript file among all projects.
+    pub spawned_at: u64,
+    pub session_id: RwLock<Option<String>>,
+    /// The process behind this session, when there is one.
+    ///
+    /// `None` for a **watched** session: one claude-view did not launch, read
+    /// from its transcript on disk (#40). Grouping the four PTY handles into one
+    /// option makes a half-attached session unrepresentable — there is one place
+    /// to ask whether a process exists, rather than four fields that could
+    /// disagree — and it keeps the answer out of `SessionInfo`, where
+    /// `is_terminal` has already taught this codebase what a spreading flag
+    /// costs.
+    pub pty: Option<Pty>,
     /// Control/timeline fan-out (text WS frames, JSON strings).
     pub control_tx: broadcast::Sender<String>,
     pub scrollback: Mutex<Vec<u8>>,
@@ -291,6 +306,53 @@ pub struct ContextUsage {
 }
 
 impl Session {
+    /// A **watched** session: one claude-view did not launch, read from its
+    /// transcript on disk (#40).
+    ///
+    /// It carries no process, so `pty` is `None` and everything that needs one
+    /// refuses quietly. Everything else — the trace, the roster, the change set,
+    /// cost — already works from `cwd` and `session_id`, which is why this costs
+    /// a constructor rather than a second code path.
+    ///
+    /// `spawned_at` is the transcript's own start, not now: it is what the
+    /// tailer pages from and what `changes` derives a baseline from, so
+    /// stamping it with the moment the user clicked Watch would silently claim
+    /// the session began then.
+    pub fn watched(viewer_id: String, cwd: String, session_id: String, started_at: u64) -> Self {
+        let (control_tx, _) = tokio::sync::broadcast::channel::<String>(256);
+        let cwd_for_repo = cwd.clone();
+        Self {
+            viewer_id,
+            cwd,
+            spawned_at: started_at,
+            session_id: RwLock::new(Some(session_id)),
+            pty: None,
+            control_tx,
+            scrollback: Mutex::new(Vec::new()),
+            timeline: Mutex::new(Vec::new()),
+            model: RwLock::new(None),
+            usage: RwLock::new(None),
+            ledger: Mutex::new(UsageLedger::default()),
+            // Same resolution the spawn path does, so a watched session groups
+            // under its repo in the launcher exactly like a hosted one.
+            repo: crate::git::discover(std::path::Path::new(&cwd_for_repo)),
+            is_terminal: false,
+            // Not ours to claim either way: the flag describes how a session was
+            // launched, and this one was launched elsewhere.
+            skip_permissions: false,
+            ended: Default::default(),
+            exit_code: RwLock::new(None),
+            // Hooks never arrive for a session claude-view did not launch (#41),
+            // so the hook-derived state stays Unknown for life. Liveness comes
+            // from the transcript instead — see `crate::liveness`.
+            state: RwLock::new(AgentState::Unknown),
+            screen_blocked: RwLock::new(None),
+            state_since: std::sync::atomic::AtomicU64::new(started_at),
+            state_seq: Default::default(),
+            last_state_ts: Default::default(),
+            timeline_elided: Default::default(),
+        }
+    }
     /// Merge a tool event parsed from the transcript into the timeline. Deduped
     /// by tool-use id, so hook-derived cards (which use the same ids and arrive
     /// live) take precedence and transcript records only fill gaps. Returns the
@@ -351,11 +413,22 @@ impl Session {
     }
 
     /// Queue keystrokes for the PTY writer thread. Non-blocking; a dead
-    /// session (writer thread gone) drops the input silently.
+    /// session (writer thread gone) drops the input silently — and so does a
+    /// watched one, which has no process to type into. Same outcome, so no new
+    /// failure mode is invented for it.
     pub fn write_input(&self, data: Vec<u8>) {
-        if !self.is_ended() {
-            let _ = self.writer_tx.send(data);
+        if self.is_ended() {
+            return;
         }
+        if let Some(pty) = &self.pty {
+            let _ = pty.writer_tx.send(data);
+        }
+    }
+
+    /// Whether claude-view launched this session. A watched session is read by
+    /// construction, not by policy — there is no process to type into.
+    pub fn is_watched(&self) -> bool {
+        self.pty.is_none()
     }
 
     pub fn push_bytes(&self, chunk: &[u8]) {
@@ -375,7 +448,9 @@ impl Session {
                 sb.drain(..cut);
             }
         }
-        let _ = self.bytes_tx.send(chunk.to_vec());
+        if let Some(pty) = &self.pty {
+            let _ = pty.bytes_tx.send(chunk.to_vec());
+        }
     }
 
     /// Record a state transition reported by a hook.
@@ -522,7 +597,10 @@ impl Session {
 
     /// Terminate the child process (best effort). Used on app shutdown.
     pub fn kill(&self) {
-        if let Some(killer) = self.killer.lock().as_mut() {
+        let Some(pty) = &self.pty else {
+            return; // watched: nothing of ours is running
+        };
+        if let Some(killer) = pty.killer.lock().as_mut() {
             let _ = killer.kill();
         }
     }
@@ -544,6 +622,7 @@ impl Session {
             cwd: self.cwd.clone(),
             ended: self.is_ended(),
             is_terminal: self.is_terminal,
+            watched: self.is_watched(),
             skip_permissions: self.skip_permissions,
             state: merge_state(hook, screen.as_deref(), self.is_terminal),
             blocked_kind: screen.filter(|_| !self.is_terminal),
@@ -645,6 +724,14 @@ pub struct SessionInfo {
     pub cwd: String,
     pub ended: bool,
     pub is_terminal: bool,
+    /// `true` when claude-view did **not** launch this session — it is read from
+    /// a transcript on disk, with no process behind it (#40).
+    ///
+    /// Derived from `pty.is_none()` rather than stored, so it cannot fall out of
+    /// step with the thing it describes. The launcher decides where to draw such
+    /// a session; *Active now* means "claude-view is running this", and that
+    /// promise is kept in the UI rather than by hiding these from the registry.
+    pub watched: bool,
     /// `true` when this session was launched with
     /// `--dangerously-skip-permissions` — Claude runs every tool without asking
     /// for approval, so no permission prompt will ever appear in it. The
@@ -761,6 +848,48 @@ pub fn now_ms() -> u64 {
 
 #[cfg(test)]
 mod tests {
+
+    /// A watched session has no process, and every call that would need one must
+    /// do nothing rather than panic or invent a new failure mode. This is
+    /// defence against a bug, not a user path — a watched window has no terminal
+    /// to type into.
+    #[test]
+    fn pty_only_calls_are_harmless_on_a_watched_session() {
+        let s = Session::watched(
+            "v1".into(),
+            std::env::temp_dir().to_string_lossy().into_owned(),
+            "sid-1".into(),
+            1_000,
+        );
+        assert!(s.is_watched());
+        assert!(s.info().watched, "the flag is derived, so it cannot disagree");
+
+        // None of these have anything to act on; none may panic.
+        s.write_input(b"rm -rf /\n".to_vec());
+        s.kill();
+        crate::pty::resize(&s, 120, 40);
+        s.push_bytes(b"output that has nowhere to go");
+    }
+
+    /// `spawned_at` is the session's own start, not the moment Watch was
+    /// clicked: the tailer pages from it and the change set derives a baseline
+    /// from it, so a wrong value silently claims the session began then.
+    #[test]
+    fn a_watched_session_keeps_the_transcripts_start_time() {
+        let started = 1_700_000_000_000;
+        let s = Session::watched("v2".into(), "/tmp".into(), "sid-2".into(), started);
+        assert_eq!(s.spawned_at, started);
+        assert_eq!(s.session_id.read().as_deref(), Some("sid-2"));
+    }
+
+    /// Hooks never arrive from a session claude-view did not launch (#41), so a
+    /// hook-derived state would be a lie. Liveness comes from the transcript.
+    #[test]
+    fn a_watched_session_reports_no_hook_state() {
+        let s = Session::watched("v3".into(), "/tmp".into(), "sid-3".into(), 1);
+        assert_eq!(s.info().state, AgentState::Unknown);
+        assert!(!s.info().skip_permissions, "not ours to claim either way");
+    }
     use crate::transcript::TokenUsage as TU;
 
     fn tu(input: u64, cache_read: u64, output: u64) -> TU {
@@ -976,6 +1105,7 @@ mod tests {
             cwd: "/tmp".into(),
             ended: false,
             is_terminal: false,
+            watched: false,
             skip_permissions: true,
             state: merge_state(AgentState::Idle, Some("trust"), false),
             blocked_kind: Some("trust".into()),
@@ -1012,6 +1142,7 @@ mod tests {
             cwd: "/tmp".into(),
             ended: false,
             is_terminal: false,
+            watched: false,
             skip_permissions: true,
             state: AgentState::Idle,
             blocked_kind: None,

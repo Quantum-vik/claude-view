@@ -1,4 +1,4 @@
-import { memo, useEffect, useMemo, useRef, useState, useCallback } from "react";
+import { memo, useEffect, useMemo, useRef, useState, useCallback, Fragment } from "react";
 import { open } from "@tauri-apps/plugin-dialog";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
@@ -89,6 +89,37 @@ interface PastSession {
   repoName?: string | null;
   checkoutName?: string | null;
   isLinkedWorktree?: boolean;
+  /** Whether the session looks like it is still running, read from its
+   *  transcript (#44). Optional so an older backend degrades to "not live"
+   *  rather than throwing. */
+  liveness?: { state: "live" | "guessed" | "idle" | "no_longer_live"; tool?: string };
+}
+
+/** A session that may still be running elsewhere — the only rows where Resume
+ *  is dangerous, because it starts a SECOND Claude from the same transcript. */
+function mightBeRunning(s: PastSession): boolean {
+  return s.liveness?.state === "live" || s.liveness?.state === "guessed";
+}
+
+/** Live and Live? must differ in WORD, not shade: disk-derived liveness is
+ *  always a guess, and an early prototype that separated them by opacity alone
+ *  was invisible (#43). */
+function livenessChip(s: PastSession): { label: string; tone: string; why: string } | null {
+  const l = s.liveness;
+  if (!l) return null;
+  if (l.state === "live")
+    return {
+      label: "Live",
+      tone: T.success,
+      why: l.tool ? `Running ${l.tool} right now` : "Writing right now",
+    };
+  if (l.state === "guessed")
+    return {
+      label: "Live?",
+      tone: T.running,
+      why: "Guessed from the transcript — claude-view did not start this session, so it receives no hooks from it",
+    };
+  return null;
 }
 
 interface ConnInfo {
@@ -962,6 +993,25 @@ export default function Launcher() {
     await launch(s.cwd, s.session_id);
   }
 
+  /** Open a read-only window onto a session claude-view did not launch.
+   *
+   *  Deliberately NOT `handleResume`: resuming starts a second Claude from the
+   *  same transcript, which on a running session is destructive of what the
+   *  user meant (#43). */
+  async function handleWatch(s: PastSession) {
+    setNewSessionError(null);
+    try {
+      await invoke<SessionInfo>("watch_session", {
+        cwd: s.cwd,
+        sessionId: s.session_id,
+        openWindow: !embedMode,
+      });
+      await refreshSessions();
+    } catch (err) {
+      setNewSessionError(String(err));
+    }
+  }
+
   async function handleFocus(s: SessionInfo) {
     if (embedMode) {
       openInPane(s.viewer_id, s.cwd, s.is_terminal);
@@ -1654,7 +1704,15 @@ export default function Launcher() {
                     // checkout they came from when a group spans more than one.
                     const mixed = list.some((s) => s.cwd !== dir);
                     const shown = Math.min(pageCounts[key] ?? PAGE_SIZE, list.length);
-                    const visible = list.slice(0, shown);
+                    // A session that may still be running sorts to the top of
+                    // its OWN group. It is never lifted into a group of its own:
+                    // that is what made one repo appear twice in the prototype.
+                    const ordered = list.some(mightBeRunning)
+                      ? [...list].sort(
+                          (a, b) => Number(mightBeRunning(b)) - Number(mightBeRunning(a)),
+                        )
+                      : list;
+                    const visible = ordered.slice(0, shown);
                     const dirOpen = !collapsedSections.has("dir:" + key);
                     return (
                       <div key={key}>
@@ -1789,11 +1847,20 @@ export default function Launcher() {
                               }}
                             >
                               {visible.map((s) => (
+                                <Fragment key={s.session_id}>
                                 <div
                                   key={s.session_id}
                                   className="cv-line"
-                                  onClick={() => handleResume(s)}
-                                  title="Resume this session"
+                                  // A running session must not be forked by a
+                                  // stray click on its row (#43).
+                                  onClick={() =>
+                                    mightBeRunning(s) ? void handleWatch(s) : void handleResume(s)
+                                  }
+                                  title={
+                                    mightBeRunning(s)
+                                      ? "Watch this session — read-only, no second Claude"
+                                      : "Resume this session"
+                                  }
                                   style={pastRowStyle}
                                 >
                                   <span
@@ -1809,6 +1876,26 @@ export default function Launcher() {
                                   >
                                     {s.preview}
                                   </span>
+                                  {(() => {
+                                    const chip = livenessChip(s);
+                                    if (!chip) return null;
+                                    return (
+                                      <span
+                                        title={chip.why}
+                                        style={{
+                                          fontSize: 10,
+                                          padding: "1px 7px",
+                                          borderRadius: 999,
+                                          flexShrink: 0,
+                                          color: chip.tone,
+                                          border: `1px solid ${tint(chip.tone, 0.45)}`,
+                                          background: tint(chip.tone, 0.1),
+                                        }}
+                                      >
+                                        {chip.label}
+                                      </span>
+                                    );
+                                  })()}
                                   {/* Which worktree this came from — only when the
                                       repo group actually spans more than one. */}
                                   {mixed && !narrow && (
@@ -1848,12 +1935,46 @@ export default function Launcher() {
                                   >
                                     {relativeTime(s.modifiedMs)}
                                   </span>
+                                  {/* Watch leads on a session that might still be
+                                      running; Resume is demoted to quiet, because
+                                      there it forks a second Claude (#43). */}
+                                  {mightBeRunning(s) && (
+                                    <button
+                                      onClick={(e) => {
+                                        e.stopPropagation();
+                                        void handleWatch(s);
+                                      }}
+                                      style={{
+                                        ...resumeRowBtnStyle,
+                                        background: T.accent,
+                                        color: T.accentInk,
+                                        border: "none",
+                                        fontWeight: 600,
+                                      }}
+                                    >
+                                      Watch
+                                    </button>
+                                  )}
                                   <button
                                     onClick={(e) => {
                                       e.stopPropagation();
                                       handleResume(s);
                                     }}
-                                    style={resumeRowBtnStyle}
+                                    title={
+                                      mightBeRunning(s)
+                                        ? "Starts a SECOND Claude from this transcript"
+                                        : "Resume this session"
+                                    }
+                                    style={
+                                      mightBeRunning(s)
+                                        ? {
+                                            ...resumeRowBtnStyle,
+                                            background: "transparent",
+                                            border: "1px solid transparent",
+                                            color: T.textFaint,
+                                          }
+                                        : resumeRowBtnStyle
+                                    }
                                   >
                                     Resume
                                   </button>
@@ -1883,6 +2004,30 @@ export default function Launcher() {
                                     {armedDelete === s.session_id ? "Delete?" : "✕"}
                                   </button>
                                 </div>
+                                {/* Directly under the row it is about, and only
+                                    for a session that might still be running —
+                                    on every row it would be wallpaper (#43). */}
+                                {mightBeRunning(s) && (
+                                  <div
+                                    style={{
+                                      margin: "2px 0 8px",
+                                      padding: "7px 10px",
+                                      borderRadius: 6,
+                                      fontSize: 11.5,
+                                      lineHeight: 1.5,
+                                      color: T.textDim,
+                                      background: tint(T.error, 0.1),
+                                      border: `1px solid ${tint(T.error, 0.35)}`,
+                                    }}
+                                  >
+                                    <b style={{ color: T.error, fontWeight: 600 }}>
+                                      Resume is not Watch.
+                                    </b>{" "}
+                                    Resuming starts a <b>second</b> Claude from this transcript,
+                                    running alongside the one in your terminal. Watch only reads.
+                                  </div>
+                                )}
+                                </Fragment>
                               ))}
                             </div>
                             {list.length > shown ? (

@@ -219,10 +219,12 @@ fn spawn_in_pty(
         cwd,
         spawned_at,
         session_id: RwLock::new(seed_session_id),
-        writer_tx,
-        master: Mutex::new(pair.master),
-        killer: Mutex::new(Some(killer)),
-        bytes_tx,
+        pty: Some(crate::session::Pty {
+            writer_tx,
+            master: Mutex::new(pair.master),
+            killer: Mutex::new(Some(killer)),
+            bytes_tx,
+        }),
         control_tx,
         scrollback: Mutex::new(Vec::new()),
         timeline: Mutex::new(Vec::new()),
@@ -283,7 +285,9 @@ fn spawn_in_pty(
             .map(|status| status.exit_code() as i64)
             .unwrap_or(-1);
         // Child is reaped — drop the killer so we never signal a recycled pid.
-        *wait_session.killer.lock() = None;
+        if let Some(pty) = &wait_session.pty {
+            *pty.killer.lock() = None;
+        }
         wait_session.mark_ended(code);
     });
 
@@ -510,8 +514,13 @@ pub fn spawn_terminal(
     spawn_in_pty(registry, viewer_id, cwd, cmd, None, true, false)
 }
 
+/// Resize the PTY. A watched session has none, so this is a no-op rather than
+/// an error: the window that would call it has no terminal pane to resize.
 pub fn resize(session: &Session, cols: u16, rows: u16) {
-    let _ = session.master.lock().resize(PtySize {
+    let Some(pty) = &session.pty else {
+        return;
+    };
+    let _ = pty.master.lock().resize(PtySize {
         rows,
         cols,
         pixel_width: 0,

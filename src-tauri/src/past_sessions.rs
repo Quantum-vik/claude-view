@@ -24,6 +24,12 @@ pub struct PastSession {
     /// assistant turn). None if no usage found in the tail.
     #[serde(rename = "contextTokens")]
     pub context_tokens: Option<u64>,
+    /// Whether this session looks like it is still running, read from its
+    /// transcript (#44). Only probed for files written recently: a tail read is
+    /// ~400 KB, and a launcher scan covers every transcript on the machine, so
+    /// probing all of them would cost megabytes a poll for an answer that is
+    /// `NoLongerLive` on all but one or two.
+    pub liveness: crate::liveness::Liveness,
     /// Grouping key: the repo's git *common* dir, shared by a checkout and all
     /// of its linked worktrees, so four worktrees of one repo collapse into one
     /// launcher group. `None` when the cwd is gone from disk (routine for a past
@@ -97,6 +103,9 @@ pub fn list() -> Result<Vec<PastSession>, String> {
         .join("projects");
     let mut out = Vec::new();
     let mut repos: RepoCache = HashMap::new();
+    // One clock for the whole scan, so two sessions cannot be judged against
+    // different "now"s and sort inconsistently.
+    let now = crate::session::now_ms();
     let Ok(project_dirs) = fs::read_dir(&projects) else {
         return Ok(out); // no projects dir -> no sessions
     };
@@ -140,6 +149,7 @@ pub fn list() -> Result<Vec<PastSession>, String> {
             // the tail model for both the chip and the meter's window, since a
             // session may have switched models (e.g. fable → opus).
             let (context_tokens, tail_model) = scan_tail(&path);
+            let liveness = crate::liveness::probe_recent(&path, modified_ms, now);
             let repo = repo_ident(&cwd, &mut repos);
             out.push(PastSession {
                 session_id: stem.to_string(),
@@ -148,6 +158,7 @@ pub fn list() -> Result<Vec<PastSession>, String> {
                 preview,
                 model: tail_model.or(head_model),
                 context_tokens,
+                liveness,
                 // No `branch` here on purpose: a past session's checkout has
                 // moved on, so HEAD would show a branch it never ran on.
                 is_linked_worktree: repo.as_ref().is_some_and(|r| r.is_linked_worktree),
