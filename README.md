@@ -111,9 +111,13 @@ waiting on you rather than working.
 1. In the launcher window, click **Install** under *Hooks* (asks nothing else; it's reversible).
    This:
    - writes the bridge script to `~/.claude/claude-view/claude-view-hook.sh` (`.ps1` on Windows), and
-   - merges `SessionStart` / `PreToolUse` / `PostToolUse` / `SessionEnd` entries into
-     `~/.claude/settings.json`, **preserving any existing hooks** (a one-shot backup is written to
-     `settings.json.claude-view.bak`).
+   - merges entries for all seven hook events — `SessionStart`, `UserPromptSubmit`, `PreToolUse`,
+     `PostToolUse`, `SessionEnd`, `Stop`, `Notification` — into `~/.claude/settings.json`,
+     **preserving any existing hooks** (a one-shot 0600 backup is written to
+     `settings.json.claude-view.bak`, once and only once).
+
+   `UserPromptSubmit` is load-bearing: without it, a turn that thinks for 90 seconds before touching
+   a tool is indistinguishable from an idle session.
 2. **Uninstall** removes exactly those entries and the script, nothing else.
 
 The bridge script is a no-op when `CLAUDE_VIEW_ID` is unset, so sessions started outside
@@ -123,7 +127,8 @@ argument), so large tool outputs are never truncated by `ARG_MAX`.
 
 **Security note:** the auth token is *not* injected into the session's environment (it would be
 readable by every process Claude spawns). The bridge script reads it from the 0600
-`~/.claude/claude-view/instance.json` instead. **If you installed hooks before this change, click
+`~/.claude/claude-view/instances/<port>.json` instead — one file per port, so two running instances
+can never clobber each other's hook delivery. **If you installed hooks before this change, click
 Install again** to refresh the bridge script — otherwise the old script can't authenticate and the
 session state stays `unknown`.
 
@@ -147,17 +152,94 @@ session state stays `unknown`.
 
 ## Architecture
 
+> **📐 Full design document: [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md)** — HLD and LLD, every module, every
+> interface, every runtime flow, and an honest list of what an audit of this codebase actually found.
+> There is also an **interactive diagram** at [`docs/diagrams/architecture.html`](docs/diagrams/architecture.html)
+> (pan, zoom, search, guided views, PNG/SVG export — open it in a browser).
+
+One OS process hosts everything: the Rust backend, the loopback server, every PTY child, and every webview.
+Windows are **not** separate processes.
+
+```mermaid
+graph TB
+    subgraph app["claude-view — ONE native process"]
+        REG["Session Registry<br/>viewer_id ↔ session_id ↔ PTY ↔ window"]
+        SRV["axum server<br/>127.0.0.1:&lt;ephemeral&gt;"]
+        PTY["PTY per session<br/>portable-pty"]
+        TAIL["Transcript tailer<br/>one thread per session, 1500ms"]
+        WV["Webviews<br/>React 18 + xterm.js"]
+    end
+    CLI["claude<br/>child process in the PTY"]
+    HOOK["claude-view-hook.sh<br/>one process per hook event"]
+    FS[("~/.claude/<br/>projects/*.jsonl · settings.json<br/>claude-view/instances/*.json")]
+
+    PTY -->|"spawn + argv + env"| CLI
+    CLI <-->|"raw bytes"| PTY
+    CLI -->|"appends"| FS
+    CLI -->|"fires"| HOOK
+    HOOK -->|"POST /hooks · token from a 0600 file"| SRV
+    TAIL -->|"tails"| FS
+    TAIL --> REG
+    REG --- PTY
+    REG --- SRV
+    SRV <-->|"WebSocket: bytes + control JSON"| WV
+    WV -->|"Tauri IPC invoke()"| REG
+
+    style app fill:#1e293b,stroke:#64748b,color:#e2e8f0
+    style FS fill:#334155,stroke:#64748b,color:#e2e8f0
 ```
-Tauri app (one process)
-├─ Session Manager (Rust)     registry: viewer_id ↔ session_id ↔ PTY ↔ window
-├─ PTY per session            portable-pty: ConPTY on Windows, openpty on Unix
-├─ axum server on 127.0.0.1:<ephemeral port>
-│   ├─ GET  /ws/:id           binary frames = raw PTY bytes out / keystrokes in
-│   │                         text frames   = resize (in), timeline + bound + exit (out)
-│   ├─ POST /hooks            hook events from the bridge script (token-authed)
-│   └─ POST /bind             explicit viewer_id ↔ session_id binding (spec compat)
-└─ One webview window per session: xterm.js (+fit/webgl/search) + timeline sidebar
-```
+
+**claude-view only ever reads Claude Code's transcripts. It never writes them.**
+
+### Hosted vs watched sessions
+
+One discriminator runs through the whole backend — `Session.pty: Option<Pty>`:
+
+| | **Hosted** | **Watched** |
+|---|---|---|
+| Origin | claude-view launched it | started in a terminal elsewhere |
+| Live bytes | yes, from the PTY reader thread | none — there is no process |
+| Input / resize / kill | real | silent no-ops |
+| Hook events | yes | none — the bridge no-ops without `CLAUDE_VIEW_ID` |
+| Liveness | pushed (process exit is authoritative) | **polled** from the transcript |
+| Read-only | no | **by construction, not by policy** |
+
+The four live handles are grouped into one `Pty` struct so a half-attached session is unrepresentable, and
+`SessionInfo.watched` is *derived* from `pty.is_none()` rather than stored, so it cannot drift.
+
+### Windows
+
+There is exactly one HTML file, and **the URL query string is the route** — resolved once at load, with no router
+library and no navigation afterward:
+
+| Query string | Root component | Window label |
+|---|---|---|
+| *(no `vid`)* | `Launcher` | `main` |
+| `?vid&port&token&cwd` | `SessionWindow` | `session-<vid>` |
+| `…&kind=terminal` | `TerminalWindow` | `session-<vid>` |
+| `…&watched=1` | `SessionWindow` (read-only) | `session-<vid>` |
+| `…&kind=agent&agent=<id>` | `AgentWindow` | `agent-<vid>-<agent_id>` |
+
+When the launcher is ≥1100 px wide it mounts those same components **inline as tabs** in a tmux-like pane grid.
+Hidden panes are `display:none`, never unmounted — which is why a tab switch never makes a terminal reconnect.
+
+### The local server
+
+Eight routes on `127.0.0.1:<ephemeral>`, **every one token-authed**:
+
+| Route | Purpose |
+|---|---|
+| `GET /ws/:id` | The live spine: binary = PTY bytes, text = control JSON. Auth via `?token=` only |
+| `POST /hooks` | Every Claude Code hook event, from the bridge script |
+| `POST /bind` | Explicit binding for custom bridges (`/hooks` binds implicitly) |
+| `GET`/`POST /sessions`, `POST /terminals` | List and launch, for scripting |
+| `GET /past_sessions` | The `~/.claude/projects` scan |
+| `GET /trace/:id`, `GET /changes/:id` | Paged trace and the git-derived change set |
+
+**The webview does not use this server** (except the WebSocket): it talks to the backend over Tauri IPC — 24
+commands — because the webview is a different origin from `127.0.0.1:<port>` and there is deliberately no CORS
+layer. `src/` contains zero `fetch()` calls.
+
 
 ## Implementation notes / chosen defaults
 
@@ -201,32 +283,71 @@ Where the spec was silent (or allowed a choice), these defaults were picked:
 
 ```
 claude-view/
-├─ src-tauri/                 Rust backend
-│  ├─ src/main.rs             Tauri setup, commands, spawns axum
-│  ├─ src/server.rs           axum routes: /ws/:id, /hooks, /bind, /trace/:id
-│  ├─ src/pty.rs              portable-pty spawn, reader thread, resize, transcript tailer
-│  ├─ src/session.rs          registry, correlation, timeline state, cost ledger
-│  ├─ src/transcript.rs       transcript parsing, token usage, subagent discovery
-│  ├─ src/trace.rs            paged trace reader (parent + every subagent file)
-│  ├─ src/agents.rs           the agent-run roster: discovery, cost partition, status
-│  ├─ src/export.rs           whole-trace export to Markdown / JSON
-│  ├─ src/rollup.rs           cross-session spend, de-duplicated across transcripts
-│  ├─ src/hooks_install.rs    settings.json merge/remove + bridge script install
-│  └─ scripts/                claude-view-hook.sh / .ps1 (bridge)
-├─ src/                       React + TS frontend
-│  ├─ SessionWindow.tsx       per-session layout (terminal + panel)
-│  ├─ Terminal.tsx            xterm.js + fit/webgl/search + WS wiring
-│  ├─ Trace.tsx               the Stream — every kind, nested runs, cost per turn
-│  ├─ events.ts              the hook event stream (live tool state)
-│  ├─ Agents.tsx              the Agents view — the run roster
-│  ├─ AgentStrip.tsx         the agent tree above the split (● main / ○ run)
-│  ├─ AgentWindow.tsx        one agent run in its own read-only window
-│  ├─ agents.ts / cost.ts     pricing the roster and the rollup
-│  ├─ pricing.ts              the model price table, with its AS_OF date
-│  ├─ Spend.tsx               launcher spend rollup
-│  ├─ Launcher.tsx            main window (new session, list, hooks)
-│  └─ ws.ts                   binary WebSocket client with reconnect
-├─ CONTEXT.md                 the domain glossary — run vs type, turn, notional cost
-├─ prototypes/                throwaway UI prototypes, rebuilt from your own corpus
-└─ README.md
+├─ src-tauri/                       Rust backend — 11,276 lines, 14 modules, 162 tests
+│  ├─ src/main.rs          1014     Tauri setup · 24 #[tauri::command] · every window
+│  ├─ src/server.rs        1692     axum routes + the WebSocket protocol (~810 lines are tests)
+│  ├─ src/session.rs       1186     Session · Pty · Registry · AgentState · UsageLedger · timeline
+│  ├─ src/agents.rs        1041     the agent-run roster, cost partition, run status
+│  ├─ src/transcript.rs    1023     locate · subagent discovery · incremental tail · TokenUsage
+│  ├─ src/pty.rs            722     claude discovery · argv · PTY spawn · 3 threads + the tailer
+│  ├─ src/trace.rs          713     paged Entry reader, multi-file Cursor, typed absence
+│  ├─ src/changes.rs        642     baseline · change set · commit spans · patch (git subprocess)
+│  ├─ src/instance.rs       607     0600 discovery files (majority test code)
+│  ├─ src/rollup.rs         517     cross-session spend, de-duplicated across transcripts
+│  ├─ src/export.rs         502     whole-trace export to Markdown / JSON
+│  ├─ src/hooks_install.rs  498     settings.json merge/remove + bridge script install
+│  ├─ src/past_sessions.rs  498     ~/.claude/projects scan → launcher rows
+│  ├─ src/liveness.rs       329     watched-session liveness from the transcript alone
+│  ├─ src/git.rs            292     repo identity by walking .git — no subprocess
+│  └─ scripts/                      claude-view-hook.sh / .ps1 — embedded via include_str!
+│
+├─ src/                             React + TS frontend — 21,098 lines, no framework, no store
+│  ├─ main.tsx               32     entry: initTheme(), then pick ONE of four roots by query string
+│  ├─ Launcher.tsx         2624     main window: browser, past sessions, hooks, spend, tabs + pane grid
+│  ├─ SessionWindow.tsx    1351     header · AgentStrip · panel · terminal · notification policy
+│  ├─ Trace.tsx            1211     the Stream: every kind, nested runs, cost per turn, export
+│  ├─ themes.ts            1106     theme engine + VS Code theme importer
+│  ├─ Terminal.tsx          796     xterm.js + 4 addons + WS + scroll roller + detectDialog()
+│  ├─ Agents.tsx            545     the run roster table + useRoster (the shared poller)
+│  ├─ Changes.tsx           437     grouped, churn-ranked file list + lazy per-file diff
+│  ├─ Spend.tsx             315     machine-wide spend rollup
+│  ├─ AgentWindow.tsx       239     one agent run, read-only, in its own window
+│  ├─ pricing.ts            198     THE price table, with its AS_OF date — the only place dollars exist
+│  ├─ tokens.ts             109     the T object — every value a var(--cv-*) reference
+│  └─ ui/                   160     Button · Stat · EmptyState — the only shared primitives
+│
+├─ docs/
+│  ├─ ARCHITECTURE.md               ← the full HLD + LLD
+│  ├─ diagrams/architecture.html    ← the interactive system diagram
+│  └─ agents/                       issue tracker, triage labels, domain notes, handoff
+├─ packaging/                       .deb / .AppImage / two Arch PKGBUILDs / the bwrap sandbox wrapper
+├─ prototypes/                      throwaway UI prototypes, rebuilt from your own corpus
+├─ CONTEXT.md                       the domain glossary — run vs type, turn, baseline, notional cost
+└─ justfile                         build · lint · test · ci · package   (CI runs `just ci`)
 ```
+
+## Development
+
+```bash
+just build     # npm ci + tsc + vite build → dist/   (a hard prerequisite of every cargo command)
+just lint      # tsc --noEmit, cargo fmt --check, cargo clippy --all-targets -- -D warnings
+just test      # cargo test --locked — 162 tests
+just ci        # all three; this is exactly what GitHub Actions runs
+just dev       # npm run tauri dev
+just package   # .deb + .AppImage into src-tauri/target/release/bundle/
+```
+
+`tauri.conf.json` points `frontendDist` at `../dist`, and `dist/` is gitignored — so on a clean checkout **no cargo
+command works at all** until the frontend has been built. That is why `build` gates everything.
+
+## Running it sandboxed
+
+Sessions default to `--dangerously-skip-permissions`. `packaging/sandbox/claude-view-sandboxed` is a `bwrap`
+wrapper that replaces your entire home directory with a tmpfs and binds back exactly three things — `~/.claude`,
+`~/.claude.json`, and the one workspace directory you name:
+
+```bash
+packaging/sandbox/claude-view-sandboxed ~/code/my-project
+```
+
+Measured effect: home-directory entries visible to the app go from 51 to 4; sibling repositories are unreachable.

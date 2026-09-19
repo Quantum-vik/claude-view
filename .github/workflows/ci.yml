@@ -15,13 +15,15 @@ concurrency:
 jobs:
   ci:
     name: build, lint, test (Linux)
-    # Ubuntu, not macOS, purely for cost: this is a PRIVATE repo, so Actions
-    # minutes are billed, and GitHub bills macOS at a 10x multiplier (Windows
-    # 2x, Linux 1x). A full run here builds the entire Tauri dependency tree,
-    # so the macOS equivalent burned ~10x the minutes for an identical result —
-    # nothing in the suite is platform-specific: the Rust tests, clippy, fmt
-    # and tsc all pass the same way on any host. Platform-specific compilation
-    # is covered by the windows-check job below.
+    # Ubuntu, not macOS, because nothing in the suite is platform-specific:
+    # the Rust tests, clippy, fmt and tsc all pass the same way on any host,
+    # and a full run here builds the entire Tauri dependency tree, which is
+    # both faster and better cached on Linux runners. (This job was first
+    # written while the repo was private, where GitHub bills macOS minutes at
+    # a 10x multiplier — Windows 2x, Linux 1x. The repo is public now, so
+    # standard runners are free and cost is no longer the reason; the choice
+    # stands on runner speed alone.) Platform-specific compilation is covered
+    # by the windows-check job below.
     runs-on: ubuntu-latest
     steps:
       - name: Checkout

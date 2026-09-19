@@ -1,0 +1,307 @@
+{
+  "schema_version": 1,
+  "diagram_type": "architecture",
+  "meta": {
+    "title": "claude-view \u2014 system architecture",
+    "quality_profile": "showcase",
+    "views": [
+      {
+        "id": "live-mirror",
+        "label": "The live mirror",
+        "focus": [
+          "viewer",
+          "server",
+          "registry",
+          "pty",
+          "claude"
+        ],
+        "note": "Raw PTY bytes reach xterm.js over one WebSocket \u2014 the only channel fast enough to be char-by-char."
+      },
+      {
+        "id": "transcript-path",
+        "label": "Trace, cost, agent runs",
+        "focus": [
+          "claude",
+          "transcript",
+          "tailer",
+          "registry"
+        ],
+        "note": "Claude Code's own JSONL is the sole source for the trace, the cost ledger and the subagent roster."
+      },
+      {
+        "id": "hook-path",
+        "label": "Session state via hooks",
+        "focus": [
+          "claude",
+          "bridge",
+          "discovery",
+          "server"
+        ],
+        "note": "Hooks carry the two things a transcript cannot express: waiting on a human, and a turn ending."
+      }
+    ]
+  },
+  "components": [
+    {
+      "id": "server",
+      "type": "backend",
+      "label": "axum server",
+      "sublabel": "127.0.0.1:<ephemeral>",
+      "tag": "8 routes, token on every one",
+      "pos": [
+        370,
+        186
+      ],
+      "size": [
+        200,
+        70
+      ]
+    },
+    {
+      "id": "bridge",
+      "type": "security",
+      "label": "Hook bridge",
+      "sublabel": "claude-view-hook.sh",
+      "tag": "no-op outside claude-view",
+      "pos": [
+        1070,
+        186
+      ],
+      "size": [
+        200,
+        70
+      ]
+    },
+    {
+      "id": "discovery",
+      "type": "database",
+      "label": "Discovery file",
+      "sublabel": "instances/<port>.json",
+      "tag": "0600 in a 0700 dir",
+      "pos": [
+        1070,
+        36
+      ],
+      "size": [
+        200,
+        70
+      ]
+    },
+    {
+      "id": "viewer",
+      "type": "frontend",
+      "label": "Viewer window",
+      "sublabel": "React 18 + xterm.js",
+      "tag": "one bundle, four window kinds",
+      "pos": [
+        30,
+        372
+      ],
+      "size": [
+        200,
+        70
+      ]
+    },
+    {
+      "id": "registry",
+      "type": "backend",
+      "label": "Session Registry",
+      "sublabel": "viewer_id \u2194 session_id \u2194 PTY",
+      "tag": "hosted: Some(Pty) \u00b7 watched: None",
+      "pos": [
+        370,
+        372
+      ],
+      "size": [
+        200,
+        70
+      ]
+    },
+    {
+      "id": "pty",
+      "type": "backend",
+      "label": "PTY layer",
+      "sublabel": "portable-pty",
+      "tag": "writer \u00b7 reader \u00b7 waiter threads",
+      "pos": [
+        720,
+        372
+      ],
+      "size": [
+        200,
+        70
+      ]
+    },
+    {
+      "id": "claude",
+      "type": "external",
+      "label": "claude",
+      "sublabel": "Claude Code CLI, child process",
+      "pos": [
+        1070,
+        372
+      ],
+      "size": [
+        200,
+        70
+      ]
+    },
+    {
+      "id": "tailer",
+      "type": "backend",
+      "label": "Transcript tailer",
+      "sublabel": "one thread per session",
+      "tag": "polls every 1500 ms",
+      "pos": [
+        720,
+        558
+      ],
+      "size": [
+        200,
+        70
+      ]
+    },
+    {
+      "id": "transcript",
+      "type": "database",
+      "label": "Transcripts",
+      "sublabel": "~/.claude/projects/*.jsonl",
+      "tag": "read-only, never written",
+      "pos": [
+        1070,
+        558
+      ],
+      "size": [
+        200,
+        70
+      ]
+    }
+  ],
+  "boundaries": [
+    {
+      "kind": "region",
+      "label": "claude-view \u2014 one native process",
+      "wraps": [
+        "viewer",
+        "registry",
+        "server",
+        "pty",
+        "tailer"
+      ]
+    }
+  ],
+  "connections": [
+    {
+      "id": "ipc",
+      "from": "viewer",
+      "to": "registry",
+      "label": "Tauri IPC invoke()",
+      "variant": "emphasis",
+      "labelDy": 56
+    },
+    {
+      "id": "ws",
+      "from": "server",
+      "to": "viewer",
+      "label": "WebSocket \u00b7 bytes + control",
+      "variant": "emphasis"
+    },
+    {
+      "id": "resolve",
+      "from": "server",
+      "to": "registry",
+      "label": "resolves the id",
+      "labelDy": 28
+    },
+    {
+      "id": "spawn",
+      "from": "registry",
+      "to": "pty",
+      "label": "spawn \u00b7 kill"
+    },
+    {
+      "id": "child",
+      "from": "pty",
+      "to": "claude",
+      "label": "PTY + CLAUDE_VIEW_ID / PORT",
+      "variant": "emphasis"
+    },
+    {
+      "id": "append",
+      "from": "claude",
+      "to": "transcript",
+      "label": "appends JSONL",
+      "labelDy": 28
+    },
+    {
+      "id": "tail",
+      "from": "transcript",
+      "to": "tailer",
+      "label": "tails new bytes"
+    },
+    {
+      "id": "merge",
+      "from": "tailer",
+      "to": "registry",
+      "label": "model \u00b7 usage \u00b7 cost \u00b7 timeline"
+    },
+    {
+      "id": "fires",
+      "from": "claude",
+      "to": "bridge",
+      "label": "7 hook events"
+    },
+    {
+      "id": "token",
+      "from": "bridge",
+      "to": "discovery",
+      "label": "reads the token",
+      "variant": "security"
+    },
+    {
+      "id": "publish",
+      "from": "server",
+      "to": "discovery",
+      "label": "publishes {port, token, pid}",
+      "variant": "security"
+    },
+    {
+      "id": "hooks",
+      "from": "bridge",
+      "to": "server",
+      "label": "POST /hooks",
+      "variant": "security",
+      "labelDx": 220,
+      "labelDy": 26
+    }
+  ],
+  "cards": [
+    {
+      "dot": "emerald",
+      "title": "Three layers, three latencies",
+      "items": [
+        "PTY bytes \u2192 WebSocket \u2192 xterm.js: instant, char-by-char",
+        "Transcript tailed from disk: ~0.2 s behind the event",
+        "Hooks over authenticated localhost HTTP: per-event"
+      ]
+    },
+    {
+      "dot": "cyan",
+      "title": "Why the transcript owns the record",
+      "items": [
+        "It is the only source that sees a subagent's work at all",
+        "No channel streams tool output while a command still runs",
+        "Nothing is cached: the largest real transcript parses in 46 ms"
+      ]
+    },
+    {
+      "dot": "rose",
+      "title": "The trust boundary",
+      "items": [
+        "The token is never an env var \u2014 every child would inherit it",
+        "Discovery files are 0600 via O_EXCL + fsync + rename",
+        "pty: Option<Pty> \u2014 watched means read-only by construction"
+      ]
+    }
+  ]
+}
