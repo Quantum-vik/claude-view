@@ -525,7 +525,7 @@ dependencies = [
 
 [[package]]
 name = "claude-view"
-version = "1.5.2"
+version = "1.5.3"
 dependencies = [
  "axum",
  "dirs 5.0.1",

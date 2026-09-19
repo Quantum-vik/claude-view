@@ -1,6 +1,6 @@
 [package]
 name = "claude-view"
-version = "1.5.2"
+version = "1.5.3"
 description = "Live per-session terminal mirror for Claude Code"
 edition = "2021"
 
