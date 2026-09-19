@@ -1,0 +1,277 @@
+{
+  "schema_version": 1,
+  "diagram_type": "architecture",
+  "meta": {
+    "title": "LLD \u2014 the read path: nine modules over one set of files",
+    "quality_profile": "showcase",
+    "views": [
+      {
+        "id": "hub",
+        "label": "One attribution, once",
+        "focus": [
+          "transcript",
+          "trace",
+          "liveness",
+          "rollup"
+        ],
+        "note": "transcript::locate decides which file is this session's. Everything downstream inherits that decision rather than re-deriving it."
+      },
+      {
+        "id": "derived",
+        "label": "Derived views",
+        "focus": [
+          "trace",
+          "agents",
+          "export",
+          "past"
+        ],
+        "note": "Each reads the same JSONL for a different question: positional, whole-session, whole-machine."
+      },
+      {
+        "id": "leaves",
+        "label": "The two leaves",
+        "focus": [
+          "changes",
+          "git"
+        ],
+        "note": "Neither imports another crate module. Everything they answer is a pure function of a path and a timestamp."
+      }
+    ]
+  },
+  "components": [
+    {
+      "id": "transcript",
+      "type": "database",
+      "label": "transcript.rs",
+      "sublabel": "locate \u00b7 tail \u00b7 TokenUsage",
+      "tag": "the one attribution",
+      "pos": [
+        40,
+        206
+      ],
+      "size": [
+        230,
+        74
+      ]
+    },
+    {
+      "id": "trace",
+      "type": "backend",
+      "label": "trace.rs",
+      "sublabel": "paged Entry reader",
+      "tag": "byte-offset cursor",
+      "pos": [
+        350,
+        36
+      ],
+      "size": [
+        230,
+        74
+      ]
+    },
+    {
+      "id": "liveness",
+      "type": "backend",
+      "label": "liveness.rs",
+      "sublabel": "is it still going?",
+      "tag": "tail only, 400 KB",
+      "pos": [
+        350,
+        206
+      ],
+      "size": [
+        230,
+        74
+      ]
+    },
+    {
+      "id": "rollup",
+      "type": "backend",
+      "label": "rollup.rs",
+      "sublabel": "machine-wide spend",
+      "tag": "reads every file",
+      "pos": [
+        350,
+        376
+      ],
+      "size": [
+        230,
+        74
+      ]
+    },
+    {
+      "id": "agents",
+      "type": "backend",
+      "label": "agents.rs",
+      "sublabel": "the run roster",
+      "tag": "cost partition",
+      "pos": [
+        660,
+        36
+      ],
+      "size": [
+        230,
+        74
+      ]
+    },
+    {
+      "id": "past",
+      "type": "backend",
+      "label": "past_sessions.rs",
+      "sublabel": "the launcher scan",
+      "tag": "hides scratch dirs",
+      "pos": [
+        660,
+        206
+      ],
+      "size": [
+        230,
+        74
+      ]
+    },
+    {
+      "id": "changes",
+      "type": "backend",
+      "label": "changes.rs",
+      "sublabel": "diff since the baseline",
+      "tag": "shells out to git",
+      "pos": [
+        660,
+        376
+      ],
+      "size": [
+        230,
+        74
+      ]
+    },
+    {
+      "id": "export",
+      "type": "backend",
+      "label": "export.rs",
+      "sublabel": "markdown / json",
+      "tag": "whole trace or nothing",
+      "pos": [
+        970,
+        36
+      ],
+      "size": [
+        230,
+        74
+      ]
+    },
+    {
+      "id": "git",
+      "type": "external",
+      "label": "git.rs",
+      "sublabel": "repo identity",
+      "tag": "walks .git, no subprocess",
+      "pos": [
+        970,
+        376
+      ],
+      "size": [
+        230,
+        74
+      ]
+    }
+  ],
+  "boundaries": [
+    {
+      "kind": "region",
+      "label": "Leaves \u2014 import no other crate module",
+      "wraps": [
+        "changes",
+        "git"
+      ]
+    }
+  ],
+  "connections": [
+    {
+      "id": "locate",
+      "from": "transcript",
+      "to": "trace",
+      "label": "locate + read_page",
+      "variant": "emphasis",
+      "fromSide": "top",
+      "toSide": "left",
+      "via": [
+        [
+          155,
+          73
+        ]
+      ]
+    },
+    {
+      "id": "probe",
+      "from": "transcript",
+      "to": "liveness",
+      "label": "path + mtime"
+    },
+    {
+      "id": "scan",
+      "from": "transcript",
+      "to": "rollup",
+      "label": "every transcript on disk",
+      "fromSide": "bottom",
+      "toSide": "left",
+      "via": [
+        [
+          155,
+          413
+        ]
+      ]
+    },
+    {
+      "id": "roster",
+      "from": "trace",
+      "to": "agents",
+      "label": "the typed absence",
+      "labelAt": [
+        620,
+        124
+      ]
+    },
+    {
+      "id": "recent",
+      "from": "liveness",
+      "to": "past",
+      "label": "probe_recent"
+    },
+    {
+      "id": "ident",
+      "from": "past",
+      "to": "git",
+      "label": "repo grouping",
+      "variant": "dashed"
+    }
+  ],
+  "cards": [
+    {
+      "dot": "cyan",
+      "title": "Attribution happens once",
+      "items": [
+        "transcript::locate matches on the file's own cwd, gated on start time",
+        "Without that gate a private session in the same directory would leak",
+        "trace::locate_for is a one-line delegation to it"
+      ]
+    },
+    {
+      "dot": "emerald",
+      "title": "Same files, different questions",
+      "items": [
+        "trace is positional and paged; the roster is whole-session",
+        "rollup is whole-machine and folds across files",
+        "liveness reads only the last 400 KB and no timestamps"
+      ]
+    },
+    {
+      "dot": "amber",
+      "title": "Why two leaves",
+      "items": [
+        "changes.rs takes only Path, Command and Serialize",
+        "git.rs takes only std::path \u2014 it walks .git by hand",
+        "Everything they answer derives from a path and a timestamp"
+      ]
+    }
+  ]
+}

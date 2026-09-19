@@ -1,0 +1,285 @@
+{
+  "schema_version": 1,
+  "diagram_type": "dataflow",
+  "meta": {
+    "title": "HLD \u2014 how a session becomes each view",
+    "quality_profile": "showcase",
+    "viewBox": [
+      1080,
+      520
+    ],
+    "views": [
+      {
+        "id": "mirror",
+        "label": "The live mirror",
+        "focus": [
+          "cli",
+          "bytes",
+          "scrollback",
+          "term"
+        ],
+        "note": "Raw bytes, never parsed \u2014 the only path fast enough to be char-by-char."
+      },
+      {
+        "id": "record",
+        "label": "The readable record",
+        "focus": [
+          "jsonl",
+          "pager",
+          "fold",
+          "stream"
+        ],
+        "note": "Claude Code's own transcript is the sole source for the trace and every token count."
+      },
+      {
+        "id": "state",
+        "label": "Is it waiting on me?",
+        "focus": [
+          "hooks",
+          "hookstate",
+          "stream"
+        ],
+        "note": "The one question a transcript cannot answer, and the only reason hooks exist."
+      }
+    ]
+  },
+  "stages": [
+    {
+      "label": "Produce"
+    },
+    {
+      "label": "Capture"
+    },
+    {
+      "label": "Read"
+    },
+    {
+      "label": "Derive"
+    },
+    {
+      "label": "Present"
+    }
+  ],
+  "nodes": [
+    {
+      "id": "bytes",
+      "type": "messagebus",
+      "label": "PTY bytes",
+      "sublabel": "8 KiB reads",
+      "stage": 1,
+      "row": 0,
+      "tag": "unparsed"
+    },
+    {
+      "id": "scrollback",
+      "type": "backend",
+      "label": "Scrollback",
+      "sublabel": "2 MiB ring",
+      "stage": 2,
+      "row": 0,
+      "tag": "replayed"
+    },
+    {
+      "id": "term",
+      "type": "frontend",
+      "label": "xterm.js",
+      "sublabel": "the live mirror",
+      "stage": 4,
+      "row": 0
+    },
+    {
+      "id": "cli",
+      "type": "external",
+      "label": "claude",
+      "sublabel": "the CLI, in a PTY",
+      "stage": 0,
+      "row": 1,
+      "tag": "child process"
+    },
+    {
+      "id": "jsonl",
+      "type": "database",
+      "label": "Transcript",
+      "sublabel": "projects/*.jsonl",
+      "stage": 1,
+      "row": 1,
+      "tag": "append-only"
+    },
+    {
+      "id": "pager",
+      "type": "backend",
+      "label": "read_page",
+      "sublabel": "byte cursor per file",
+      "stage": 2,
+      "row": 1,
+      "tag": "no cache"
+    },
+    {
+      "id": "stream",
+      "type": "frontend",
+      "label": "Stream panel",
+      "sublabel": "trace + cost",
+      "stage": 4,
+      "row": 1
+    },
+    {
+      "id": "fold",
+      "type": "backend",
+      "label": "Turn fold",
+      "sublabel": "requestId, last-wins",
+      "stage": 3,
+      "row": 2,
+      "tag": "global"
+    },
+    {
+      "id": "hooks",
+      "type": "security",
+      "label": "Hook events",
+      "sublabel": "7 kinds, via the bridge",
+      "stage": 1,
+      "row": 2,
+      "tag": "per-event"
+    },
+    {
+      "id": "hookstate",
+      "type": "backend",
+      "label": "Merged state",
+      "sublabel": "hook \u2295 screen",
+      "stage": 2,
+      "row": 2,
+      "tag": "seq + since"
+    }
+  ],
+  "flows": [
+    {
+      "id": "out",
+      "from": "cli",
+      "to": "bytes",
+      "label": "raw output",
+      "variant": "emphasis",
+      "fromSide": "top",
+      "toSide": "left",
+      "via": [
+        [
+          100,
+          157
+        ]
+      ]
+    },
+    {
+      "id": "writes",
+      "from": "cli",
+      "to": "jsonl",
+      "label": "appends",
+      "variant": "emphasis"
+    },
+    {
+      "id": "fires",
+      "from": "cli",
+      "to": "hooks",
+      "label": "fires",
+      "fromSide": "bottom",
+      "toSide": "left",
+      "via": [
+        [
+          100,
+          385
+        ]
+      ]
+    },
+    {
+      "id": "push",
+      "from": "bytes",
+      "to": "scrollback",
+      "label": "push_bytes",
+      "classification": "bounded"
+    },
+    {
+      "id": "mirror",
+      "from": "scrollback",
+      "to": "term",
+      "label": "binary WS frames",
+      "classification": "instant",
+      "variant": "emphasis"
+    },
+    {
+      "id": "read",
+      "from": "jsonl",
+      "to": "pager",
+      "label": "tail + page",
+      "classification": "read-only",
+      "variant": "emphasis"
+    },
+    {
+      "id": "entries",
+      "from": "pager",
+      "to": "stream",
+      "label": "entries",
+      "classification": "grouped by source",
+      "variant": "emphasis",
+      "route": "straight"
+    },
+    {
+      "id": "usage",
+      "from": "pager",
+      "to": "fold",
+      "label": "usage records",
+      "classification": "one per block"
+    },
+    {
+      "id": "cost",
+      "from": "fold",
+      "to": "stream",
+      "label": "tokens per turn",
+      "classification": "priced in TS"
+    },
+    {
+      "id": "transition",
+      "from": "hooks",
+      "to": "hookstate",
+      "label": "transitions",
+      "classification": "timestamped",
+      "variant": "security"
+    },
+    {
+      "id": "live",
+      "from": "hookstate",
+      "to": "stream",
+      "label": "live state",
+      "classification": "on change only",
+      "variant": "security",
+      "fromSide": "bottom",
+      "toSide": "bottom",
+      "via": [
+        [
+          530,
+          470
+        ],
+        [
+          960,
+          470
+        ]
+      ]
+    }
+  ],
+  "cards": [
+    {
+      "dot": "emerald",
+      "title": "Why three paths and not one",
+      "items": [
+        "No channel streams tool output while a command is still running",
+        "So the mirror owns the terminal \u2014 bytes, never parsed",
+        "The transcript is the only source that sees a subagent at all"
+      ]
+    },
+    {
+      "dot": "cyan",
+      "title": "The fold is the whole cost story",
+      "items": [
+        "One record per content block, each repeating the same usage",
+        "A resumed session replays earlier turns into a new file",
+        "One global last-wins fold on requestId answers both"
+      ]
+    }
+  ]
+}

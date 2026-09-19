@@ -28,7 +28,7 @@ their tokens and withhold dollars rather than guessing.
 | | |
 |---|---|
 | **[Architecture — HLD & LLD](docs/ARCHITECTURE.md)** | The full design: the three-layer model and why it is forced, all 14 Rust modules and 25 TypeScript files, the 24 IPC commands, 8 HTTP routes and the WebSocket protocol, every on-disk format, eight runtime flows, and an honest list of what an audit found. 11 diagrams. |
-| **[Interactive system diagram ↗](https://quantum-vik.github.io/claude-view/diagrams/architecture.html)** | The whole runtime in one picture — pan, zoom, search, guided views, export. Source: [`docs/diagrams/`](docs/diagrams/) |
+| **[Interactive diagrams ↗](https://quantum-vik.github.io/claude-view/)** | Five of them — two HLD (system, data flow) and three LLD (read path, frontend, session state). Pan, zoom, search, guided views, PNG/SVG export. Each ships with the `.spec.json` it was generated from: [`docs/diagrams/`](docs/diagrams/) |
 | **[CONTEXT.md](CONTEXT.md)** | The domain glossary — run vs type, turn, replay, baseline, hosted vs watched, and what "live" is allowed to mean. |
 | **[docs/agents/](docs/agents/)** | Agent-facing notes: the issue tracker, triage labels, domain conventions. |
 
@@ -169,6 +169,8 @@ session state stays `unknown`.
 <p align="center">
   <b><a href="https://quantum-vik.github.io/claude-view/diagrams/architecture.html">↗ Open the interactive version</a></b>
   &nbsp;·&nbsp; pan, zoom, search, three guided views, PNG/SVG export
+  <br>
+  <sub><a href="https://quantum-vik.github.io/claude-view/">or browse all five diagrams</a> — system · data flow · read path · frontend · session state</sub>
 </p>
 
 One OS process hosts everything: the Rust backend, the loopback server, every PTY child, and every webview.

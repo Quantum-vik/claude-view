@@ -1,0 +1,334 @@
+{
+  "schema_version": 1,
+  "diagram_type": "architecture",
+  "meta": {
+    "title": "LLD \u2014 the frontend: one bundle, four roots, three transports",
+    "quality_profile": "showcase",
+    "views": [
+      {
+        "id": "routing",
+        "label": "The query string is the route",
+        "focus": [
+          "index",
+          "launcher",
+          "sessionw",
+          "agentw"
+        ],
+        "note": "Resolved once at module load. No router library, and nothing navigates afterward."
+      },
+      {
+        "id": "panels",
+        "label": "Inside a session window",
+        "focus": [
+          "sessionw",
+          "term",
+          "trace",
+          "panels"
+        ],
+        "note": "The terminal is one half; the panel beside it is the readable, costed record."
+      },
+      {
+        "id": "transport",
+        "label": "What talks to Rust",
+        "focus": [
+          "term",
+          "ws",
+          "trace",
+          "ipc"
+        ],
+        "note": "One WebSocket for live bytes, Tauri IPC for everything pull-shaped, and fetch() nowhere at all."
+      }
+    ]
+  },
+  "components": [
+    {
+      "id": "index",
+      "type": "frontend",
+      "label": "main.tsx",
+      "sublabel": "32 lines, one index.html",
+      "tag": "initTheme() before paint",
+      "pos": [
+        40,
+        206
+      ],
+      "size": [
+        230,
+        74
+      ]
+    },
+    {
+      "id": "launcher",
+      "type": "frontend",
+      "label": "Launcher",
+      "sublabel": "browser \u00b7 spend \u00b7 hooks",
+      "tag": "tabs + pane grid",
+      "pos": [
+        340,
+        36
+      ],
+      "size": [
+        230,
+        74
+      ]
+    },
+    {
+      "id": "sessionw",
+      "type": "frontend",
+      "label": "SessionWindow",
+      "sublabel": "header \u00b7 panel \u00b7 terminal",
+      "tag": "also embeds as a tab",
+      "pos": [
+        340,
+        206
+      ],
+      "size": [
+        230,
+        74
+      ]
+    },
+    {
+      "id": "agentw",
+      "type": "frontend",
+      "label": "AgentWindow",
+      "sublabel": "one run, read-only",
+      "tag": "no PTY, no input",
+      "pos": [
+        340,
+        376
+      ],
+      "size": [
+        230,
+        74
+      ]
+    },
+    {
+      "id": "term",
+      "type": "frontend",
+      "label": "Terminal.tsx",
+      "sublabel": "xterm.js + 4 addons",
+      "tag": "owns detectDialog()",
+      "pos": [
+        640,
+        36
+      ],
+      "size": [
+        230,
+        74
+      ]
+    },
+    {
+      "id": "trace",
+      "type": "frontend",
+      "label": "Trace \u2014 the Stream",
+      "sublabel": "entries \u00b7 turns \u00b7 cost",
+      "tag": "polls to exhaustion",
+      "pos": [
+        640,
+        206
+      ],
+      "size": [
+        230,
+        74
+      ]
+    },
+    {
+      "id": "panels",
+      "type": "frontend",
+      "label": "Agents \u00b7 Changes",
+      "sublabel": "roster \u00b7 files \u00b7 diff",
+      "tag": "useRoster is shared",
+      "pos": [
+        640,
+        376
+      ],
+      "size": [
+        230,
+        74
+      ]
+    },
+    {
+      "id": "ws",
+      "type": "messagebus",
+      "label": "ws.ts",
+      "sublabel": "the only WebSocket",
+      "tag": "reconnect, then latch",
+      "pos": [
+        1000,
+        36
+      ],
+      "size": [
+        230,
+        74
+      ]
+    },
+    {
+      "id": "ipc",
+      "type": "backend",
+      "label": "Tauri invoke()",
+      "sublabel": "the Rust backend",
+      "tag": "24 commands",
+      "pos": [
+        1000,
+        246
+      ],
+      "size": [
+        230,
+        74
+      ]
+    }
+  ],
+  "boundaries": [
+    {
+      "kind": "region",
+      "label": "one bundle \u2014 index.html with a different query string per window",
+      "wraps": [
+        "index",
+        "launcher",
+        "sessionw",
+        "agentw",
+        "term",
+        "trace",
+        "panels"
+      ]
+    }
+  ],
+  "connections": [
+    {
+      "id": "r1",
+      "from": "index",
+      "to": "launcher",
+      "label": "no vid",
+      "fromSide": "top",
+      "toSide": "left",
+      "via": [
+        [
+          155,
+          73
+        ]
+      ]
+    },
+    {
+      "id": "r2",
+      "from": "index",
+      "to": "sessionw",
+      "label": "?vid",
+      "variant": "emphasis"
+    },
+    {
+      "id": "r3",
+      "from": "index",
+      "to": "agentw",
+      "label": "&kind=agent",
+      "fromSide": "bottom",
+      "toSide": "left",
+      "via": [
+        [
+          155,
+          413
+        ]
+      ]
+    },
+    {
+      "id": "embed",
+      "from": "launcher",
+      "to": "sessionw",
+      "label": "mounts as a tab",
+      "variant": "dashed",
+      "labelAt": [
+        455,
+        158
+      ]
+    },
+    {
+      "id": "p1",
+      "from": "sessionw",
+      "to": "term",
+      "label": "the mirror",
+      "fromSide": "right",
+      "toSide": "left",
+      "via": [
+        [
+          605,
+          243
+        ],
+        [
+          605,
+          73
+        ]
+      ]
+    },
+    {
+      "id": "p2",
+      "from": "sessionw",
+      "to": "trace",
+      "variant": "emphasis"
+    },
+    {
+      "id": "p3",
+      "from": "sessionw",
+      "to": "panels",
+      "label": "the rest",
+      "fromSide": "right",
+      "toSide": "left",
+      "via": [
+        [
+          605,
+          243
+        ],
+        [
+          605,
+          413
+        ]
+      ]
+    },
+    {
+      "id": "t1",
+      "from": "term",
+      "to": "ws",
+      "label": "bytes + control",
+      "variant": "emphasis"
+    },
+    {
+      "id": "t2",
+      "from": "trace",
+      "to": "ipc",
+      "label": "read_trace"
+    },
+    {
+      "id": "t3",
+      "from": "panels",
+      "to": "ipc",
+      "label": "read_agents"
+    }
+  ],
+  "cards": [
+    {
+      "dot": "emerald",
+      "title": "No framework, and that is a decision",
+      "items": [
+        "No CSS framework: inline styles reading var(--cv-*) through one token object",
+        "Switching theme restyles everything with zero React re-renders",
+        "No store: hooks, props, and localStorage + the storage event across windows"
+      ]
+    },
+    {
+      "dot": "cyan",
+      "title": "Three transports, strictly divided",
+      "items": [
+        "WebSocket: live PTY bytes, opened only by Terminal.tsx",
+        "invoke(): everything pull-shaped \u2014 transcripts, rosters, diffs, spend",
+        "fetch(): never. Zero occurrences in src/, because there is no CORS layer"
+      ]
+    },
+    {
+      "dot": "amber",
+      "title": "Why tabs never reconnect",
+      "items": [
+        "Hidden panes are display:none, never unmounted or reparented",
+        "Panes are positioned from CSS variables, so dragging re-renders nothing",
+        "doFit() refuses a 0\u00d70 container, so a hidden tab cannot corrupt the PTY size",
+        "SessionWindow \u2192 Trace is unlabelled: the endpoints name the relationship"
+      ]
+    }
+  ]
+}

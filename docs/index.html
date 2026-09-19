@@ -3,48 +3,88 @@
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>claude-view — documentation</title>
 <style>
-  :root { color-scheme: light dark; --bg:#fbfaf7; --fg:#1c1917; --dim:#57534e; --line:#e7e5e4; --accent:#0d7a6b; }
+  :root { color-scheme: light dark; --bg:#fbfaf7; --fg:#1c1917; --dim:#57534e; --line:#e7e5e4; --accent:#0d7a6b; --card:#fff; }
   @media (prefers-color-scheme: dark) {
-    :root { --bg:#0f172a; --fg:#e2e8f0; --dim:#94a3b8; --line:#1e293b; --accent:#2dd4bf; }
+    :root { --bg:#0b1120; --fg:#e2e8f0; --dim:#94a3b8; --line:#1e293b; --accent:#2dd4bf; --card:#0f172a; }
   }
   * { box-sizing: border-box; }
   body { margin:0; background:var(--bg); color:var(--fg);
          font:16px/1.6 ui-sans-serif,-apple-system,"Segoe UI",Roboto,sans-serif; }
-  main { max-width: 720px; margin: 0 auto; padding: 56px 20px 80px; }
+  main { max-width: 1040px; margin: 0 auto; padding: 56px 20px 80px; }
   h1 { font-size: 30px; margin: 0 0 6px; letter-spacing: -0.01em; }
-  .lede { color: var(--dim); margin: 0 0 40px; }
+  h2 { font-size: 13px; text-transform: uppercase; letter-spacing: .09em; color: var(--dim);
+       margin: 44px 0 16px; font-weight: 600; }
+  .lede { color: var(--dim); margin: 0 0 8px; max-width: 64ch; }
+  .grid { display:grid; grid-template-columns:repeat(auto-fill,minmax(300px,1fr)); gap:16px; }
   a.card { display:block; text-decoration:none; color:inherit; border:1px solid var(--line);
-           border-radius:10px; padding:18px 20px; margin-bottom:14px; background:transparent; }
+           border-radius:10px; overflow:hidden; background:var(--card); }
   a.card:hover { border-color: var(--accent); }
-  a.card b { display:block; color: var(--accent); font-size:17px; margin-bottom:4px; }
-  a.card span { color: var(--dim); font-size:14.5px; }
-  footer { margin-top: 44px; padding-top: 20px; border-top:1px solid var(--line);
-           color:var(--dim); font-size:14px; }
+  a.card img { display:block; width:100%; aspect-ratio:16/10; object-fit:cover; object-position:top center;
+               border-bottom:1px solid var(--line); background:var(--bg); }
+  a.card .body { padding:14px 16px 16px; }
+  a.card b { display:block; color: var(--accent); font-size:15.5px; margin-bottom:4px; }
+  a.card span { color: var(--dim); font-size:14px; }
+  a.row { display:block; text-decoration:none; color:inherit; border:1px solid var(--line);
+          border-radius:10px; padding:16px 18px; margin-bottom:12px; }
+  a.row:hover { border-color: var(--accent); }
+  a.row b { display:block; color:var(--accent); margin-bottom:3px; }
+  a.row span { color:var(--dim); font-size:14.5px; }
+  footer { margin-top:48px; padding-top:20px; border-top:1px solid var(--line); color:var(--dim); font-size:14px; }
   footer a { color: var(--accent); }
 </style>
 <main>
   <h1>claude-view</h1>
-  <p class="lede">A desktop app that opens a dedicated window for each Claude Code CLI session,
-  mirrors its terminal character-by-character, and keeps a readable, costed record of everything the
-  session did.</p>
+  <p class="lede">A desktop app that opens a dedicated window for each Claude Code CLI session, mirrors its
+  terminal character-by-character, and keeps a readable, costed record of everything the session did.</p>
 
-  <a class="card" href="diagrams/architecture.html">
-    <b>Interactive system diagram &rarr;</b>
-    <span>Pan, zoom, search, three guided views, PNG/SVG export. The whole runtime in one picture.</span>
-  </a>
+  <h2>High-level design</h2>
+  <div class="grid">
+    <a class="card" href="diagrams/architecture.html">
+      <img src="diagrams/architecture-light.png" alt="System architecture diagram">
+      <div class="body"><b>System architecture</b>
+      <span>One process: the registry, the loopback server, every PTY and every webview — and what sits outside it.</span></div>
+    </a>
+    <a class="card" href="diagrams/hld-dataflow.html">
+      <img src="diagrams/hld-dataflow-light.png" alt="Data flow diagram">
+      <div class="body"><b>How a session becomes each view</b>
+      <span>Produce → capture → read → derive → present, and why it takes three paths rather than one.</span></div>
+    </a>
+  </div>
 
-  <a class="card" href="https://github.com/Quantum-vik/claude-view/blob/main/docs/ARCHITECTURE.md">
+  <h2>Low-level design</h2>
+  <div class="grid">
+    <a class="card" href="diagrams/lld-read-path.html">
+      <img src="diagrams/lld-read-path-light.png" alt="Read path module map">
+      <div class="body"><b>The read path</b>
+      <span>Nine modules over one set of files, one attribution decision, and the two leaves.</span></div>
+    </a>
+    <a class="card" href="diagrams/lld-frontend.html">
+      <img src="diagrams/lld-frontend-light.png" alt="Frontend component map">
+      <div class="body"><b>The frontend</b>
+      <span>One bundle, four roots chosen by query string, three strictly divided transports.</span></div>
+    </a>
+    <a class="card" href="diagrams/lld-session-state.html">
+      <img src="diagrams/lld-session-state-light.png" alt="Session state machine">
+      <div class="body"><b>Session state</b>
+      <span>Two signals merged, never mixed — and what is allowed to claim a session ended.</span></div>
+    </a>
+  </div>
+
+  <h2>Written</h2>
+  <a class="row" href="https://github.com/Quantum-vik/claude-view/blob/main/docs/ARCHITECTURE.md">
     <b>Architecture: HLD &amp; LLD &rarr;</b>
     <span>All 14 Rust modules and 25 TypeScript files, 24 IPC commands, 8 HTTP routes, the WebSocket
-    protocol, every on-disk format, eight runtime flows, and the measurements behind each constant.</span>
+    protocol, every on-disk format, eight runtime flows, the measurements behind each constant, and an
+    honest list of what an audit found.</span>
   </a>
-
-  <a class="card" href="https://github.com/Quantum-vik/claude-view/blob/main/CONTEXT.md">
+  <a class="row" href="https://github.com/Quantum-vik/claude-view/blob/main/CONTEXT.md">
     <b>Domain glossary &rarr;</b>
-    <span>Run vs type, turn, replay, baseline, hosted vs watched, and what "live" is allowed to mean.</span>
+    <span>Run vs type, turn, replay, baseline, hosted vs watched, and what &ldquo;live&rdquo; is allowed to mean.</span>
   </a>
 
   <footer>
+    Every diagram is interactive — pan, zoom, search, guided views, PNG/SVG export. Each ships with the
+    <code>.spec.json</code> it was generated from.<br>
     Source: <a href="https://github.com/Quantum-vik/claude-view">github.com/Quantum-vik/claude-view</a>
   </footer>
 </main>
