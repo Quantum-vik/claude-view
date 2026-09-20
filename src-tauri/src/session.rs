@@ -70,12 +70,45 @@ impl AgentState {
     }
 }
 
+/// Where a timeline card is in its life.
+///
+/// Four values, previously carried as a `String` while both of its siblings
+/// here ([`AgentState`], and `Unavailable` over in `changes`) were enums — so
+/// `entry.status != "running"` was a string compare the compiler could not
+/// check, and a typo would have read as "not running" rather than failing to
+/// build. The wire spelling is unchanged: `src/events.ts` types this field as
+/// `"running" | "success" | "error" | "interrupted"` and switches on it.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum CardStatus {
+    /// Opened by a PreToolUse hook or a transcript `tool_use`, not yet resolved.
+    Running,
+    Success,
+    Error,
+    /// The session ended while this card was still running. Distinct from
+    /// `Error` on purpose: nothing failed, the turn was cut short.
+    Interrupted,
+}
+
+impl CardStatus {
+    /// Stable wire spelling; the same string serde emits, so a test that
+    /// asserts on this is asserting on what the frontend will see.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            CardStatus::Running => "running",
+            CardStatus::Success => "success",
+            CardStatus::Error => "error",
+            CardStatus::Interrupted => "interrupted",
+        }
+    }
+}
+
 #[derive(Clone, Serialize)]
 pub struct TimelineEvent {
     pub id: String,
     pub tool: String,
     pub command: Option<String>,
-    pub status: String,
+    pub status: CardStatus,
     #[serde(rename = "durationMs")]
     pub duration_ms: Option<u64>,
     pub ts: u64,
@@ -365,7 +398,7 @@ impl Session {
                     id,
                     tool,
                     command: command.map(|c| cap_command(&c)),
-                    status: "running".into(),
+                    status: CardStatus::Running,
                     duration_ms: None,
                     ts,
                     output: None,
@@ -381,10 +414,14 @@ impl Session {
             } => {
                 let entry = timeline.iter_mut().find(|e| e.id == id)?;
                 // Don't override a card hooks already resolved live.
-                if entry.status != "running" {
+                if entry.status != CardStatus::Running {
                     return None;
                 }
-                entry.status = if is_error { "error" } else { "success" }.into();
+                entry.status = if is_error {
+                    CardStatus::Error
+                } else {
+                    CardStatus::Success
+                };
                 entry.duration_ms = Some(ts.saturating_sub(entry.ts));
                 entry.output = output;
                 Some(entry.clone())
@@ -651,7 +688,7 @@ pub fn push_timeline(timeline: &mut Vec<TimelineEvent>, event: TimelineEvent) ->
     let mut budget = timeline.len() - TIMELINE_CAP;
     let before = timeline.len();
     timeline.retain(|e| {
-        if budget > 0 && e.status != "running" {
+        if budget > 0 && e.status != CardStatus::Running {
             budget -= 1;
             false
         } else {
@@ -1081,6 +1118,23 @@ mod tests {
             merge_state(AgentState::Working, Some("permission"), false),
             AgentState::Blocked
         );
+    }
+
+    /// `src/events.ts` types this field as a union of four string literals and
+    /// switches on it, so the serde spelling is a wire contract, not an
+    /// implementation detail. `as_str()` is the same set, and a test that
+    /// asserts on one must be asserting on the other.
+    #[test]
+    fn card_status_serialises_as_the_strings_the_frontend_switches_on() {
+        for (v, want) in [
+            (CardStatus::Running, "running"),
+            (CardStatus::Success, "success"),
+            (CardStatus::Error, "error"),
+            (CardStatus::Interrupted, "interrupted"),
+        ] {
+            assert_eq!(serde_json::to_value(v).unwrap(), serde_json::json!(want));
+            assert_eq!(v.as_str(), want, "as_str must match the wire spelling");
+        }
     }
 
     /// `set_state` used to derive its "after" via `effective_state()`, which

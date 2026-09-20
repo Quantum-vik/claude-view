@@ -13,7 +13,7 @@ use uuid::Uuid;
 
 use crate::pty;
 use crate::session::{
-    cap_command, now_ms, push_timeline, AgentState, Registry, Session, TimelineEvent,
+    cap_command, now_ms, push_timeline, AgentState, CardStatus, Registry, Session, TimelineEvent,
 };
 use crate::transcript::describe_input;
 
@@ -52,7 +52,7 @@ async fn list_sessions_handler(
     State(state): State<ServerState>,
     headers: HeaderMap,
 ) -> Result<axum::Json<Vec<crate::session::SessionInfo>>, (StatusCode, String)> {
-    if !check_token(&state, &headers) {
+    if !check_token(&state.token, &headers) {
         return Err((StatusCode::UNAUTHORIZED, "bad token".into()));
     }
     Ok(axum::Json(state.registry.list()))
@@ -62,7 +62,7 @@ async fn past_sessions_handler(
     State(state): State<ServerState>,
     headers: HeaderMap,
 ) -> Result<axum::Json<Vec<crate::past_sessions::PastSession>>, (StatusCode, String)> {
-    if !check_token(&state, &headers) {
+    if !check_token(&state.token, &headers) {
         return Err((StatusCode::UNAUTHORIZED, "bad token".into()));
     }
     // Filesystem scan of ~/.claude/projects is blocking — keep it off the
@@ -107,7 +107,7 @@ async fn sessions_handler(
     headers: HeaderMap,
     body: String,
 ) -> Result<axum::Json<crate::session::SessionInfo>, (StatusCode, String)> {
-    if !check_token(&state, &headers) {
+    if !check_token(&state.token, &headers) {
         return Err((StatusCode::UNAUTHORIZED, "bad token".into()));
     }
     let req: NewSessionReq = serde_json::from_str(&body)
@@ -143,7 +143,7 @@ async fn terminals_handler(
     headers: HeaderMap,
     body: String,
 ) -> Result<axum::Json<crate::session::SessionInfo>, (StatusCode, String)> {
-    if !check_token(&state, &headers) {
+    if !check_token(&state.token, &headers) {
         return Err((StatusCode::UNAUTHORIZED, "bad token".into()));
     }
     let req: NewTerminalReq = serde_json::from_str(&body)
@@ -198,7 +198,7 @@ async fn trace_handler(
     headers: HeaderMap,
 ) -> Result<axum::Json<Value>, (StatusCode, String)> {
     let via_query = q.token.as_deref() == Some(state.token.as_str());
-    if !via_query && !check_token(&state, &headers) {
+    if !via_query && !check_token(&state.token, &headers) {
         return Err((StatusCode::UNAUTHORIZED, "bad token".into()));
     }
     let session = state
@@ -228,7 +228,7 @@ async fn changes_handler(
     headers: HeaderMap,
 ) -> Result<axum::Json<Value>, (StatusCode, String)> {
     let via_query = q.token.as_deref() == Some(state.token.as_str());
-    if !via_query && !check_token(&state, &headers) {
+    if !via_query && !check_token(&state.token, &headers) {
         return Err((StatusCode::UNAUTHORIZED, "bad token".into()));
     }
     let session = state
@@ -449,11 +449,17 @@ async fn handle_ws(socket: WebSocket, session: Arc<Session>) {
     send_task.abort();
 }
 
-fn check_token(state: &ServerState, headers: &HeaderMap) -> bool {
+/// The auth boundary for every route on this server.
+///
+/// Takes the token rather than the whole `ServerState` so it can be tested:
+/// `ServerState` owns an `AppHandle`, which cannot be built outside a running
+/// Tauri app, and that one field made the only security check in the crate
+/// unreachable from a test. It reads nothing else from the state.
+fn check_token(token: &str, headers: &HeaderMap) -> bool {
     headers
         .get("x-claude-view-token")
         .and_then(|v| v.to_str().ok())
-        == Some(state.token.as_str())
+        == Some(token)
 }
 
 fn header_viewer_id(headers: &HeaderMap) -> Option<String> {
@@ -481,7 +487,7 @@ async fn hooks_handler(
     headers: HeaderMap,
     body: String,
 ) -> StatusCode {
-    if !check_token(&state, &headers) {
+    if !check_token(&state.token, &headers) {
         return StatusCode::UNAUTHORIZED;
     }
     let Ok(v) = serde_json::from_str::<Value>(&body) else {
@@ -725,7 +731,7 @@ pub(crate) fn apply_pre_tool_use(
         id,
         tool: tool.clone(),
         command: describe_input(&tool, &v["tool_input"]).map(|c| cap_command(&c)),
-        status: "running".into(),
+        status: CardStatus::Running,
         duration_ms: None,
         ts,
         output: None,
@@ -768,7 +774,11 @@ fn apply_post_tool_use_with_output(
     let is_error = resp["is_error"].as_bool().unwrap_or(false)
         || resp["success"].as_bool().map(|s| !s).unwrap_or(false)
         || (resp.is_object() && resp["error"].is_string());
-    let status = if is_error { "error" } else { "success" };
+    let status = if is_error {
+        CardStatus::Error
+    } else {
+        CardStatus::Success
+    };
 
     let tool_use_id = v["tool_use_id"].as_str();
     // FIFO note: without tool_use_id, we resolve the oldest running card for
@@ -778,11 +788,11 @@ fn apply_post_tool_use_with_output(
         Some(id) => timeline.iter_mut().find(|e| e.id == id),
         None => timeline
             .iter_mut()
-            .find(|e| e.status == "running" && e.tool == tool),
+            .find(|e| e.status == CardStatus::Running && e.tool == tool),
     };
 
     if let Some(entry) = entry {
-        entry.status = status.into();
+        entry.status = status;
         entry.duration_ms = Some(ts.saturating_sub(entry.ts));
         entry.output = output;
         (entry.clone(), 0)
@@ -795,7 +805,7 @@ fn apply_post_tool_use_with_output(
                 .unwrap_or_else(|| Uuid::new_v4().to_string()),
             tool: tool.clone(),
             command: describe_input(&tool, &v["tool_input"]).map(|c| cap_command(&c)),
-            status: status.into(),
+            status,
             duration_ms: None,
             ts,
             output,
@@ -816,9 +826,9 @@ pub(crate) fn settle_running(timeline: &mut [TimelineEvent], ts: u64) -> Vec<Tim
     // reporting "error".
     timeline
         .iter_mut()
-        .filter(|e| e.status == "running")
+        .filter(|e| e.status == CardStatus::Running)
         .map(|entry| {
-            entry.status = "interrupted".into();
+            entry.status = CardStatus::Interrupted;
             entry.duration_ms = Some(ts.saturating_sub(entry.ts));
             entry.clone()
         })
@@ -901,7 +911,7 @@ mod tests {
             id: id.into(),
             tool: "Read".into(),
             command: Some("src/lib.rs".into()),
-            status: "success".into(),
+            status: CardStatus::Success,
             duration_ms: Some(4),
             ts,
             output: None,
@@ -1026,6 +1036,56 @@ mod tests {
 
     // ---- extract_output -----------------------------------------------------
 
+    // ---- auth ---------------------------------------------------------------
+
+    /// The only security check in the crate, and until `check_token` stopped
+    /// taking the whole `ServerState` it had no test at all — `ServerState`
+    /// owns an `AppHandle`, which cannot be constructed outside a running
+    /// Tauri app.
+    #[test]
+    fn the_token_check_accepts_only_an_exact_match() {
+        let hdr = |v: &str| {
+            let mut h = HeaderMap::new();
+            h.insert("x-claude-view-token", v.parse().unwrap());
+            h
+        };
+        let token = "daa64c78-71dc-494c-b487-79f8e5fd982b";
+
+        assert!(check_token(token, &hdr(token)));
+
+        // No header at all: the case a browser or a curl without -H hits.
+        assert!(!check_token(token, &HeaderMap::new()));
+        assert!(!check_token(token, &hdr("")));
+        assert!(!check_token(token, &hdr("wrong")));
+        // A prefix must not pass — this is the one that would matter if the
+        // comparison were ever loosened to `starts_with`.
+        assert!(!check_token(token, &hdr(&token[..token.len() - 1])));
+        assert!(!check_token(token, &hdr(&format!("{token}x"))));
+        // Case matters: the token is a uuid we generated, not a case-folded id.
+        assert!(!check_token(token, &hdr(&token.to_uppercase())));
+    }
+
+    /// HTTP header *names* are case-insensitive, so a client sending
+    /// `X-Claude-View-Token` must authenticate exactly like one sending the
+    /// lowercase form. The scripting examples in the README use the capitalised
+    /// spelling.
+    #[test]
+    fn the_token_header_name_is_case_insensitive() {
+        let token = "t0ken";
+        for name in [
+            "x-claude-view-token",
+            "X-Claude-View-Token",
+            "X-CLAUDE-VIEW-TOKEN",
+        ] {
+            let mut h = HeaderMap::new();
+            h.insert(
+                axum::http::HeaderName::from_bytes(name.as_bytes()).unwrap(),
+                token.parse().unwrap(),
+            );
+            assert!(check_token(token, &h), "header spelled {name}");
+        }
+    }
+
     #[test]
     fn extract_output_handles_every_response_shape() {
         let cases: &[(&str, Value, Option<&str>)] = &[
@@ -1144,7 +1204,7 @@ mod tests {
                 ),
                 10,
             );
-            assert_eq!(card.status, *want, "case: {name}");
+            assert_eq!(card.status.as_str(), *want, "case: {name}");
         }
     }
 
@@ -1178,10 +1238,10 @@ mod tests {
         assert_eq!(dropped, 0);
         assert_eq!(timeline.len(), 1, "must resolve in place, not append");
         assert_eq!(resolved.id, "toolu_01");
-        assert_eq!(resolved.status, "success");
+        assert_eq!(resolved.status.as_str(), "success");
         assert_eq!(resolved.duration_ms, Some(2_500));
         assert_eq!(resolved.output.as_deref(), Some("added 42 packages"));
-        assert_eq!(timeline[0].status, "success");
+        assert_eq!(timeline[0].status.as_str(), "success");
     }
 
     #[test]
@@ -1199,7 +1259,7 @@ mod tests {
         );
         assert_eq!(timeline.len(), 1);
         assert_eq!(card.id, "toolu_orphan");
-        assert_eq!(card.status, "success");
+        assert_eq!(card.status.as_str(), "success");
         assert_eq!(card.command.as_deref(), Some("src/App.tsx"));
         assert_eq!(
             card.duration_ms, None,
@@ -1253,7 +1313,7 @@ mod tests {
             timeline
                 .iter()
                 .find(|e| e.id == id)
-                .map(|e| e.status.clone())
+                .map(|e| e.status.as_str())
                 .unwrap()
         };
         assert_eq!(status("new"), "running");
@@ -1294,7 +1354,8 @@ mod tests {
         assert_eq!(b.id, "second");
         assert_eq!(b.duration_ms, Some(200));
         assert_eq!(
-            timeline[0].status, "running",
+            timeline[0].status.as_str(),
+            "running",
             "the first call is still going"
         );
 
@@ -1309,7 +1370,7 @@ mod tests {
             9_000,
         );
         assert_eq!(a.id, "first");
-        assert_eq!(a.status, "error");
+        assert_eq!(a.status.as_str(), "error");
         assert_eq!(a.duration_ms, Some(8_000));
         assert_eq!(timeline.len(), 2);
         assert_eq!(timeline[0].output.as_deref(), Some("build failed"));
@@ -1333,7 +1394,7 @@ mod tests {
             ),
             1_000,
         );
-        assert_eq!(running.status, "running");
+        assert_eq!(running.status.as_str(), "running");
 
         // Flood past the cap with settled cards.
         let mut dropped = 0;
@@ -1367,7 +1428,7 @@ mod tests {
             60_000,
         );
         assert_eq!(resolved.id, "long-runner");
-        assert_eq!(resolved.status, "success");
+        assert_eq!(resolved.status.as_str(), "success");
         assert_eq!(resolved.duration_ms, Some(59_000));
         assert_eq!(timeline.len(), before, "resolved in place, no duplicate");
     }
@@ -1430,12 +1491,17 @@ mod tests {
         let settled_now = settle_running(&mut timeline, 5_000);
         assert_eq!(settled_now.len(), 2);
         for card in &settled_now {
-            assert_eq!(card.status, "interrupted", "never a false 'error'");
+            assert_eq!(card.status.as_str(), "interrupted", "never a false 'error'");
             assert!(card.duration_ms.is_some(), "how long it ran before dying");
         }
         assert_eq!(settled_now[0].duration_ms, Some(4_000));
         assert_eq!(
-            timeline.iter().find(|e| e.id == "done").unwrap().status,
+            timeline
+                .iter()
+                .find(|e| e.id == "done")
+                .unwrap()
+                .status
+                .as_str(),
             "success",
             "already-resolved cards are untouched"
         );

@@ -14,7 +14,18 @@ tauri-plugin-dialog = "2"
 # focuses claude-view (osascript notifications belong to Script Editor).
 tauri-plugin-notification = "2"
 axum = { version = "0.7", features = ["ws"] }
-tokio = { version = "1", features = ["full"] }
+# Only what this crate actually calls: `tokio::spawn` and `spawn_blocking`
+# (rt, rt-multi-thread), `sync::broadcast` (sync), `net::TcpListener` (net) and
+# `select!` (macros).
+#
+# Was "full". Dropping it stops tokio compiling its io-std, process and signal
+# modules; fs, io-util and time stay enabled regardless because axum, hyper and
+# tauri request them, and feature unification is per-crate, not per-dependant —
+# so nothing downstream loses anything. Measured effect is on tokio's own
+# artifact: libtokio.rlib 33.97 MB -> 27.22 MB in a debug build, about 20%.
+# Wall-clock build time was inside the noise on a loaded machine, so that is
+# deliberately not claimed here.
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "net"] }
 portable-pty = "0.8"
 uuid = { version = "1", features = ["v4"] }
 serde = { version = "1", features = ["derive"] }

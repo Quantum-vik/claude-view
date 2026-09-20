@@ -202,7 +202,7 @@ Five rules define the boundary:
 | `tauri-plugin-dialog` | 2 | Native directory picker and save dialog |
 | `tauri-plugin-notification` | 2 | Desktop notifications that activate claude-view when clicked |
 | `axum` | 0.7 *(+`ws`)* | The loopback HTTP + WebSocket server |
-| `tokio` | 1 *(full)* | Async runtime behind axum |
+| `tokio` | 1 *(rt-multi-thread, macros, sync, net)* | Async runtime behind axum |
 | `portable-pty` | 0.8 | ConPTY on Windows, `openpty` on Unix — one API |
 | `serde` / `serde_json` | 1 | **`preserve_order` is load-bearing**: a `BTreeMap` would alphabetize the user's entire `settings.json` |
 | `uuid` | 1 *(v4)* | Viewer ids and the per-run auth token |
@@ -1176,11 +1176,12 @@ This section exists because a document that only describes intent is half a docu
 
 | Gap | Detail |
 |---|---|
-| **`focus_session` loses the watched flag** | Rebuilding a closed window re-derives only the `&kind=terminal` suffix from `is_terminal`; there is no `is_watched()` branch. A watched session whose window is closed and reopened from the launcher comes back as a *normal* session URL |
-| **Post-baseline git failures are silent** | Only `baseline()` failure is typed. `churn()`, the `--raw` diff, `untracked()`, `spans()` and `head` all collapse errors into empty values — so a git failure after the baseline resolves renders as a **successful** `ChangeSet` with zero files, indistinguishable from *"the session changed nothing"* |
+| ~~**`focus_session` loses the watched flag**~~ | **Fixed in the backend revamp.** `focus_session` now has the `is_watched()` branch, and `watched` is carried through the launcher's embedded tabs too — the URL was never the only path |
+| **Post-baseline git failures are partly silent** | The spine (`baseline()` and the `--raw` diff) is now typed, so the common failures surface. `churn()`, `untracked()` and `spans()` still degrade to empty values by design — a secondary read failing should not blank a page whose spine is good — so a ChangeSet can still under-report churn without saying so |
 | **`spans()` can erase a whole commit** | The `it.next()?` calls sit inside the `filter_map` closure, so one malformed or blank `--numstat` line returns `None` for the entire `CommitSpan`, not just that line |
 | ~~**`GitUnavailable` is a misnomer, and `date` is GNU-only**~~ | **Fixed in the backend revamp.** The `date` subprocess is gone (git takes the epoch directly), the variant is now `NoGit`, and `git()` distinguishes *could not run git* from *git ran and failed* — so a missing binary no longer reports `NotARepo` |
-| **`liveness::scan_tail` can silently lose its best signal** | It uses `read_to_string`, so if the 400 KB window starts mid-codepoint the read errors, `scan_tail` returns `None`, and `probe` falls through to the clock ladder — losing the outstanding-tool-call evidence the whole module is built on. (`past_sessions::scan_tail` decodes lossily and does not have this problem.) A `tool_result` landing in the discarded partial first line likewise makes a completed call look outstanding |
+| ~~**`liveness::scan_tail` can silently lose its best signal**~~ | **Fixed in the backend revamp.** It decodes lossily now, like its `past_sessions` sibling. The torn-first-line half of the note still stands |
+| **`ServerState` holds an `AppHandle`, so no handler is constructible in a test** | Deliberately left. `tauri::test::mock_app()` exists, but it returns `App<MockRuntime>`, so using it means making `ServerState`, `router()`, `open_session` and `open_terminal` generic over `R: Runtime` — and the only two handlers that read `state.app` are the ones that also fork a PTY and build a window, which no test can exercise anyway. Every other handler is a thin wrapper over a function that *is* tested. What was worth reaching was `check_token`, the crate's only security check: it now takes `&str` rather than `&ServerState` and has tests |
 | **`set_screen_blocked` broadcasts unconditionally** | Unlike `set_state`, it compares only the dialog *kind*, then bumps `state_seq` and rebroadcasts — so a session already `Blocked` by a Notification that then reports a dialog resets the viewer's *"blocked for Nm"* clock |
 | **`dedup order decides attribution`** | The parent is scanned first and subagents after, so a turn key present in both files ends up attributed to the **child**, not the parent |
 | **`rollup` uses a narrower key than `agents`** | `requestId` → `message.id`, with no `uuid` fallback. A usage-bearing record carrying neither is dropped from the machine-wide total entirely |
