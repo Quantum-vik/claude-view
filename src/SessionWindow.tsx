@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
+import { usePoll } from "./poll";
 import { invoke } from "@tauri-apps/api/core";
 import Terminal from "./Terminal";
 import type { TimelineEvent } from "./events";
@@ -652,20 +653,13 @@ export default function SessionWindow(props: SessionWindowProps = {}) {
   /** Nothing pushes for a watched session — no process to report an exit, no
    *  hooks to report a turn — so the window asks. Same cadence as the roster. */
   const [watchState, setWatchState] = useState<{ state: string; tool?: string } | null>(null);
-  useEffect(() => {
+  const pullLiveness = useCallback(() => {
     if (!watched || !vid) return;
-    let alive = true;
-    const pull = () =>
-      invoke("session_liveness", { viewerId: vid })
-        .then((v) => alive && setWatchState(v as { state: string; tool?: string }))
-        .catch(() => {});
-    void pull();
-    const t = setInterval(pull, 1500);
-    return () => {
-      alive = false;
-      clearInterval(t);
-    };
+    void invoke("session_liveness", { viewerId: vid })
+      .then((v) => setWatchState(v as { state: string; tool?: string }))
+      .catch(() => {});
   }, [watched, vid]);
+  usePoll(pullLiveness, 1500);
 
   // A watched session receives no hooks (#41), so `agentState` stays Unknown
   // for life and the default branch below would label it "Live" — a claim

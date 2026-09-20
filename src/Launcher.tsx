@@ -1,4 +1,5 @@
 import { memo, useEffect, useMemo, useRef, useState, useCallback, Fragment } from "react";
+import { usePoll } from "./poll";
 import { open } from "@tauri-apps/plugin-dialog";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
@@ -711,10 +712,7 @@ export default function Launcher() {
     invoke<ConnInfo>("get_conn_info").then(setConn).catch(() => {});
   }, [refreshHooks, refreshSessions, refreshPast]);
 
-  useEffect(() => {
-    const id = setInterval(refreshSessions, 2000);
-    return () => clearInterval(id);
-  }, [refreshSessions]);
+  usePoll(refreshSessions, 2000);
 
   // The backend may not be up at first paint — keep retrying the connection
   // info until it lands (it gates split-pane embed mode).

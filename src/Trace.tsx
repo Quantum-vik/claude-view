@@ -25,6 +25,7 @@
  */
 
 import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { usePoll } from "./poll";
 import { invoke } from "@tauri-apps/api/core";
 import { save } from "@tauri-apps/plugin-dialog";
 import { T, tint, toolFamily } from "./tokens";
@@ -167,11 +168,21 @@ function useTrace(vid: string) {
         }
         setUnavailable(null);
         cursor.current = page.cursor;
-        if (page.sources?.length) setSources(page.sources);
+        // Each of these three guards exists because the poll runs every 1.2s
+        // forever: handing React a freshly-built array or object when nothing
+        // changed is a new reference, so every consumer re-renders and WebKit
+        // relayouts and repaints for a quiet session. Only set on real change.
+        if (page.sources?.length) {
+          setSources((prev) =>
+            prev.length === page.sources.length && prev.every((s, i) => s === page.sources[i])
+              ? prev
+              : page.sources,
+          );
+        }
         if (page.entries.length) {
           setEntries((prev) => prev.concat(page.entries));
         }
-        if (page.turns) {
+        if (page.turns && Object.keys(page.turns).length) {
           // Last-wins, matching the backend: a turn's output grows across the
           // records that carry it.
           setTurns((prev) => ({ ...prev, ...page.turns }));
@@ -186,14 +197,10 @@ function useTrace(vid: string) {
     }
   }, [vid]);
 
-  useEffect(() => {
-    void pull();
-    // The transcript is written a beat after the event (0.135s / 0.244s
-    // measured), so a modest poll keeps the panel current without the 1.5s the
-    // tailer historically used.
-    const t = setInterval(() => void pull(), 1200);
-    return () => clearInterval(t);
-  }, [pull]);
+  // The transcript is written a beat after the event (0.135s / 0.244s
+  // measured), so a modest poll keeps the panel current without the 1.5s the
+  // tailer historically used. Visibility-gated: see usePoll.
+  usePoll(pull, 1200);
 
   return { entries, turns, unavailable, loading, sources };
 }

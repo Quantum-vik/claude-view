@@ -22,7 +22,8 @@
  * rows were never available. Status is a dot AND a word for the same reason.
  */
 
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useMemo, useRef, useState } from "react";
+import { usePoll } from "./poll";
 import { invoke } from "@tauri-apps/api/core";
 import { T, tint } from "./tokens";
 import { CAVEAT } from "./pricing";
@@ -90,8 +91,13 @@ export function useRoster(vid: string) {
         }
       }
       next.runs.sort((a, b) => a.startedAt - b.startedAt || a.id.localeCompare(b.id));
+      // `next` is a fresh object every poll, so setting it unconditionally
+      // re-rendered the panel every 1.5s for the life of the session even when
+      // the roster had not moved. The rosters here are a handful of runs, so a
+      // structural compare is cheaper than the relayout it avoids.
+      const changed = JSON.stringify(last.current) !== JSON.stringify(next);
       last.current = next;
-      setRoster(next);
+      if (changed) setRoster(next);
     } catch {
       last.current = EMPTY;
       setRoster({ ...EMPTY, unavailable: "unreadable" });
@@ -100,11 +106,7 @@ export function useRoster(vid: string) {
     }
   }, [vid]);
 
-  useEffect(() => {
-    void pull();
-    const t = setInterval(() => void pull(), 1500);
-    return () => clearInterval(t);
-  }, [pull]);
+  usePoll(pull, 1500);
 
   return { roster, loading };
 }

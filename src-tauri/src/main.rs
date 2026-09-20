@@ -283,13 +283,25 @@ fn is_executable(_meta: &std::fs::Metadata) -> bool {
 /// its total: a resumed session replays earlier turns verbatim into a new file,
 /// so per-session ledgers are individually correct and still sum to the wrong
 /// number. De-duplication has to be global.
+/// Runs on a blocking thread, not the GUI thread.
+///
+/// Every Tauri command in this app used to be synchronous, which means it ran
+/// on the thread that also services paint. The panels poll — the trace every
+/// 1.2s, the roster and liveness every 1.5s — so transcript folds and `git`
+/// subprocess fans were landing on the UI thread several times a second, and
+/// the tokio pool sat idle. The registry lookup stays out here: `State` is not
+/// `Send`, so nothing borrowed from it may cross the await.
 #[tauri::command]
-fn session_spend() -> Result<serde_json::Value, String> {
+async fn session_spend() -> Result<serde_json::Value, String> {
     let root = dirs::home_dir()
         .map(|h| h.join(".claude").join("projects"))
         .ok_or("no home directory")?;
-    let spend = crate::rollup::scan(&root);
-    serde_json::to_value(spend).map_err(|e| e.to_string())
+    tokio::task::spawn_blocking(move || {
+        let spend = crate::rollup::scan(&root);
+        serde_json::to_value(spend).map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 /// `agent`, when set, exports only that run. An agent window passes it:
@@ -402,31 +414,49 @@ fn now_iso8601() -> String {
 /// answer different questions: the trace is paged and positional, the roster is
 /// whole-session and unordered by position. Folding them would mean either
 /// recomputing the roster on every page or letting it go stale on page two.
+/// Runs on a blocking thread, not the GUI thread.
+///
+/// Every Tauri command in this app used to be synchronous, which means it ran
+/// on the thread that also services paint. The panels poll — the trace every
+/// 1.2s, the roster and liveness every 1.5s — so transcript folds and `git`
+/// subprocess fans were landing on the UI thread several times a second, and
+/// the tokio pool sat idle. The registry lookup stays out here: `State` is not
+/// `Send`, so nothing borrowed from it may cross the await.
 #[tauri::command]
-fn read_agents(state: State<'_, AppState>, viewer_id: String) -> Result<serde_json::Value, String> {
-    let session = state
-        .registry
-        .get(&viewer_id)
-        .ok_or_else(|| "no such session".to_string())?;
-    let sid = session.session_id.read().clone();
-    let path = crate::trace::locate_for(&session.cwd, sid.as_deref(), session.spawned_at);
+async fn read_agents(
+    state: State<'_, AppState>,
+    viewer_id: String,
+) -> Result<serde_json::Value, String> {
+    let (cwd, sid, spawned_at) = {
+        let session = state
+            .registry
+            .get(&viewer_id)
+            .ok_or_else(|| "no such session".to_string())?;
+        let sid = session.session_id.read().clone();
+        (session.cwd.clone(), sid, session.spawned_at)
+    };
+    tokio::task::spawn_blocking(move || {
+        let path = crate::trace::locate_for(&cwd, sid.as_deref(), spawned_at);
 
-    match path
-        .as_deref()
-        .ok_or(crate::trace::Unavailable::NoTranscript)
-        .and_then(crate::agents::read_roster)
-    {
-        Ok(roster) => serde_json::to_value(roster).map_err(|e| e.to_string()),
-        // Same typed-absence contract as the trace: the panel says WHICH
-        // failure it is rather than rendering an empty roster for "I cannot see".
-        Err(why) => Ok(serde_json::json!({
-            "unavailable": why,
-            "runs": [],
-            "parentTurns": 0,
-            "parentUsage": crate::transcript::TokenUsage::default(),
-            "duplicatesFolded": 0,
-        })),
-    }
+        match path
+            .as_deref()
+            .ok_or(crate::trace::Unavailable::NoTranscript)
+            .and_then(crate::agents::read_roster)
+        {
+            Ok(roster) => serde_json::to_value(roster).map_err(|e| e.to_string()),
+            // Same typed-absence contract as the trace: the panel says WHICH
+            // failure it is rather than rendering an empty roster for "I cannot see".
+            Err(why) => Ok(serde_json::json!({
+                "unavailable": why,
+                "runs": [],
+                "parentTurns": 0,
+                "parentUsage": crate::transcript::TokenUsage::default(),
+                "duplicatesFolded": 0,
+            })),
+        }
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 /// What the session changed on disk, measured from the commit HEAD pointed at
@@ -507,39 +537,69 @@ fn watch_session(
 ///
 /// Polled by the window rather than pushed, because nothing pushes: there is no
 /// process to report an exit and no hooks to report a turn (#41).
+/// Runs on a blocking thread, not the GUI thread.
+///
+/// Every Tauri command in this app used to be synchronous, which means it ran
+/// on the thread that also services paint. The panels poll — the trace every
+/// 1.2s, the roster and liveness every 1.5s — so transcript folds and `git`
+/// subprocess fans were landing on the UI thread several times a second, and
+/// the tokio pool sat idle. The registry lookup stays out here: `State` is not
+/// `Send`, so nothing borrowed from it may cross the await.
 #[tauri::command]
-fn session_liveness(
+async fn session_liveness(
     state: State<'_, AppState>,
     viewer_id: String,
 ) -> Result<serde_json::Value, String> {
-    let session = state
-        .registry
-        .get(&viewer_id)
-        .ok_or_else(|| "no such session".to_string())?;
-    let sid = session.session_id.read().clone();
-    let path = crate::trace::locate_for(&session.cwd, sid.as_deref(), session.spawned_at)
-        .ok_or_else(|| "no transcript".to_string())?;
-    let mtime = std::fs::metadata(&path)
-        .and_then(|m| m.modified())
-        .ok()
-        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-        .map(|d| d.as_millis() as u64)
-        .unwrap_or(0);
-    let state_ = crate::liveness::probe(&path, mtime, crate::session::now_ms());
-    serde_json::to_value(state_).map_err(|e| e.to_string())
+    let (cwd, sid, spawned_at) = {
+        let session = state
+            .registry
+            .get(&viewer_id)
+            .ok_or_else(|| "no such session".to_string())?;
+        let sid = session.session_id.read().clone();
+        (session.cwd.clone(), sid, session.spawned_at)
+    };
+    tokio::task::spawn_blocking(move || {
+        let path = crate::trace::locate_for(&cwd, sid.as_deref(), spawned_at)
+            .ok_or_else(|| "no transcript".to_string())?;
+        let mtime = std::fs::metadata(&path)
+            .and_then(|m| m.modified())
+            .ok()
+            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+            .map(|d| d.as_millis() as u64)
+            .unwrap_or(0);
+        let state_ = crate::liveness::probe(&path, mtime, crate::session::now_ms());
+        serde_json::to_value(state_).map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
+/// Runs on a blocking thread, not the GUI thread.
+///
+/// Every Tauri command in this app used to be synchronous, which means it ran
+/// on the thread that also services paint. The panels poll — the trace every
+/// 1.2s, the roster and liveness every 1.5s — so transcript folds and `git`
+/// subprocess fans were landing on the UI thread several times a second, and
+/// the tokio pool sat idle. The registry lookup stays out here: `State` is not
+/// `Send`, so nothing borrowed from it may cross the await.
 #[tauri::command]
-fn read_changes(
+async fn read_changes(
     state: State<'_, AppState>,
     viewer_id: String,
 ) -> Result<serde_json::Value, String> {
-    let session = state
-        .registry
-        .get(&viewer_id)
-        .ok_or_else(|| "no such session".to_string())?;
-    let cs = crate::changes::read(std::path::Path::new(&session.cwd), session.spawned_at);
-    serde_json::to_value(cs).map_err(|e| e.to_string())
+    let (cwd, spawned_at) = {
+        let session = state
+            .registry
+            .get(&viewer_id)
+            .ok_or_else(|| "no such session".to_string())?;
+        (session.cwd.clone(), session.spawned_at)
+    };
+    tokio::task::spawn_blocking(move || {
+        let cs = crate::changes::read(std::path::Path::new(&cwd), spawned_at);
+        serde_json::to_value(cs).map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 /// Unified patch for one file, fetched when the reader opens it. Kept out of
@@ -563,8 +623,16 @@ fn read_patch(
     .map_err(|why| why.as_str().to_string())
 }
 
+/// Runs on a blocking thread, not the GUI thread.
+///
+/// Every Tauri command in this app used to be synchronous, which means it ran
+/// on the thread that also services paint. The panels poll — the trace every
+/// 1.2s, the roster and liveness every 1.5s — so transcript folds and `git`
+/// subprocess fans were landing on the UI thread several times a second, and
+/// the tokio pool sat idle. The registry lookup stays out here: `State` is not
+/// `Send`, so nothing borrowed from it may cross the await.
 #[tauri::command]
-fn read_trace(
+async fn read_trace(
     state: State<'_, AppState>,
     viewer_id: String,
     after: Option<String>,
@@ -574,21 +642,21 @@ fn read_trace(
     // HTTP server: that server exists for hooks and scripting, and the webview
     // is a different origin from 127.0.0.1:<port>, so a fetch would need a CORS
     // layer we have no reason to open. `GET /trace/:id` stays for scripting.
-    let session = state
-        .registry
-        .get(&viewer_id)
-        .ok_or_else(|| "no such session".to_string())?;
-
-    let sid = session.session_id.read().clone();
+    let (cwd, sid, spawned_at) = {
+        let session = state
+            .registry
+            .get(&viewer_id)
+            .ok_or_else(|| "no such session".to_string())?;
+        let sid = session.session_id.read().clone();
+        (session.cwd.clone(), sid, session.spawned_at)
+    };
     // One body, shared with `GET /trace/:id` — including the typed absence, so
     // the two boundaries cannot drift apart again.
-    Ok(crate::trace::page_json(
-        &session.cwd,
-        sid.as_deref(),
-        session.spawned_at,
-        after.as_deref(),
-        limit,
-    ))
+    tokio::task::spawn_blocking(move || {
+        crate::trace::page_json(&cwd, sid.as_deref(), spawned_at, after.as_deref(), limit)
+    })
+    .await
+    .map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -833,9 +901,19 @@ fn show_launcher(app: &AppHandle) {
     }
 }
 
+/// Runs on a blocking thread, not the GUI thread.
+///
+/// Every Tauri command in this app used to be synchronous, which means it ran
+/// on the thread that also services paint. The panels poll — the trace every
+/// 1.2s, the roster and liveness every 1.5s — so transcript folds and `git`
+/// subprocess fans were landing on the UI thread several times a second, and
+/// the tokio pool sat idle. The registry lookup stays out here: `State` is not
+/// `Send`, so nothing borrowed from it may cross the await.
 #[tauri::command]
-fn list_past_sessions() -> Result<Vec<past_sessions::PastSession>, String> {
-    past_sessions::list()
+async fn list_past_sessions() -> Result<Vec<past_sessions::PastSession>, String> {
+    tokio::task::spawn_blocking(past_sessions::list)
+        .await
+        .map_err(|e| e.to_string())?
 }
 
 /// Move a past session's transcript to the OS Trash (recoverable). The row's

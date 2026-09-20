@@ -482,10 +482,20 @@ impl Session {
         // Note this runs even when the hook state didn't move (PostToolUse after
         // PreToolUse is Working -> Working), which is precisely the transition a
         // permission prompt is answered on.
-        if next == AgentState::Working {
+        // Derived in place, NOT via `effective_state()`: that takes
+        // `self.state.read()`, and `current` is a write guard on the same lock
+        // held by this very thread. parking_lot's RwLock is not reentrant, so
+        // the call deadlocked the thread while it still held the write guard —
+        // and every other thread that then touched `state` (the launcher
+        // listing builds SessionInfo from it) piled up behind it, which is how
+        // one hook froze the whole app.
+        let screen_after = if next == AgentState::Working {
             *self.screen_blocked.write() = None;
-        }
-        let after = self.effective_state();
+            None
+        } else {
+            screen
+        };
+        let after = merge_state(next, screen_after.as_deref(), self.is_terminal);
         if after == before {
             return; // no-op: don't bump the seq or wake every viewer
         }
@@ -1071,6 +1081,41 @@ mod tests {
             merge_state(AgentState::Working, Some("permission"), false),
             AgentState::Blocked
         );
+    }
+
+    /// `set_state` used to derive its "after" via `effective_state()`, which
+    /// takes `state.read()` — while `set_state` still held `state.write()`.
+    /// parking_lot's RwLock is not reentrant, so the first hook to reach a live
+    /// session deadlocked that thread WITH the write guard held, and every
+    /// other thread that touched `state` piled up behind it: the whole app
+    /// stopped responding. Nothing in the suite called `set_state` on a real
+    /// Session, so it shipped green. This calls it.
+    #[test]
+    fn set_state_does_not_deadlock_on_its_own_write_guard() {
+        let s = Session::watched("v1".into(), "/tmp".into(), "sid1".into(), 1_000);
+
+        // Each of these re-enters the merge path the deadlock lived on. If the
+        // reentrancy comes back, this test hangs rather than fails — a hung
+        // `cargo test` is the signal.
+        s.set_state(AgentState::Working, "PreToolUse", 1_001);
+        assert_eq!(s.effective_state(), AgentState::Working);
+
+        s.set_state(AgentState::Idle, "Stop", 1_002);
+        assert_eq!(s.effective_state(), AgentState::Idle);
+
+        // A dialog on screen outranks the hook state...
+        s.set_screen_blocked(Some("permission".into()));
+        assert_eq!(s.effective_state(), AgentState::Blocked);
+
+        // ...and a Working hook clears it, which is the branch that also writes
+        // `screen_blocked` while the state guard is held.
+        s.set_state(AgentState::Working, "PreToolUse", 1_003);
+        assert_eq!(s.effective_state(), AgentState::Working);
+        assert!(s.screen_blocked.read().is_none());
+
+        // A stale report must not move anything.
+        s.set_state(AgentState::Idle, "Stop", 1);
+        assert_eq!(s.effective_state(), AgentState::Working);
     }
 
     #[test]
