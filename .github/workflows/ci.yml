@@ -128,9 +128,8 @@ jobs:
     # "macos")] RunEvent arms in main.rs (Dock reopen, prevent_exit on
     # last-window-close), the NSUserNotification sound names in `notify`
     # ("Glass"/"Ping" exist only on macOS), the /opt/homebrew/bin probing in
-    # main.rs and pty.rs, the GNU-`date` shellout in changes.rs (BSD `date`
-    # takes different flags), and every #[cfg(unix)] libc path — which Linux
-    # does compile, but not against Apple's libc. Like windows-check it does
+    # main.rs, and every #[cfg(unix)] libc path — which Linux does compile,
+    # but not against Apple's libc. Like windows-check it does
     # not run the test suite, only proves these paths still compile, test-only
     # ones included (hence `--all-targets`).
     steps:
