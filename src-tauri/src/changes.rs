@@ -709,7 +709,13 @@ mod tests {
 
     /// `--numstat` reports a mode-only change as `0 0` and `--name-status` as a
     /// bare `M`. Only `--raw` carries the bits, which is why it is the spine.
+    ///
+    /// Unix-only: the executable bit is what is being changed, and Windows has
+    /// no equivalent to set. Without the gate the whole test crate fails to
+    /// compile there, which is what `cargo check --all-targets` on the Windows
+    /// runner is for.
     #[test]
+    #[cfg(unix)]
     fn a_mode_only_change_is_seen_even_though_numstat_reports_no_churn() {
         let d = repo("mode");
         let started = now_ms();
