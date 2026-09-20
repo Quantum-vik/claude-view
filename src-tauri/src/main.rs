@@ -1,13 +1,13 @@
 // Prevents an extra console window on Windows in release builds.
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
-mod changes;
 mod agents;
+mod changes;
 mod export;
 mod git;
 mod hooks_install;
-mod liveness;
 mod instance;
+mod liveness;
 mod past_sessions;
 mod pty;
 mod rollup;
@@ -172,9 +172,14 @@ fn new_terminal(
     )
 }
 
-fn find_in_path(name: &str) -> Option<std::path::PathBuf> {
-    let paths = std::env::var_os("PATH")?;
-    let mut dirs: Vec<std::path::PathBuf> = std::env::split_paths(&paths).collect();
+/// Probe PATH (+ the two Homebrew prefixes) for an executable by name. The
+/// merge of what was `pty::find_bin`; a GUI app launched from Finder or a
+/// desktop launcher inherits a minimal PATH, so a missing `$PATH` is no reason
+/// to skip the Homebrew directories — hence no early return here.
+pub(crate) fn find_in_path(name: &str) -> Option<std::path::PathBuf> {
+    let mut dirs: Vec<std::path::PathBuf> = std::env::var_os("PATH")
+        .map(|p| std::env::split_paths(&p).collect())
+        .unwrap_or_default();
     dirs.push("/opt/homebrew/bin".into());
     dirs.push("/usr/local/bin".into());
     dirs.into_iter().map(|d| d.join(name)).find(|c| c.is_file())
@@ -278,13 +283,25 @@ fn is_executable(_meta: &std::fs::Metadata) -> bool {
 /// its total: a resumed session replays earlier turns verbatim into a new file,
 /// so per-session ledgers are individually correct and still sum to the wrong
 /// number. De-duplication has to be global.
+/// Runs on a blocking thread, not the GUI thread.
+///
+/// Every Tauri command in this app used to be synchronous, which means it ran
+/// on the thread that also services paint. The panels poll — the trace every
+/// 1.2s, the roster and liveness every 1.5s — so transcript folds and `git`
+/// subprocess fans were landing on the UI thread several times a second, and
+/// the tokio pool sat idle. The registry lookup stays out here: `State` is not
+/// `Send`, so nothing borrowed from it may cross the await.
 #[tauri::command]
-fn session_spend() -> Result<serde_json::Value, String> {
+async fn session_spend() -> Result<serde_json::Value, String> {
     let root = dirs::home_dir()
         .map(|h| h.join(".claude").join("projects"))
         .ok_or("no home directory")?;
-    let spend = crate::rollup::scan(&root);
-    serde_json::to_value(spend).map_err(|e| e.to_string())
+    tokio::task::spawn_blocking(move || {
+        let spend = crate::rollup::scan(&root);
+        serde_json::to_value(spend).map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 /// `agent`, when set, exports only that run. An agent window passes it:
@@ -313,6 +330,7 @@ fn export_trace(
     let mut turns = std::collections::BTreeMap::new();
     let mut sources = Vec::new();
     let mut cursor = crate::trace::Cursor::default();
+    let mut complete = false;
     for _ in 0..500 {
         let page = crate::trace::read_page(path.as_deref(), &cursor, crate::trace::MAX_LIMIT)
             .map_err(|why| match why {
@@ -322,6 +340,9 @@ fn export_trace(
                 crate::trace::Unavailable::Unreadable => {
                     "the transcript could not be read".to_string()
                 }
+                // Unreachable here: the export builds its own cursors and
+                // never decodes a caller-supplied one.
+                crate::trace::Unavailable::BadCursor => "malformed cursor".to_string(),
             })?;
         if page.sources.len() > sources.len() {
             sources = page.sources.clone();
@@ -331,8 +352,18 @@ fn export_trace(
         turns.extend(page.turns);
         cursor = crate::trace::Cursor::decode(&page.cursor).unwrap_or_default();
         if done {
+            complete = true;
             break;
         }
+    }
+    // Falling out of the loop means the trace is longer than the cap, and
+    // writing what we have would hand the user a file that claims — by the rule
+    // above — to be the whole thing. Refuse instead, naming the cap.
+    if !complete {
+        return Err(
+            "trace is longer than the 500-page export cap — refusing to write a partial export"
+                .to_string(),
+        );
     }
 
     // Scoping is applied to the WHOLE trace, never to a page: the "read
@@ -372,17 +403,7 @@ fn now_iso8601() -> String {
         .unwrap_or(0);
     let days = secs / 86_400;
     let (h, mi, s) = ((secs % 86_400) / 3600, (secs % 3600) / 60, secs % 60);
-    // Civil-from-days (Howard Hinnant), matching transcript.rs's parser.
-    let z = days as i64 + 719_468;
-    let era = z.div_euclid(146_097);
-    let doe = z.rem_euclid(146_097);
-    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146_096) / 365;
-    let y = yoe + era * 400;
-    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
-    let mp = (5 * doy + 2) / 153;
-    let d = doy - (153 * mp + 2) / 5 + 1;
-    let m = if mp < 10 { mp + 3 } else { mp - 9 };
-    let y = if m <= 2 { y + 1 } else { y };
+    let (y, m, d) = crate::transcript::civil_from_days(days as i64);
     format!("{y:04}-{m:02}-{d:02}T{h:02}:{mi:02}:{s:02}Z")
 }
 
@@ -393,31 +414,49 @@ fn now_iso8601() -> String {
 /// answer different questions: the trace is paged and positional, the roster is
 /// whole-session and unordered by position. Folding them would mean either
 /// recomputing the roster on every page or letting it go stale on page two.
+/// Runs on a blocking thread, not the GUI thread.
+///
+/// Every Tauri command in this app used to be synchronous, which means it ran
+/// on the thread that also services paint. The panels poll — the trace every
+/// 1.2s, the roster and liveness every 1.5s — so transcript folds and `git`
+/// subprocess fans were landing on the UI thread several times a second, and
+/// the tokio pool sat idle. The registry lookup stays out here: `State` is not
+/// `Send`, so nothing borrowed from it may cross the await.
 #[tauri::command]
-fn read_agents(state: State<'_, AppState>, viewer_id: String) -> Result<serde_json::Value, String> {
-    let session = state
-        .registry
-        .get(&viewer_id)
-        .ok_or_else(|| "no such session".to_string())?;
-    let sid = session.session_id.read().clone();
-    let path = crate::trace::locate_for(&session.cwd, sid.as_deref(), session.spawned_at);
+async fn read_agents(
+    state: State<'_, AppState>,
+    viewer_id: String,
+) -> Result<serde_json::Value, String> {
+    let (cwd, sid, spawned_at) = {
+        let session = state
+            .registry
+            .get(&viewer_id)
+            .ok_or_else(|| "no such session".to_string())?;
+        let sid = session.session_id.read().clone();
+        (session.cwd.clone(), sid, session.spawned_at)
+    };
+    tokio::task::spawn_blocking(move || {
+        let path = crate::trace::locate_for(&cwd, sid.as_deref(), spawned_at);
 
-    match path
-        .as_deref()
-        .ok_or(crate::trace::Unavailable::NoTranscript)
-        .and_then(crate::agents::read_roster)
-    {
-        Ok(roster) => serde_json::to_value(roster).map_err(|e| e.to_string()),
-        // Same typed-absence contract as the trace: the panel says WHICH
-        // failure it is rather than rendering an empty roster for "I cannot see".
-        Err(why) => Ok(serde_json::json!({
-            "unavailable": why,
-            "runs": [],
-            "parentTurns": 0,
-            "parentUsage": crate::transcript::TokenUsage::default(),
-            "duplicatesFolded": 0,
-        })),
-    }
+        match path
+            .as_deref()
+            .ok_or(crate::trace::Unavailable::NoTranscript)
+            .and_then(crate::agents::read_roster)
+        {
+            Ok(roster) => serde_json::to_value(roster).map_err(|e| e.to_string()),
+            // Same typed-absence contract as the trace: the panel says WHICH
+            // failure it is rather than rendering an empty roster for "I cannot see".
+            Err(why) => Ok(serde_json::json!({
+                "unavailable": why,
+                "runs": [],
+                "parentTurns": 0,
+                "parentUsage": crate::transcript::TokenUsage::default(),
+                "duplicatesFolded": 0,
+            })),
+        }
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 /// What the session changed on disk, measured from the commit HEAD pointed at
@@ -443,6 +482,16 @@ fn watch_session(
     session_id: String,
     open_window: Option<bool>,
 ) -> Result<SessionInfo, String> {
+    // Same guard the resume path takes: `Registry::insert` re-points
+    // `by_session_id` at whatever it indexes last, so watching a session this
+    // app is already hosting would route every subsequent hook to the PTY-less
+    // entry — and disarm the double-resume claim along with it.
+    if state.registry.has_session_id(&session_id) {
+        return Err(format!(
+            "session {} is already open — focus it instead of watching it",
+            session_id.chars().take(8).collect::<String>()
+        ));
+    }
     let path = crate::trace::locate_for(&cwd, Some(&session_id), 0)
         .ok_or_else(|| "no transcript for that session".to_string())?;
 
@@ -488,36 +537,69 @@ fn watch_session(
 ///
 /// Polled by the window rather than pushed, because nothing pushes: there is no
 /// process to report an exit and no hooks to report a turn (#41).
+/// Runs on a blocking thread, not the GUI thread.
+///
+/// Every Tauri command in this app used to be synchronous, which means it ran
+/// on the thread that also services paint. The panels poll — the trace every
+/// 1.2s, the roster and liveness every 1.5s — so transcript folds and `git`
+/// subprocess fans were landing on the UI thread several times a second, and
+/// the tokio pool sat idle. The registry lookup stays out here: `State` is not
+/// `Send`, so nothing borrowed from it may cross the await.
 #[tauri::command]
-fn session_liveness(
+async fn session_liveness(
     state: State<'_, AppState>,
     viewer_id: String,
 ) -> Result<serde_json::Value, String> {
-    let session = state
-        .registry
-        .get(&viewer_id)
-        .ok_or_else(|| "no such session".to_string())?;
-    let sid = session.session_id.read().clone();
-    let path = crate::trace::locate_for(&session.cwd, sid.as_deref(), session.spawned_at)
-        .ok_or_else(|| "no transcript".to_string())?;
-    let mtime = std::fs::metadata(&path)
-        .and_then(|m| m.modified())
-        .ok()
-        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-        .map(|d| d.as_millis() as u64)
-        .unwrap_or(0);
-    let state_ = crate::liveness::probe(&path, mtime, crate::session::now_ms());
-    serde_json::to_value(state_).map_err(|e| e.to_string())
+    let (cwd, sid, spawned_at) = {
+        let session = state
+            .registry
+            .get(&viewer_id)
+            .ok_or_else(|| "no such session".to_string())?;
+        let sid = session.session_id.read().clone();
+        (session.cwd.clone(), sid, session.spawned_at)
+    };
+    tokio::task::spawn_blocking(move || {
+        let path = crate::trace::locate_for(&cwd, sid.as_deref(), spawned_at)
+            .ok_or_else(|| "no transcript".to_string())?;
+        let mtime = std::fs::metadata(&path)
+            .and_then(|m| m.modified())
+            .ok()
+            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+            .map(|d| d.as_millis() as u64)
+            .unwrap_or(0);
+        let state_ = crate::liveness::probe(&path, mtime, crate::session::now_ms());
+        serde_json::to_value(state_).map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
+/// Runs on a blocking thread, not the GUI thread.
+///
+/// Every Tauri command in this app used to be synchronous, which means it ran
+/// on the thread that also services paint. The panels poll — the trace every
+/// 1.2s, the roster and liveness every 1.5s — so transcript folds and `git`
+/// subprocess fans were landing on the UI thread several times a second, and
+/// the tokio pool sat idle. The registry lookup stays out here: `State` is not
+/// `Send`, so nothing borrowed from it may cross the await.
 #[tauri::command]
-fn read_changes(state: State<'_, AppState>, viewer_id: String) -> Result<serde_json::Value, String> {
-    let session = state
-        .registry
-        .get(&viewer_id)
-        .ok_or_else(|| "no such session".to_string())?;
-    let cs = crate::changes::read(std::path::Path::new(&session.cwd), session.spawned_at);
-    serde_json::to_value(cs).map_err(|e| e.to_string())
+async fn read_changes(
+    state: State<'_, AppState>,
+    viewer_id: String,
+) -> Result<serde_json::Value, String> {
+    let (cwd, spawned_at) = {
+        let session = state
+            .registry
+            .get(&viewer_id)
+            .ok_or_else(|| "no such session".to_string())?;
+        (session.cwd.clone(), session.spawned_at)
+    };
+    tokio::task::spawn_blocking(move || {
+        let cs = crate::changes::read(std::path::Path::new(&cwd), spawned_at);
+        serde_json::to_value(cs).map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 /// Unified patch for one file, fetched when the reader opens it. Kept out of
@@ -538,10 +620,19 @@ fn read_patch(
         session.spawned_at,
         &path,
     )
+    .map_err(|why| why.as_str().to_string())
 }
 
+/// Runs on a blocking thread, not the GUI thread.
+///
+/// Every Tauri command in this app used to be synchronous, which means it ran
+/// on the thread that also services paint. The panels poll — the trace every
+/// 1.2s, the roster and liveness every 1.5s — so transcript folds and `git`
+/// subprocess fans were landing on the UI thread several times a second, and
+/// the tokio pool sat idle. The registry lookup stays out here: `State` is not
+/// `Send`, so nothing borrowed from it may cross the await.
 #[tauri::command]
-fn read_trace(
+async fn read_trace(
     state: State<'_, AppState>,
     viewer_id: String,
     after: Option<String>,
@@ -551,35 +642,21 @@ fn read_trace(
     // HTTP server: that server exists for hooks and scripting, and the webview
     // is a different origin from 127.0.0.1:<port>, so a fetch would need a CORS
     // layer we have no reason to open. `GET /trace/:id` stays for scripting.
-    let session = state
-        .registry
-        .get(&viewer_id)
-        .ok_or_else(|| "no such session".to_string())?;
-
-    let cursor = match after.as_deref() {
-        Some(raw) => crate::trace::Cursor::decode(raw).ok_or("malformed cursor")?,
-        None => crate::trace::Cursor::default(),
+    let (cwd, sid, spawned_at) = {
+        let session = state
+            .registry
+            .get(&viewer_id)
+            .ok_or_else(|| "no such session".to_string())?;
+        let sid = session.session_id.read().clone();
+        (session.cwd.clone(), sid, session.spawned_at)
     };
-    let sid = session.session_id.read().clone();
-    let path = crate::trace::locate_for(&session.cwd, sid.as_deref(), session.spawned_at);
-
-    match crate::trace::read_page(
-        path.as_deref(),
-        &cursor,
-        limit.unwrap_or(crate::trace::DEFAULT_LIMIT),
-    ) {
-        Ok(page) => serde_json::to_value(page).map_err(|e| e.to_string()),
-        // A typed absence, so the panel can say WHICH failure it is rather than
-        // rendering "nothing happened" for "I cannot see".
-        Err(why) => Ok(serde_json::json!({
-            "unavailable": why,
-            "entries": [],
-            "cursor": cursor.encode(),
-            "hasMore": false,
-            "sources": [],
-            "turns": {},
-        })),
-    }
+    // One body, shared with `GET /trace/:id` — including the typed absence, so
+    // the two boundaries cannot drift apart again.
+    tokio::task::spawn_blocking(move || {
+        crate::trace::page_json(&cwd, sid.as_deref(), spawned_at, after.as_deref(), limit)
+    })
+    .await
+    .map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -696,6 +773,13 @@ fn focus_session(
     let session = state.registry.get(&viewer_id).ok_or("session not found")?;
     let kind_suffix = if session.is_terminal {
         "&kind=terminal"
+    } else if session.is_watched() {
+        // Without this a reopened watched session comes back as a HOSTED route:
+        // the viewer mounts a terminal pane against a `pty: None` session — dead
+        // and silent — and skips the liveness poll, so the state pill never
+        // updates again. The other four URL sites know their kind at
+        // construction; this one has to re-derive it.
+        "&watched=1"
     } else {
         ""
     };
@@ -709,6 +793,8 @@ fn focus_session(
     );
     let title = if session.is_terminal {
         format!("Terminal — {}", session.cwd)
+    } else if session.is_watched() {
+        format!("Watching — {}", session.cwd)
     } else {
         format!("Claude — {}", session.cwd)
     };
@@ -758,7 +844,12 @@ fn open_agent_window(
         urlencoding::encode(&agent_id)
     );
     WebviewWindowBuilder::new(&app, label, WebviewUrl::App(url.into()))
-        .title(format!("Agent — {}", &agent_id[..agent_id.len().min(12)]))
+        // By chars, not bytes: `agent_id` comes straight off the IPC boundary,
+        // and byte 12 landing mid-character would panic the command.
+        .title(format!(
+            "Agent — {}",
+            agent_id.chars().take(12).collect::<String>()
+        ))
         .inner_size(1000.0, 720.0)
         .build()
         .map_err(|e| format!("failed to open agent window: {e}"))?;
@@ -810,9 +901,19 @@ fn show_launcher(app: &AppHandle) {
     }
 }
 
+/// Runs on a blocking thread, not the GUI thread.
+///
+/// Every Tauri command in this app used to be synchronous, which means it ran
+/// on the thread that also services paint. The panels poll — the trace every
+/// 1.2s, the roster and liveness every 1.5s — so transcript folds and `git`
+/// subprocess fans were landing on the UI thread several times a second, and
+/// the tokio pool sat idle. The registry lookup stays out here: `State` is not
+/// `Send`, so nothing borrowed from it may cross the await.
 #[tauri::command]
-fn list_past_sessions() -> Result<Vec<past_sessions::PastSession>, String> {
-    past_sessions::list()
+async fn list_past_sessions() -> Result<Vec<past_sessions::PastSession>, String> {
+    tokio::task::spawn_blocking(past_sessions::list)
+        .await
+        .map_err(|e| e.to_string())?
 }
 
 /// Move a past session's transcript to the OS Trash (recoverable). The row's
@@ -868,6 +969,19 @@ fn notify(
         .as_deref()
         .filter(|s| SOUNDS.contains(s))
         .unwrap_or("Glass");
+    // The allowlist is the frontend's contract and it is macOS system-sound
+    // names, so everywhere else the name is meaningless and the notification
+    // arrives silent. notify-rust maps `sound_name` to the freedesktop
+    // `sound-name` hint on Linux, so translate once, here, where the allowlist
+    // already lives. (On Windows the name fails `Sound::from_str` and is
+    // dropped — silent, but never an invalid name the platform rejects.)
+    #[cfg(not(target_os = "macos"))]
+    let sound = match sound {
+        // The three the viewer actually sends: turn done, attention, exit.
+        "Glass" | "Hero" => "complete",
+        "Submarine" => "service-logout",
+        _ => "message-new-instant",
+    };
     // macOS drops notifications from apps that never asked for authorization —
     // banners silently don't appear. Ask (once; the OS remembers) before
     // posting.
@@ -1011,4 +1125,66 @@ fn main() {
             }
             _ => {}
         });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn split_line_suffix_takes_a_trailing_line_number() {
+        assert_eq!(split_line_suffix("a.py:42"), ("a.py", Some(42)));
+        assert_eq!(split_line_suffix("a.py"), ("a.py", None));
+        // `file:line:col` splits on the LAST colon, so the column is what comes
+        // back as the line number. Asserted as the behaviour it is: `code -g`
+        // is handed `a.py:42:8` as a path, which it still resolves.
+        assert_eq!(split_line_suffix("a.py:42:8"), ("a.py:42", Some(8)));
+        // A Windows drive letter survives both ways, because the split is from
+        // the right and `\path\a.py` does not parse as a number.
+        assert_eq!(
+            split_line_suffix(r"C:\path\a.py:42"),
+            (r"C:\path\a.py", Some(42))
+        );
+        assert_eq!(split_line_suffix(r"C:\path\a.py"), (r"C:\path\a.py", None));
+    }
+
+    /// The three refusals that fire before the `code -g` branch, so the test
+    /// does not depend on whether VS Code is installed on the machine running it.
+    #[test]
+    fn open_path_refuses_missing_dirs_and_executables() {
+        let dir = std::env::temp_dir();
+
+        let missing = dir.join(format!("cv-no-such-{}.txt", std::process::id()));
+        let err = open_path(missing.display().to_string(), None).unwrap_err();
+        assert!(err.contains("not found"), "{err}");
+
+        let err = open_path(dir.display().to_string(), None).unwrap_err();
+        assert!(err.contains("not a regular file"), "{err}");
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let exe = dir.join(format!("cv-exec-{}.txt", std::process::id()));
+            std::fs::write(&exe, b"#!/bin/sh\n").unwrap();
+            std::fs::set_permissions(&exe, std::fs::Permissions::from_mode(0o755)).unwrap();
+            let err = open_path(exe.display().to_string(), None).unwrap_err();
+            let _ = std::fs::remove_file(&exe);
+            assert!(err.contains("executable"), "{err}");
+        }
+    }
+
+    /// A relative path resolves against the session's cwd, not the app's — a
+    /// clicked path in a mirrored terminal is relative to the session.
+    #[test]
+    fn open_path_resolves_relative_against_cwd() {
+        let dir = std::env::temp_dir();
+        let name = format!("cv-rel-{}.nope", std::process::id());
+        // Nothing is created, so the refusal names the resolved path: that is
+        // what proves cwd was joined rather than the process's own directory.
+        let err = open_path(name.clone(), Some(dir.display().to_string())).unwrap_err();
+        assert!(
+            err.contains(&dir.join(&name).display().to_string()),
+            "{err}"
+        );
+    }
 }

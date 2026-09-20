@@ -325,7 +325,7 @@ claude-view/
 │  ├─ AgentWindow.tsx       239     one agent run, read-only, its own window
 │  ├─ AgentStrip.tsx        238     ● main / ○ run chips above the split
 │  ├─ TerminalWindow.tsx    191     PTY mirror minus everything Claude-specific
-│  ├─ agents.ts             201     roster pricing + presentation
+│  ├─ runs.ts               201     roster pricing + presentation
 │  ├─ pricing.ts            198     THE price table, with its AS_OF date
 │  ├─ cost.ts               146     live-rollup pricing
 │  ├─ Resizer.tsx           127     pointer-captured drag handle
@@ -505,7 +505,7 @@ Buckets by model, by repo (the `cwd`'s `file_name`, or `"(unknown)"` — a blank
 
 **① `git rev-parse` does not fail out of range.** Ask for a time before the reflog begins and it warns on stderr, returns the **oldest** entry, and exits **0**. `--verify` does not help. The defense is ordering: parse the last line of `git reflog show --date=unix HEAD` and short-circuit to `OlderThanReflog` **before the sha is ever requested**. The test asserts git's own exit-0-with-a-sha behaviour *first*, so the guard cannot be deleted without the test failing loudly.
 
-*Sub-trap:* the reflog selector must be an explicit **date string** — `HEAD@{1234}` is the 1234th reflog *entry*, not a time. Hence a `date -d @<secs>` subprocess.
+*Sub-trap:* the reflog selector must be a **date**, not a number — `HEAD@{1234}` is the 1234th reflog *entry*. Git reads `@<secs>` as an epoch, so the selector is `HEAD@{@<secs>}` and no date formatting is needed. This was a `date -d @<secs>` subprocess until the backend revamp; `date -d` is GNU-only, so the Changes panel was dead on macOS and on Windows (which has no `date` executable at all).
 
 **② `--numstat` cannot see a mode change.** `chmod +x` with no content edit reports `0 0`; `--name-status` reports a bare `M`. Only `--raw` carries the mode bits. So **`--raw` is the spine of the change set and `--numstat` is demoted to supplying churn counts only.** `mode_changed = old_mode != new_mode && status != 'A' && status != 'D'`, since an add or delete has a `000000` side that is not a mode change. The test `chmod`s **on disk** rather than using `git update-index --chmod`, which would move the index and leave `git diff <base>` untouched.
 
@@ -705,7 +705,7 @@ The focus gate is `kind !== "attention" && document.hasFocus() && isVisibleRef.c
 | `list_past_sessions` | `() → PastSession[]` | The `~/.claude/projects` scan |
 | `delete_past_session` | `{sessionId} → Result` | Moves to OS Trash |
 | `get_conn_info` | `() → {port, token}` | How the launcher embeds a viewer |
-| `read_trace` | `{viewerId, after?, limit?} → TracePage` | **Typed absence, never an Err** (except a malformed cursor) |
+| `read_trace` | `{viewerId, after?, limit?} → TracePage` | **Typed absence, never an Err** — a malformed cursor is now `unavailable: "bad_cursor"` too |
 | `read_agents` | `{viewerId} → Roster` | Same typed-absence shape |
 | `read_changes` | `{viewerId} → ChangeSet` | Baseline = HEAD as it stood at session start |
 | `read_patch` | `{viewerId, path} → string` | One file's unified diff, fetched lazily |
@@ -844,7 +844,7 @@ sequenceDiagram
 | `PastSession` | **mixed** — explicit renames give `modifiedMs`, `contextTokens`, `repoKey` beside snake_case `session_id` | `list_past_sessions` |
 | `Liveness` | internally tagged: `{"state":"live","tool":"Bash"}` | `session_liveness` |
 
-**The trace cursor** decodes to `{"": 13421, "a1705fdcf7a898a7e": 4096}` — parent keyed by the empty string, subagents by agent id — base64url-encoded without padding. Empty string means start-of-session; anything outside the alphabet is rejected as `"malformed cursor"` rather than silently treated as position 0, which would replay the whole session.
+**The trace cursor** decodes to `{"": 13421, "a1705fdcf7a898a7e": 4096}` — parent keyed by the empty string, subagents by agent id — base64url-encoded without padding. Empty string means start-of-session; anything outside the alphabet is rejected as `unavailable: "bad_cursor"` rather than silently treated as position 0, which would replay the whole session.
 
 ---
 
@@ -944,7 +944,7 @@ sequenceDiagram
     CH->>G: rev-parse --verify HEAD          → NoCommits
     CH->>G: reflog show --date=unix HEAD
     Note over CH: ① spawned_at < oldest entry ⇒ OlderThanReflog<br/>BEFORE asking for a sha — rev-parse exits 0 with the WRONG one
-    CH->>G: date -d @secs → rev-parse HEAD@{<iso>}   ⇒ BASELINE
+    CH->>G: rev-parse HEAD@{@secs}   ⇒ BASELINE
     CH->>G: diff --numstat -M <base>         churn only ("-" ⇒ binary)
     CH->>G: diff --raw -M <base>             ② THE SPINE — the only form carrying mode bits
     CH->>G: ls-files --others --exclude-standard   ③ diff never lists untracked
@@ -981,7 +981,7 @@ These recur across modules and are the load-bearing ideas of the codebase.
 
 ### 9.1 Typed absence, never an empty success
 
-`read_page` returns `Result<TracePage, Unavailable>` with two failure variants; `read_roster` reuses it; `ChangeSet` carries five (`NotARepo`, `WorktreeGone`, `NoCommits`, `OlderThanReflog`, `GitUnavailable`). Every boundary turns these into an **HTTP 200 / `Ok`** carrying `{unavailable: <which>}` rather than an error, because the UI must be able to say *which* failure occurred. The rule as the source states it:
+`read_page` returns `Result<TracePage, Unavailable>` with two failure variants; `read_roster` reuses it; `ChangeSet` carries five (`NotARepo`, `WorktreeGone`, `NoCommits`, `OlderThanReflog`, `NoGit` — serialised as `git_unavailable`, the name the panel already keys on). Every boundary turns these into an **HTTP 200 / `Ok`** carrying `{unavailable: <which>}` rather than an error, because the UI must be able to say *which* failure occurred. The rule as the source states it:
 
 > Rendering "nothing happened" for "I cannot see" is a lie the viewer has no way to detect.
 
@@ -1179,7 +1179,7 @@ This section exists because a document that only describes intent is half a docu
 | **`focus_session` loses the watched flag** | Rebuilding a closed window re-derives only the `&kind=terminal` suffix from `is_terminal`; there is no `is_watched()` branch. A watched session whose window is closed and reopened from the launcher comes back as a *normal* session URL |
 | **Post-baseline git failures are silent** | Only `baseline()` failure is typed. `churn()`, the `--raw` diff, `untracked()`, `spans()` and `head` all collapse errors into empty values — so a git failure after the baseline resolves renders as a **successful** `ChangeSet` with zero files, indistinguishable from *"the session changed nothing"* |
 | **`spans()` can erase a whole commit** | The `it.next()?` calls sit inside the `filter_map` closure, so one malformed or blank `--numstat` line returns `None` for the entire `CommitSpan`, not just that line |
-| **`GitUnavailable` is a misnomer, and `date` is GNU-only** | It is reachable from exactly one place — `iso_local()` failing, i.e. the `date` binary. A missing git binary reports `NotARepo` instead. And `date -d @<secs>` is hardcoded, so **non-GNU `date` (macOS/BSD) would make every baseline resolve to `GitUnavailable`** |
+| ~~**`GitUnavailable` is a misnomer, and `date` is GNU-only**~~ | **Fixed in the backend revamp.** The `date` subprocess is gone (git takes the epoch directly), the variant is now `NoGit`, and `git()` distinguishes *could not run git* from *git ran and failed* — so a missing binary no longer reports `NotARepo` |
 | **`liveness::scan_tail` can silently lose its best signal** | It uses `read_to_string`, so if the 400 KB window starts mid-codepoint the read errors, `scan_tail` returns `None`, and `probe` falls through to the clock ladder — losing the outstanding-tool-call evidence the whole module is built on. (`past_sessions::scan_tail` decodes lossily and does not have this problem.) A `tool_result` landing in the discarded partial first line likewise makes a completed call look outstanding |
 | **`set_screen_blocked` broadcasts unconditionally** | Unlike `set_state`, it compares only the dialog *kind*, then bumps `state_seq` and rebroadcasts — so a session already `Blocked` by a Notification that then reports a dialog resets the viewer's *"blocked for Nm"* clock |
 | **`dedup order decides attribution`** | The parent is scanned first and subagents after, so a turn key present in both files ends up attributed to the **child**, not the parent |

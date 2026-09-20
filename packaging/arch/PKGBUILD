@@ -32,7 +32,7 @@ build() {
   npm ci
   npm run build
   cd src-tauri
-  cargo build --release --locked --no-default-features
+  cargo build --release --locked
 }
 
 package() {

@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 use std::fs;
-use std::io::{BufRead, BufReader, Read, Seek, SeekFrom};
+use std::io::{BufRead, BufReader, ErrorKind, Read, Seek, SeekFrom};
 use std::path::Path;
 
 use serde::Serialize;
@@ -96,6 +96,22 @@ fn is_scratch(cwd: &str) -> bool {
         .any(|root| p.starts_with(root))
 }
 
+/// Open `~/.claude/projects` for a whole-corpus scan. `Ok(None)` means the
+/// directory genuinely is not there yet — a machine that has never run Claude
+/// Code has no sessions, which is not a failure.
+///
+/// Everything else has to surface. Discarding the error rendered a permissions
+/// problem, a broken symlink or a cloud directory mid-sync as an empty
+/// launcher, and the spend rollup as "$0 spent" — which is worse, because it
+/// reads as a fact rather than as "I could not look".
+fn read_corpus(projects: &Path) -> Result<Option<fs::ReadDir>, String> {
+    match fs::read_dir(projects) {
+        Ok(dirs) => Ok(Some(dirs)),
+        Err(e) if e.kind() == ErrorKind::NotFound => Ok(None),
+        Err(e) => Err(format!("could not read {}: {e}", projects.display())),
+    }
+}
+
 pub fn list() -> Result<Vec<PastSession>, String> {
     let projects = dirs::home_dir()
         .ok_or("could not resolve home directory")?
@@ -106,8 +122,8 @@ pub fn list() -> Result<Vec<PastSession>, String> {
     // One clock for the whole scan, so two sessions cannot be judged against
     // different "now"s and sort inconsistently.
     let now = crate::session::now_ms();
-    let Ok(project_dirs) = fs::read_dir(&projects) else {
-        return Ok(out); // no projects dir -> no sessions
+    let Some(project_dirs) = read_corpus(&projects)? else {
+        return Ok(out); // no projects dir -> no sessions yet
     };
 
     for project in project_dirs.flatten() {
@@ -190,7 +206,7 @@ pub fn delete(session_id: &str) -> Result<(), String> {
         .join(".claude")
         .join("projects");
     let file_name = format!("{session_id}.jsonl");
-    let Ok(project_dirs) = fs::read_dir(&projects) else {
+    let Some(project_dirs) = read_corpus(&projects)? else {
         return Err("no projects directory".into());
     };
     for project in project_dirs.flatten() {
@@ -376,8 +392,14 @@ mod tests {
     /// Everything else in angle brackets is genuinely chrome and stays hidden.
     #[test]
     fn other_injected_blocks_are_still_skipped() {
-        assert_eq!(slash_command_label("<local-command-stdout>ok</local-command-stdout>"), None);
-        assert_eq!(slash_command_label("<system-reminder>be good</system-reminder>"), None);
+        assert_eq!(
+            slash_command_label("<local-command-stdout>ok</local-command-stdout>"),
+            None
+        );
+        assert_eq!(
+            slash_command_label("<system-reminder>be good</system-reminder>"),
+            None
+        );
         assert_eq!(slash_command_label("<command-name></command-name>"), None);
     }
 
@@ -481,6 +503,37 @@ mod tests {
         assert_eq!(git::discover(Path::new(&cwd)), None, "cwd must be absent");
         assert_eq!(repo_ident(&cwd, &mut cache), Some(seeded));
         assert_eq!(cache.len(), 1, "a hit must not add an entry");
+    }
+
+    /// An *absent* corpus means "no sessions yet"; a corpus that cannot be READ
+    /// is a failure. Collapsing the two showed a permissions problem as an empty
+    /// launcher — and the spend rollup as "$0 spent", which looks like a fact.
+    #[test]
+    fn an_unreadable_corpus_is_an_error_not_an_empty_list() {
+        let root = std::env::temp_dir().join(format!("cv-corpus-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        assert!(
+            read_corpus(&root).unwrap().is_none(),
+            "NotFound is not a failure"
+        );
+
+        fs::create_dir_all(&root).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(&root, fs::Permissions::from_mode(0o000)).unwrap();
+            // root ignores the mode, so only assert when the OS actually refused.
+            if fs::read_dir(&root).is_err() {
+                let err = read_corpus(&root).unwrap_err();
+                assert!(
+                    err.contains(&root.display().to_string()),
+                    "the error must name the path: {err}"
+                );
+            }
+            fs::set_permissions(&root, fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        assert!(read_corpus(&root).unwrap().is_some(), "a readable corpus");
+        let _ = fs::remove_dir_all(&root);
     }
 
     /// Deleted worktrees are the cwd that repeats most across transcripts, so

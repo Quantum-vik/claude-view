@@ -73,7 +73,6 @@ impl AgentState {
 #[derive(Clone, Serialize)]
 pub struct TimelineEvent {
     pub id: String,
-    pub kind: String,
     pub tool: String,
     pub command: Option<String>,
     pub status: String,
@@ -173,10 +172,6 @@ pub struct Session {
     /// slow PreToolUse can land after the Stop that followed it; anything older
     /// than this is dropped rather than applied out of order.
     pub last_state_ts: AtomicU64,
-    /// Timeline cards dropped by the [`TIMELINE_CAP`] eviction, so the viewer
-    /// can say "N earlier commands" instead of silently pretending they never
-    /// happened.
-    pub timeline_elided: AtomicU64,
     /// git identity of `cwd`, resolved once at spawn (a session's cwd never
     /// changes). `None` when cwd isn't in a repo.
     pub repo: Option<crate::git::RepoInfo>,
@@ -262,10 +257,10 @@ impl UsageLedger {
             ..Default::default()
         };
         for t in self.turns.values() {
-            add(&mut out.total, &t.usage);
+            out.total.add(&t.usage);
             if t.agent_id.is_some() {
                 out.subagent_turns += 1;
-                add(&mut out.subagent_total, &t.usage);
+                out.subagent_total.add(&t.usage);
             }
             // An unpriceable turn still has to be counted, or the total quietly
             // shrinks. It lands under "unknown" and the viewer renders it
@@ -273,7 +268,7 @@ impl UsageLedger {
             let model = t.model.as_deref().unwrap_or("unknown");
             let slot = by.entry(model).or_insert((0, TokenUsage::default()));
             slot.0 += 1;
-            add(&mut slot.1, &t.usage);
+            slot.1.add(&t.usage);
         }
         out.by_model = by
             .into_iter()
@@ -287,14 +282,6 @@ impl UsageLedger {
         out.by_model.sort_by(|a, b| a.model.cmp(&b.model));
         out
     }
-}
-
-fn add(acc: &mut TokenUsage, u: &TokenUsage) {
-    acc.input += u.input;
-    acc.cache_read += u.cache_read;
-    acc.cache_write_5m += u.cache_write_5m;
-    acc.cache_write_1h += u.cache_write_1h;
-    acc.output += u.output;
 }
 
 /// Token usage for the context meter. `input` = context-window occupancy
@@ -350,7 +337,6 @@ impl Session {
             state_since: std::sync::atomic::AtomicU64::new(started_at),
             state_seq: Default::default(),
             last_state_ts: Default::default(),
-            timeline_elided: Default::default(),
         }
     }
     /// Merge a tool event parsed from the transcript into the timeline. Deduped
@@ -377,7 +363,6 @@ impl Session {
                 let event = TimelineEvent {
                     agent_id,
                     id,
-                    kind: "command".into(),
                     tool,
                     command: command.map(|c| cap_command(&c)),
                     status: "running".into(),
@@ -385,9 +370,7 @@ impl Session {
                     ts,
                     output: None,
                 };
-                let dropped = push_timeline(&mut timeline, event.clone());
-                drop(timeline);
-                self.note_elided(dropped);
+                push_timeline(&mut timeline, event.clone());
                 Some(event)
             }
             Record::End {
@@ -470,20 +453,26 @@ impl Session {
         if self.is_terminal {
             return;
         }
-        // Snapshot what viewers believe *before* touching anything, so the
-        // broadcast below can be gated on what they'd actually see change. With
-        // no dialog on screen this is exactly the hook state and the whole
-        // function behaves as it always did.
-        let before = self.effective_state();
-        {
-            let mut current = self.state.write();
-            let prev_ts = self.last_state_ts.load(Ordering::Acquire);
-            if ts < prev_ts {
-                return; // stale report; a newer one already won
-            }
-            self.last_state_ts.store(ts, Ordering::Release);
-            *current = next;
+        // The whole decision runs under ONE state write guard, and both merges
+        // are derived in place. Computing them with `effective_state()` — which
+        // takes and releases both locks on each call — let a second hook
+        // delivery interleave between the two, so both could see a no-op and
+        // skip the broadcast, leaving every viewer showing a state this session
+        // is not in. `screen_blocked` is taken *inside* the state guard; that
+        // order is safe because nothing anywhere takes the state lock while
+        // holding the screen one.
+        let mut current = self.state.write();
+        let prev_ts = self.last_state_ts.load(Ordering::Acquire);
+        if ts < prev_ts {
+            return; // stale report; a newer one already won
         }
+        self.last_state_ts.store(ts, Ordering::Release);
+        // One read of the screen, shared by both merges. With no dialog on
+        // screen `before`/`after` are exactly the hook states and the whole
+        // function behaves as it always did.
+        let screen = self.screen_blocked.read().clone();
+        let before = merge_state(*current, screen.as_deref(), self.is_terminal);
+        *current = next;
         // If Claude is working, nothing is blocking it — whatever dialog the
         // screen last reported has been answered. This is the rule that makes
         // "user approved the prompt, Claude carried on" resolve on its own, with
@@ -493,10 +482,20 @@ impl Session {
         // Note this runs even when the hook state didn't move (PostToolUse after
         // PreToolUse is Working -> Working), which is precisely the transition a
         // permission prompt is answered on.
-        if next == AgentState::Working {
+        // Derived in place, NOT via `effective_state()`: that takes
+        // `self.state.read()`, and `current` is a write guard on the same lock
+        // held by this very thread. parking_lot's RwLock is not reentrant, so
+        // the call deadlocked the thread while it still held the write guard —
+        // and every other thread that then touched `state` (the launcher
+        // listing builds SessionInfo from it) piled up behind it, which is how
+        // one hook froze the whole app.
+        let screen_after = if next == AgentState::Working {
             *self.screen_blocked.write() = None;
-        }
-        let after = self.effective_state();
+            None
+        } else {
+            screen
+        };
+        let after = merge_state(next, screen_after.as_deref(), self.is_terminal);
         if after == before {
             return; // no-op: don't bump the seq or wake every viewer
         }
@@ -569,14 +568,6 @@ impl Session {
         // nothing that calls it — ever holds two of these locks at once.
         let screen = self.screen_blocked.read().clone();
         merge_state(self.agent_state(), screen.as_deref(), self.is_terminal)
-    }
-
-    /// Record cards dropped by [`push_timeline`] so the viewer can say
-    /// "N earlier commands" rather than silently pretending they never happened.
-    pub fn note_elided(&self, dropped: u64) {
-        if dropped > 0 {
-            self.timeline_elided.fetch_add(dropped, Ordering::Relaxed);
-        }
     }
 
     pub fn send_control(&self, value: serde_json::Value) {
@@ -792,6 +783,28 @@ impl Registry {
         self.by_session_id.read().contains_key(session_id)
     }
 
+    /// Reserve a claude session id for `viewer_id`, or return false if someone
+    /// already holds it. `has_session_id` followed by `insert` is not the same
+    /// thing: the spawn between them does a fork/exec with no lock held, and
+    /// two `--resume <same id>` requests both walked through that window and
+    /// appended to one transcript. This takes the write lock once and decides
+    /// under it, so exactly one caller can win.
+    pub fn claim_session_id(&self, session_id: &str, viewer_id: &str) -> bool {
+        let mut by_sid = self.by_session_id.write();
+        if by_sid.contains_key(session_id) {
+            return false;
+        }
+        by_sid.insert(session_id.to_string(), viewer_id.to_string());
+        true
+    }
+
+    /// Hand a claim back when the spawn it was taken for never happened. A
+    /// claim that outlives a failed spawn blocks resuming that conversation for
+    /// the life of the app, which is worse than the race the claim prevents.
+    pub fn release_session_id(&self, session_id: &str) {
+        self.by_session_id.write().remove(session_id);
+    }
+
     /// Look up by viewer_id or session_id. Holds the `sessions` read lock for
     /// both lookups so it's race-free against concurrent removal.
     pub fn get(&self, id: &str) -> Option<Arc<Session>> {
@@ -862,7 +875,10 @@ mod tests {
             1_000,
         );
         assert!(s.is_watched());
-        assert!(s.info().watched, "the flag is derived, so it cannot disagree");
+        assert!(
+            s.info().watched,
+            "the flag is derived, so it cannot disagree"
+        );
 
         // None of these have anything to act on; none may panic.
         s.write_input(b"rm -rf /\n".to_vec());
@@ -1065,6 +1081,41 @@ mod tests {
             merge_state(AgentState::Working, Some("permission"), false),
             AgentState::Blocked
         );
+    }
+
+    /// `set_state` used to derive its "after" via `effective_state()`, which
+    /// takes `state.read()` — while `set_state` still held `state.write()`.
+    /// parking_lot's RwLock is not reentrant, so the first hook to reach a live
+    /// session deadlocked that thread WITH the write guard held, and every
+    /// other thread that touched `state` piled up behind it: the whole app
+    /// stopped responding. Nothing in the suite called `set_state` on a real
+    /// Session, so it shipped green. This calls it.
+    #[test]
+    fn set_state_does_not_deadlock_on_its_own_write_guard() {
+        let s = Session::watched("v1".into(), "/tmp".into(), "sid1".into(), 1_000);
+
+        // Each of these re-enters the merge path the deadlock lived on. If the
+        // reentrancy comes back, this test hangs rather than fails — a hung
+        // `cargo test` is the signal.
+        s.set_state(AgentState::Working, "PreToolUse", 1_001);
+        assert_eq!(s.effective_state(), AgentState::Working);
+
+        s.set_state(AgentState::Idle, "Stop", 1_002);
+        assert_eq!(s.effective_state(), AgentState::Idle);
+
+        // A dialog on screen outranks the hook state...
+        s.set_screen_blocked(Some("permission".into()));
+        assert_eq!(s.effective_state(), AgentState::Blocked);
+
+        // ...and a Working hook clears it, which is the branch that also writes
+        // `screen_blocked` while the state guard is held.
+        s.set_state(AgentState::Working, "PreToolUse", 1_003);
+        assert_eq!(s.effective_state(), AgentState::Working);
+        assert!(s.screen_blocked.read().is_none());
+
+        // A stale report must not move anything.
+        s.set_state(AgentState::Idle, "Stop", 1);
+        assert_eq!(s.effective_state(), AgentState::Working);
     }
 
     #[test]

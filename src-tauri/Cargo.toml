@@ -23,7 +23,10 @@ serde = { version = "1", features = ["derive"] }
 # alphabetizes and reflows the user's ENTIRE file — permissions, env, statusLine,
 # MCP config — which is not ours to reorder.
 serde_json = { version = "1", features = ["preserve_order"] }
-dirs = "5"
+# 6, not 5: tauri itself depends on dirs 6.x, and pinning 5 here compiles a
+# second copy of the whole subtree. The only API this crate uses is
+# `dirs::home_dir() -> Option<PathBuf>`, unchanged between the two.
+dirs = "6"
 parking_lot = "0.12"
 urlencoding = "2"
 futures-util = "0.3"

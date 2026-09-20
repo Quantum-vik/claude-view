@@ -82,17 +82,6 @@ impl TerminalKind {
 /// tmux terminal window (re)attaches to the same persistent session.
 const TMUX_SESSION: &str = "claude-view";
 
-/// Probe PATH (+ common GUI-launch locations) for an executable by name.
-#[cfg(not(windows))]
-fn find_bin(name: &str) -> Option<PathBuf> {
-    let mut dirs: Vec<PathBuf> = std::env::var_os("PATH")
-        .map(|p| std::env::split_paths(&p).collect())
-        .unwrap_or_default();
-    dirs.push("/opt/homebrew/bin".into());
-    dirs.push("/usr/local/bin".into());
-    dirs.into_iter().map(|d| d.join(name)).find(|c| c.is_file())
-}
-
 /// The user's login shell. GUI apps inherit a minimal env, so fall back to a
 /// sane per-platform default when `$SHELL` is unset.
 #[cfg(not(windows))]
@@ -113,7 +102,7 @@ fn terminal_command(kind: TerminalKind) -> CommandBuilder {
     let shell = login_shell();
     let mut cmd = CommandBuilder::new(&shell);
     match kind {
-        TerminalKind::Tmux if find_bin("tmux").is_some() => {
+        TerminalKind::Tmux if crate::find_in_path("tmux").is_some() => {
             // Login shell sets up env, then hands the tty to tmux (attach or create).
             cmd.arg("-l");
             cmd.arg("-c");
@@ -249,7 +238,6 @@ fn spawn_in_pty(
         state_since: std::sync::atomic::AtomicU64::new(spawned_at),
         state_seq: Default::default(),
         last_state_ts: Default::default(),
-        timeline_elided: Default::default(),
         repo,
     });
     registry.insert(session.clone());
@@ -355,12 +343,16 @@ pub fn spawn_session(
         .map(str::to_string);
     if let Some(id) = &resume_id {
         // Two processes resuming one conversation both append to the same
-        // transcript JSONL and corrupt it. Registry::insert indexes the seeded
-        // id, so this check sees resumes that haven't bound a hook yet.
-        if registry.has_session_id(id) {
+        // transcript JSONL and corrupt it. The claim is atomic: a check here
+        // followed by Registry::insert after the spawn left a fork/exec-wide
+        // window with no lock held, which two `--resume <same id>` requests both
+        // walked through.
+        if !registry.claim_session_id(id, &viewer_id) {
             return Err(format!(
+                // Byte-slicing this would panic on a multi-byte character, and
+                // the id comes straight off the wire (`resume` in POST /sessions).
                 "session {} is already open — focus it instead of resuming it twice",
-                &id[..id.len().min(8)]
+                id.chars().take(8).collect::<String>()
             ));
         }
     }
@@ -376,15 +368,27 @@ pub fn spawn_session(
     // /bind + port wiring but not exported here.
     let _ = token;
 
-    let session = spawn_in_pty(
+    let spawned = spawn_in_pty(
         registry,
         viewer_id,
         cwd.clone(),
         cmd,
-        resume_id,
+        resume_id.clone(),
         false,
         skip_permissions,
-    )?;
+    );
+    let session = match spawned {
+        Ok(session) => session,
+        Err(e) => {
+            // A claim the spawn never used would block resuming that
+            // conversation for the life of the app — worse than the race the
+            // claim prevents — so hand it back before returning the error.
+            if let Some(id) = &resume_id {
+                registry.release_session_id(id);
+            }
+            return Err(e);
+        }
+    };
 
     // Transcript tailer thread: reads Claude Code's session JSONL and merges
     // tool calls into the timeline. Works with hooks OFF and provides persistent

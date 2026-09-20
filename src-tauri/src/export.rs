@@ -228,7 +228,10 @@ price table in effect when it was calculated.\n\n"
                 if let Some(u) = turns.get(id) {
                     o.push_str(&format!(
                         "\n### Turn `{}` — {} tokens\n\n",
-                        &id[..id.len().min(20)],
+                        // By chars, not bytes: the id comes straight out of the
+                        // transcript, and slicing mid-codepoint panics the very
+                        // export the user asked for.
+                        id.chars().take(20).collect::<String>(),
                         total(u)
                     ));
                 }
@@ -327,6 +330,23 @@ mod tests {
             },
         );
         t
+    }
+
+    /// A turn id is external data — `requestId` or `message.id` read straight
+    /// out of the transcript. Truncating it by bytes panicked the export
+    /// whenever byte 20 landed mid-codepoint.
+    #[test]
+    fn a_multibyte_turn_id_does_not_panic_the_export() {
+        let id = format!("req_{}", "→".repeat(8)); // 28 bytes; byte 20 is mid-char
+        let mut e = entry(Kind::Assistant, "hi");
+        e.turn_id = Some(id.clone());
+        let mut t = BTreeMap::new();
+        t.insert(id.clone(), TokenUsage::default());
+        let md = to_markdown(&[e], &t, &meta());
+        assert!(
+            md.contains(&id.chars().take(20).collect::<String>()),
+            "the heading must carry the first 20 CHARS of the id:\n{md}"
+        );
     }
 
     /// A number in a file has no tooltip. Both formats must say what it means.

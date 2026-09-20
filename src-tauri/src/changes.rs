@@ -44,8 +44,12 @@ pub enum Unavailable {
     /// The session started before the reflog's oldest entry (git keeps 90 days
     /// by default), so its starting point is gone.
     OlderThanReflog,
-    /// git itself could not be run.
-    GitUnavailable,
+    /// git could not be run at all, or the one diff this panel is built on
+    /// failed. The wire name is pinned: `Changes.tsx` keys its message table on
+    /// `git_unavailable`; the variant was renamed only to stop repeating the
+    /// enum's own name (clippy `enum_variant_names`).
+    #[serde(rename = "git_unavailable")]
+    NoGit,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -120,35 +124,33 @@ impl ChangeSet {
     }
 }
 
-fn git(cwd: &Path, args: &[&str]) -> Result<String, ()> {
+/// Why a git invocation produced nothing. These are two different problems for
+/// the person reading the panel — a binary that will not start is theirs to fix,
+/// a nonzero exit is the repo's — and collapsing both into `()` reported a
+/// missing `git` as "not a git repository", sending them to check their cwd.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum GitErr {
+    /// The binary never started: absent from PATH, or not executable.
+    NotRunnable,
+    /// git ran and exited nonzero. Carries its stderr, which is the only place
+    /// the real cause (`dubious ownership`, a held `index.lock`) is ever
+    /// written.
+    Failed(String),
+}
+
+fn git(cwd: &Path, args: &[&str]) -> Result<String, GitErr> {
     let out = Command::new("git")
         .arg("-C")
         .arg(cwd)
         .args(args)
         .output()
-        .map_err(|_| ())?;
+        .map_err(|_| GitErr::NotRunnable)?;
     if !out.status.success() {
-        return Err(());
+        return Err(GitErr::Failed(
+            String::from_utf8_lossy(&out.stderr).into_owned(),
+        ));
     }
     Ok(String::from_utf8_lossy(&out.stdout).into_owned())
-}
-
-/// Format epoch millis as a local ISO timestamp git's approxidate accepts.
-///
-/// **Not** the bare unix number: `HEAD@{1234}` is the 1234th reflog *entry*, not
-/// a time. Large values happen to parse as dates today; an explicit date can
-/// never be read as an index.
-fn iso_local(ms: u64) -> Option<String> {
-    let out = Command::new("date")
-        .arg("-d")
-        .arg(format!("@{}", ms / 1000))
-        .arg("+%Y-%m-%dT%H:%M:%S")
-        .output()
-        .ok()?;
-    if !out.status.success() {
-        return None;
-    }
-    Some(String::from_utf8_lossy(&out.stdout).trim().to_string())
 }
 
 /// Oldest reflog entry for HEAD, epoch seconds.
@@ -166,11 +168,14 @@ fn oldest_reflog(cwd: &Path) -> Option<u64> {
 /// an out-of-range time with the oldest entry and exit 0, so a caller that
 /// trusts the exit code renders a diff over the wrong range.
 pub fn baseline(cwd: &Path, spawned_at_ms: u64) -> Result<String, Unavailable> {
-    if git(cwd, &["rev-parse", "--git-dir"]).is_err() {
-        return Err(if cwd.exists() {
-            Unavailable::NotARepo
-        } else {
-            Unavailable::WorktreeGone
+    // A binary that will not start is not a missing repo. Reported as
+    // `NotARepo` it sent the reader to inspect their cwd when the problem was
+    // their PATH.
+    if let Err(e) = git(cwd, &["rev-parse", "--git-dir"]) {
+        return Err(match e {
+            GitErr::NotRunnable => Unavailable::NoGit,
+            GitErr::Failed(_) if cwd.exists() => Unavailable::NotARepo,
+            GitErr::Failed(_) => Unavailable::WorktreeGone,
         });
     }
     if git(cwd, &["rev-parse", "--verify", "HEAD"]).is_err() {
@@ -180,10 +185,20 @@ pub fn baseline(cwd: &Path, spawned_at_ms: u64) -> Result<String, Unavailable> {
     if spawned_at_ms / 1000 < oldest {
         return Err(Unavailable::OlderThanReflog);
     }
-    let when = iso_local(spawned_at_ms).ok_or(Unavailable::GitUnavailable)?;
-    git(cwd, &["rev-parse", &format!("HEAD@{{{when}}}")])
-        .map(|s| s.trim().to_string())
-        .map_err(|_| Unavailable::OlderThanReflog)
+    // `@<secs>` is git's own spelling for a unix timestamp, so the selector is a
+    // date with no formatting step: this used to shell out to `date -d @<secs>`,
+    // which is GNU-only syntax — on macOS `-d` means something else entirely and
+    // on Windows there is no `date` binary at all, so the panel was dead on both.
+    //
+    // The `@` is not optional. A bare `HEAD@{1234}` is the 1234th reflog
+    // *entry*; git only reads a bare number as a time above 1e8, and relying on
+    // that threshold is how an index gets mistaken for a date.
+    git(
+        cwd,
+        &["rev-parse", &format!("HEAD@{{@{}}}", spawned_at_ms / 1000)],
+    )
+    .map(|s| s.trim().to_string())
+    .map_err(|_| Unavailable::OlderThanReflog)
 }
 
 /// Churn per path, from `--numstat`. A `-` count means binary.
@@ -229,7 +244,10 @@ fn parse_raw(line: &str, churn: &[(String, Option<u32>, Option<u32>)]) -> Option
     };
 
     let hit = churn.iter().find(|(p, _, _)| {
-        *p == path || old_path.as_deref().is_some_and(|o| p.contains(o) && p.contains(&path))
+        *p == path
+            || old_path
+                .as_deref()
+                .is_some_and(|o| p.contains(o) && p.contains(&path))
     });
     let (add, rem, binary) = match hit {
         Some((_, a, r)) => (a.unwrap_or(0), r.unwrap_or(0), a.is_none()),
@@ -276,7 +294,12 @@ fn untracked(cwd: &Path) -> Vec<ChangedFile> {
 fn spans(cwd: &Path, base: &str) -> Vec<CommitSpan> {
     let Ok(out) = git(
         cwd,
-        &["log", "--reverse", "--format=%H%x1f%ct%x1f%s", &format!("{base}..HEAD")],
+        &[
+            "log",
+            "--reverse",
+            "--format=%H%x1f%ct%x1f%s",
+            &format!("{base}..HEAD"),
+        ],
     ) else {
         return vec![];
     };
@@ -286,7 +309,10 @@ fn spans(cwd: &Path, base: &str) -> Vec<CommitSpan> {
             let sha = p.next()?;
             let ts = p.next()?.parse().ok()?;
             let subject = p.next()?.to_string();
-            let stat = git(cwd, &["show", "--numstat", "--format=", sha]).unwrap_or_default();
+            // A failed `show` used to render a commit that demonstrably exists —
+            // `log` just listed it — as `0 files, +0/-0`. Drop the row instead of
+            // inventing an empty commit.
+            let stat = git(cwd, &["show", "--numstat", "--format=", sha]).ok()?;
             let mut files = vec![];
             let (mut add, mut rem) = (0u32, 0u32);
             for l in stat.lines() {
@@ -318,7 +344,15 @@ pub fn read(cwd: &Path, spawned_at_ms: u64) -> ChangeSet {
         Err(why) => return ChangeSet::absent(why),
     };
     let ch = churn(cwd, &base);
-    let raw = git(cwd, &["diff", "--raw", "-M", &base]).unwrap_or_default();
+    // The spine, and the only call here that may not degrade: an empty `--raw`
+    // is indistinguishable from a clean tree, so `unwrap_or_default()` rendered
+    // dubious ownership, a held `index.lock` or a broken `--exclude-standard` as
+    // "you changed nothing" — the §9.1 lie the viewer cannot detect. The
+    // secondary reads below still degrade, but only now that this one is known
+    // good.
+    let Ok(raw) = git(cwd, &["diff", "--raw", "-M", &base]) else {
+        return ChangeSet::absent(Unavailable::NoGit);
+    };
     let mut files: Vec<ChangedFile> = raw
         .lines()
         .filter(|l| l.starts_with(':'))
@@ -344,10 +378,30 @@ pub fn read(cwd: &Path, spawned_at_ms: u64) -> ChangeSet {
 }
 
 /// Unified patch for one file, fetched when it is opened.
-pub fn patch(cwd: &Path, spawned_at_ms: u64, path: &str) -> Result<String, String> {
-    let base = baseline(cwd, spawned_at_ms).map_err(|_| "no baseline".to_string())?;
+///
+/// The error is the same typed absence a listing carries, because `baseline`
+/// already knows *which* failure this is: flattening it to `"no baseline"` made
+/// this the one boundary that knew why and threw it away.
+pub fn patch(cwd: &Path, spawned_at_ms: u64, path: &str) -> Result<String, Unavailable> {
+    let base = baseline(cwd, spawned_at_ms)?;
     // `--` guards a path that looks like a revision.
-    git(cwd, &["diff", "-M", &base, "--", path]).map_err(|_| "git diff failed".to_string())
+    git(cwd, &["diff", "-M", &base, "--", path]).map_err(|_| Unavailable::NoGit)
+}
+
+impl Unavailable {
+    /// The snake_case name serde puts in `ChangeSet.unavailable`, for the two
+    /// boundaries that must hand a patch failure to the panel as a plain string
+    /// (a Tauri `Err` and a 404 body). Kept as one match so a caller cannot
+    /// invent a second spelling of these names.
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::NotARepo => "not_a_repo",
+            Self::WorktreeGone => "worktree_gone",
+            Self::NoCommits => "no_commits",
+            Self::OlderThanReflog => "older_than_reflog",
+            Self::NoGit => "git_unavailable",
+        }
+    }
 }
 
 #[cfg(test)]
@@ -368,7 +422,12 @@ mod tests {
     }
 
     fn sh(cwd: &Path, args: &[&str]) -> String {
-        let out = Command::new("git").arg("-C").arg(cwd).args(args).output().unwrap();
+        let out = Command::new("git")
+            .arg("-C")
+            .arg(cwd)
+            .args(args)
+            .output()
+            .unwrap();
         String::from_utf8_lossy(&out.stdout).trim().to_string()
     }
 
@@ -400,16 +459,44 @@ mod tests {
         let Ok(ms) = std::env::var("CV_DUMP_CHANGES") else {
             return;
         };
-        let cwd = PathBuf::from(env!("CARGO_MANIFEST_DIR")).parent().unwrap().to_path_buf();
+        let cwd = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .unwrap()
+            .to_path_buf();
         let cs = read(&cwd, ms.parse().unwrap());
         eprintln!(
             "baseline {:?} -> {:?}: {} files, +{}/-{}, {} spans",
-            cs.baseline, cs.head, cs.totals.files, cs.totals.add, cs.totals.rem, cs.spans.len()
+            cs.baseline,
+            cs.head,
+            cs.totals.files,
+            cs.totals.add,
+            cs.totals.rem,
+            cs.spans.len()
         );
-        let modes: Vec<_> = cs.files.iter().filter(|f| f.mode_changed).map(|f| &f.path).collect();
-        let renames: Vec<_> = cs.files.iter().filter(|f| f.status == 'R').map(|f| &f.path).collect();
-        let binaries: Vec<_> = cs.files.iter().filter(|f| f.binary).map(|f| &f.path).collect();
-        let untracked: Vec<_> = cs.files.iter().filter(|f| f.status == 'U').map(|f| &f.path).collect();
+        let modes: Vec<_> = cs
+            .files
+            .iter()
+            .filter(|f| f.mode_changed)
+            .map(|f| &f.path)
+            .collect();
+        let renames: Vec<_> = cs
+            .files
+            .iter()
+            .filter(|f| f.status == 'R')
+            .map(|f| &f.path)
+            .collect();
+        let binaries: Vec<_> = cs
+            .files
+            .iter()
+            .filter(|f| f.binary)
+            .map(|f| &f.path)
+            .collect();
+        let untracked: Vec<_> = cs
+            .files
+            .iter()
+            .filter(|f| f.status == 'U')
+            .map(|f| &f.path)
+            .collect();
         eprintln!("mode changes: {modes:?}");
         eprintln!("renames: {renames:?}");
         eprintln!("binaries: {binaries:?}");
@@ -426,7 +513,9 @@ mod tests {
                 }
             }
             let mut v = serde_json::to_value(&cs).unwrap();
-            v.as_object_mut().unwrap().insert("_patches".into(), serde_json::Value::Object(patches));
+            v.as_object_mut()
+                .unwrap()
+                .insert("_patches".into(), serde_json::Value::Object(patches));
             fs::write(&dest, serde_json::to_string(&v).unwrap()).unwrap();
             eprintln!("wrote {dest}");
         }
@@ -437,6 +526,95 @@ mod tests {
         let d = scratch("norepo");
         assert_eq!(baseline(&d, now_ms()), Err(Unavailable::NotARepo));
         assert_eq!(read(&d, now_ms()).unavailable, Some(Unavailable::NotARepo));
+    }
+
+    /// The unit error type destroyed both of git's answers inside the helper, so
+    /// no caller could tell a missing binary from a broken repo even if it
+    /// wanted to. `NotRunnable` itself cannot be provoked without moving `git`
+    /// off PATH for the whole process — which every other test here needs — so
+    /// what is asserted is that the failing side is a *different* variant and
+    /// that git's stderr, the only record of the real cause, survives.
+    #[test]
+    fn git_failing_is_not_git_being_unrunnable() {
+        let d = repo("giterr");
+        let e = git(&d, &["rev-parse", "--verify", "no/such/ref"]).unwrap_err();
+        assert_ne!(e, GitErr::NotRunnable);
+        let GitErr::Failed(stderr) = e else {
+            unreachable!()
+        };
+        assert!(
+            stderr.contains("fatal"),
+            "git's stderr must survive: {stderr:?}"
+        );
+        // And a repo-shaped failure must still read as a repo problem.
+        assert_eq!(
+            baseline(&scratch("giterr2"), now_ms()),
+            Err(Unavailable::NotARepo)
+        );
+    }
+
+    /// The selector has to be a *date*. `HEAD@{<n>}` is the n-th reflog entry —
+    /// this repo has one, so asking for the fifth is fatal — while the same
+    /// number behind an `@` is a unix timestamp and resolves. That is the whole
+    /// reason the `date -d @<secs>` subprocess existed, and the reason it does
+    /// not need to.
+    #[test]
+    fn the_reflog_selector_is_a_date_not_an_index() {
+        let d = repo("selector");
+        assert!(
+            git(&d, &["rev-parse", "HEAD@{5}"]).is_err(),
+            "5 is an index"
+        );
+        assert!(
+            git(&d, &["rev-parse", "HEAD@{@5}"]).is_ok(),
+            "@5 is 1970, a date"
+        );
+    }
+
+    /// §9.1 at the one call site that may not degrade. The base tree's object is
+    /// removed, which leaves every earlier step working — `--git-dir`, `--verify
+    /// HEAD` and the reflog never read a tree — and fails only `diff --raw`,
+    /// exactly like dubious ownership or a held `index.lock` would.
+    #[test]
+    fn a_failing_diff_is_typed_absence_not_an_empty_success() {
+        let d = repo("brokendiff");
+        let tree = sh(&d, &["rev-parse", "HEAD^{tree}"]);
+        fs::remove_file(d.join(".git/objects").join(&tree[..2]).join(&tree[2..])).unwrap();
+
+        assert!(
+            git(&d, &["rev-parse", "--verify", "HEAD"]).is_ok(),
+            "HEAD still parses"
+        );
+        let cs = read(&d, now_ms());
+        assert_eq!(cs.unavailable, Some(Unavailable::NoGit));
+        assert!(cs.files.is_empty());
+    }
+
+    /// The panel keys its message table on these strings, so the rename of
+    /// `GitUnavailable` must not reach the wire.
+    #[test]
+    fn the_absence_names_on_the_wire_are_the_ones_the_panel_knows() {
+        assert_eq!(
+            serde_json::to_value(Unavailable::NoGit).unwrap(),
+            serde_json::json!("git_unavailable")
+        );
+        for why in [
+            Unavailable::NotARepo,
+            Unavailable::WorktreeGone,
+            Unavailable::NoCommits,
+            Unavailable::OlderThanReflog,
+            Unavailable::NoGit,
+        ] {
+            assert_eq!(serde_json::to_value(&why).unwrap(), why.as_str());
+        }
+    }
+
+    /// The patch route was the one boundary that knew which failure it was, and
+    /// it answered `"no baseline"` for all five.
+    #[test]
+    fn a_patch_without_a_baseline_says_which_failure_it_was() {
+        let d = scratch("nopatch");
+        assert_eq!(patch(&d, now_ms(), "a.txt"), Err(Unavailable::NotARepo));
     }
 
     #[test]
@@ -469,7 +647,10 @@ mod tests {
             .args(["rev-parse", "--verify", "HEAD@{2001-09-09T01:46:40}"])
             .output()
             .unwrap();
-        assert!(out.status.success(), "git exits 0 out of range — that is the trap");
+        assert!(
+            out.status.success(),
+            "git exits 0 out of range — that is the trap"
+        );
         assert!(!String::from_utf8_lossy(&out.stdout).trim().is_empty());
 
         assert_eq!(baseline(&d, ancient), Err(Unavailable::OlderThanReflog));
@@ -505,7 +686,10 @@ mod tests {
         assert!(raw.is_empty(), "git diff is blind to untracked files");
 
         let cs = read(&d, started);
-        assert!(cs.files.iter().any(|f| f.path == "new.txt" && f.status == 'U'));
+        assert!(cs
+            .files
+            .iter()
+            .any(|f| f.path == "new.txt" && f.status == 'U'));
     }
 
     #[test]
@@ -525,7 +709,13 @@ mod tests {
 
     /// `--numstat` reports a mode-only change as `0 0` and `--name-status` as a
     /// bare `M`. Only `--raw` carries the bits, which is why it is the spine.
+    ///
+    /// Unix-only: the executable bit is what is being changed, and Windows has
+    /// no equivalent to set. Without the gate the whole test crate fails to
+    /// compile there, which is what `cargo check --all-targets` on the Windows
+    /// runner is for.
     #[test]
+    #[cfg(unix)]
     fn a_mode_only_change_is_seen_even_though_numstat_reports_no_churn() {
         let d = repo("mode");
         let started = now_ms();
@@ -540,10 +730,17 @@ mod tests {
         fs::set_permissions(&f, perm).unwrap();
 
         let numstat = sh(&d, &["diff", "--numstat", "HEAD"]);
-        assert!(numstat.starts_with("0\t0"), "numstat sees no churn: {numstat:?}");
+        assert!(
+            numstat.starts_with("0\t0"),
+            "numstat sees no churn: {numstat:?}"
+        );
 
         let cs = read(&d, started);
-        let f = cs.files.iter().find(|f| f.path == "a.txt").expect("file missing");
+        let f = cs
+            .files
+            .iter()
+            .find(|f| f.path == "a.txt")
+            .expect("file missing");
         assert!(f.mode_changed);
         assert_eq!(f.old_mode, "100644");
         assert_eq!(f.new_mode, "100755");
@@ -552,7 +749,11 @@ mod tests {
     #[test]
     fn a_rename_is_one_row_carrying_where_it_came_from() {
         let d = repo("rename");
-        fs::write(d.join("big.txt"), (0..80).map(|i| format!("line {i}\n")).collect::<String>()).unwrap();
+        fs::write(
+            d.join("big.txt"),
+            (0..80).map(|i| format!("line {i}\n")).collect::<String>(),
+        )
+        .unwrap();
         sh(&d, &["add", "big.txt"]);
         sh(&d, &["commit", "-qm", "big"]);
         let started = now_ms();
@@ -561,11 +762,19 @@ mod tests {
         sh(&d, &["commit", "-qm", "move"]);
 
         let cs = read(&d, started);
-        let f = cs.files.iter().find(|f| f.status == 'R').expect("no rename detected");
+        let f = cs
+            .files
+            .iter()
+            .find(|f| f.status == 'R')
+            .expect("no rename detected");
         assert_eq!(f.path, "moved.txt");
         assert_eq!(f.old_path.as_deref(), Some("big.txt"));
         assert_eq!(f.similarity, Some(100));
-        assert_eq!(cs.files.len(), 1, "a rename is ONE row, not a delete plus an add");
+        assert_eq!(
+            cs.files.len(),
+            1,
+            "a rename is ONE row, not a delete plus an add"
+        );
     }
 
     #[test]
@@ -634,7 +843,10 @@ mod tests {
 
         let cs = read(&d, started);
         let serialized = serde_json::to_string(&cs).unwrap();
-        assert!(!serialized.contains("+two"), "listing must not carry patch text");
+        assert!(
+            !serialized.contains("+two"),
+            "listing must not carry patch text"
+        );
 
         let p = patch(&d, started, "a.txt").unwrap();
         assert!(p.contains("+two"));

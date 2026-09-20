@@ -13,7 +13,7 @@
  * thing that runs or costs money. See `CONTEXT.md`.
  */
 
-import { costOfTurn, type TurnTokens } from "./pricing";
+import { costOfTurn } from "./pricing";
 import { totalTokens, type TokenUsage } from "./cost";
 
 /** Liveness, mirroring `Status` in src-tauri/src/agents.rs. */
@@ -69,16 +69,6 @@ export interface PricedRoster {
   duplicatesFolded: number;
 }
 
-function toTurnTokens(u: TokenUsage): TurnTokens {
-  return {
-    input: u.input,
-    cacheWrite5m: u.cacheWrite5m,
-    cacheWrite1h: u.cacheWrite1h,
-    cacheRead: u.cacheRead,
-    output: u.output,
-  };
-}
-
 /**
  * Price a roster.
  *
@@ -101,7 +91,7 @@ export function priceRoster(r: Roster, parentModel: string | null): PricedRoster
   let tools = 0;
 
   const priced = r.runs.map((run) => {
-    const usd = run.model ? costOfTurn(run.model, toTurnTokens(run.usage)) : null;
+    const usd = run.model ? costOfTurn(run.model, run.usage) : null;
     if (usd === null) unpricedRuns += 1;
     else runsUsd += usd;
     tools += run.tools;
@@ -114,9 +104,7 @@ export function priceRoster(r: Roster, parentModel: string | null): PricedRoster
     };
   });
 
-  const parentUsd = parentModel
-    ? costOfTurn(parentModel, toTurnTokens(r.parentUsage))
-    : null;
+  const parentUsd = parentModel ? costOfTurn(parentModel, r.parentUsage) : null;
   const sessionUsd = runsUsd + (parentUsd ?? 0);
   for (const run of priced) {
     run.share = sessionUsd > 0 && run.usd !== null ? run.usd / sessionUsd : 0;

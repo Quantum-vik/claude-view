@@ -26,7 +26,7 @@ import {
   priceRoster,
   runLabel,
   type RunStatus,
-} from "./agents";
+} from "./runs";
 
 const params = new URLSearchParams(window.location.search);
 

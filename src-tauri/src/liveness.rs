@@ -71,8 +71,13 @@ fn scan_tail(path: &Path) -> Option<String> {
     let len = f.metadata().ok()?.len();
     let from = len.saturating_sub(TAIL_BYTES);
     f.seek(SeekFrom::Start(from)).ok()?;
-    let mut buf = String::new();
-    f.take(TAIL_BYTES).read_to_string(&mut buf).ok()?;
+    // Read bytes and decode lossily, as `past_sessions::scan_tail` does: a
+    // 400 KB offset lands mid-character often enough, and `read_to_string`
+    // fails the WHOLE read when it does — throwing away the outstanding-call
+    // signal and leaving only the clock, which cannot tell thinking from dead.
+    let mut bytes = Vec::new();
+    f.take(TAIL_BYTES).read_to_end(&mut bytes).ok()?;
+    let buf = String::from_utf8_lossy(&bytes);
 
     // The first line is partial whenever we did not start at 0.
     let skip = usize::from(from > 0);
@@ -106,7 +111,7 @@ fn scan_tail(path: &Path) -> Option<String> {
     }
     // The most recently STARTED call still open — a session can have several in
     // flight, and the newest is the one it is waiting on now.
-    Some(order.iter().rev().find_map(|id| open.get(id).cloned())?)
+    order.iter().rev().find_map(|id| open.get(id).cloned())
 }
 
 /// [`probe`], but skipping the tail read for a file that is plainly cold.
@@ -199,7 +204,9 @@ mod tests {
         let now = crate::session::now_ms();
         let mut rows = vec![];
         for proj in fs::read_dir(&root).unwrap().flatten() {
-            let Ok(files) = fs::read_dir(proj.path()) else { continue };
+            let Ok(files) = fs::read_dir(proj.path()) else {
+                continue;
+            };
             for f in files.flatten() {
                 let p = f.path();
                 if p.extension().and_then(|e| e.to_str()) != Some("jsonl") {
@@ -233,7 +240,9 @@ mod tests {
         let quiet_for_4_minutes = NOW - 240_000;
         assert_eq!(
             probe(&p, quiet_for_4_minutes, NOW),
-            Liveness::Live { tool: Some("Bash".into()) }
+            Liveness::Live {
+                tool: Some("Bash".into())
+            }
         );
     }
 
@@ -264,7 +273,9 @@ mod tests {
         );
         assert_eq!(
             probe(&p, NOW - 5_000, NOW),
-            Liveness::Live { tool: Some("Bash".into()) }
+            Liveness::Live {
+                tool: Some("Bash".into())
+            }
         );
     }
 
@@ -280,7 +291,10 @@ mod tests {
     #[test]
     fn the_clock_carries_the_four_states_when_nothing_is_outstanding() {
         let d = scratch("clock");
-        let p = write(&d, &[r#"{"timestamp":"2026-09-19T04:20:16.000Z","type":"user"}"#]);
+        let p = write(
+            &d,
+            &[r#"{"timestamp":"2026-09-19T04:20:16.000Z","type":"user"}"#],
+        );
         let at = |quiet: u64| probe(&p, NOW - quiet, NOW);
 
         assert_eq!(at(5_000), Liveness::Live { tool: None });
@@ -297,9 +311,20 @@ mod tests {
     #[test]
     fn the_threshold_is_three_minutes_not_one() {
         let d = scratch("threshold");
-        let p = write(&d, &[r#"{"timestamp":"2026-09-19T04:20:16.000Z","type":"user"}"#]);
-        assert_ne!(probe(&p, NOW - 90_000, NOW), Liveness::Idle, "90s is not idle");
-        assert_ne!(probe(&p, NOW - 150_000, NOW), Liveness::Idle, "150s is not idle");
+        let p = write(
+            &d,
+            &[r#"{"timestamp":"2026-09-19T04:20:16.000Z","type":"user"}"#],
+        );
+        assert_ne!(
+            probe(&p, NOW - 90_000, NOW),
+            Liveness::Idle,
+            "90s is not idle"
+        );
+        assert_ne!(
+            probe(&p, NOW - 150_000, NOW),
+            Liveness::Idle,
+            "150s is not idle"
+        );
     }
 
     #[test]
@@ -319,11 +344,20 @@ mod tests {
         )
         .repeat(9_000);
         let p = d.join("t.jsonl");
-        fs::write(&p, format!("{filler}{}", call("t9", "Grep", "2026-09-19T04:20:16.000Z"))).unwrap();
-        assert!(fs::metadata(&p).unwrap().len() > TAIL_BYTES, "fixture must exceed the window");
+        fs::write(
+            &p,
+            format!("{filler}{}", call("t9", "Grep", "2026-09-19T04:20:16.000Z")),
+        )
+        .unwrap();
+        assert!(
+            fs::metadata(&p).unwrap().len() > TAIL_BYTES,
+            "fixture must exceed the window"
+        );
         assert_eq!(
             probe(&p, NOW - 1_000, NOW),
-            Liveness::Live { tool: Some("Grep".into()) }
+            Liveness::Live {
+                tool: Some("Grep".into())
+            }
         );
     }
 }

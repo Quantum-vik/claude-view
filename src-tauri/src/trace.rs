@@ -30,7 +30,7 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use crate::transcript::{subagents_for, SubagentFile};
+use crate::transcript::{describe_input, parse_iso_ms, subagents_for, SubagentFile};
 
 /// How many entries a page returns when the caller does not say.
 pub const DEFAULT_LIMIT: usize = 200;
@@ -120,6 +120,12 @@ impl Cursor {
 /// A page of trace, plus where to resume.
 #[derive(Debug, Clone, Serialize)]
 pub struct TracePage {
+    /// Which failure this page is reporting, per §9.1 — absent on success.
+    /// A field rather than a shape assembled by hand at each boundary: the two
+    /// hand-written copies had already drifted, and the HTTP one had lost
+    /// `turns` entirely.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub unavailable: Option<Unavailable>,
     pub entries: Vec<Entry>,
     /// Feed back as `after=` to continue. Always present, even when empty, so
     /// a caller polling a quiet session keeps a valid position.
@@ -152,6 +158,59 @@ pub enum Unavailable {
     NoTranscript,
     /// The file was located but cannot be read now (deleted, rotated, perms).
     Unreadable,
+    /// The `after=` cursor did not decode. Reported rather than defaulted: a
+    /// default cursor silently restarts the page from offset 0, and a viewer
+    /// that asked to continue has no way to tell that from a session that
+    /// genuinely rewound.
+    BadCursor,
+}
+
+/// One trace page as JSON, including the typed-absence shape.
+///
+/// The IPC command and `GET /trace/:id` both call this. They used to build the
+/// page separately and had already drifted — the HTTP copy had lost `turns`
+/// entirely — which is the whole reason this exists rather than living at each
+/// boundary.
+pub fn page_json(
+    cwd: &str,
+    session_id: Option<&str>,
+    spawned_at: u64,
+    after: Option<&str>,
+    limit: Option<usize>,
+) -> Value {
+    // Decode first: an absence page echoes the caller's cursor back unchanged,
+    // so a poller keeps its position through a transient failure — and it can
+    // only do that if the cursor parsed.
+    let cursor = match after {
+        Some(raw) => match Cursor::decode(raw) {
+            Some(c) => c,
+            None => return absent_page(Unavailable::BadCursor, &Cursor::default()),
+        },
+        None => Cursor::default(),
+    };
+    let path = locate_for(cwd, session_id, spawned_at);
+    match read_page(path.as_deref(), &cursor, limit.unwrap_or(DEFAULT_LIMIT)) {
+        // `unavailable` is skipped when None, so a success page carries no key
+        // at all rather than an explicit null.
+        Ok(page) => serde_json::to_value(page).unwrap_or_else(|_| {
+            // TracePage is plain data; to_value cannot fail on it. Degrade to
+            // the absence shape rather than panicking in a command handler.
+            absent_page(Unavailable::Unreadable, &cursor)
+        }),
+        Err(why) => absent_page(why, &cursor),
+    }
+}
+
+fn absent_page(why: Unavailable, cursor: &Cursor) -> Value {
+    serde_json::to_value(TracePage {
+        unavailable: Some(why),
+        entries: Vec::new(),
+        cursor: cursor.encode(),
+        has_more: false,
+        sources: Vec::new(),
+        turns: Default::default(),
+    })
+    .expect("TracePage is plain data")
 }
 
 /// Read one page of a session's trace.
@@ -211,6 +270,7 @@ pub fn read_page(
     }
 
     Ok(TracePage {
+        unavailable: None,
         entries,
         cursor: next.encode(),
         has_more,
@@ -319,7 +379,7 @@ fn clip(s: &str) -> (String, bool) {
 
 /// Turn one transcript line into zero or more entries.
 fn parse_line(v: &Value, offset: u64, agent_id: Option<&str>, out: &mut Vec<Entry>) {
-    let ts = v["timestamp"].as_str().and_then(parse_ts).unwrap_or(0);
+    let ts = v["timestamp"].as_str().and_then(parse_iso_ms).unwrap_or(0);
     let turn_id = v["requestId"]
         .as_str()
         .or_else(|| v["message"]["id"].as_str())
@@ -389,7 +449,8 @@ fn parse_line(v: &Value, offset: u64, agent_id: Option<&str>, out: &mut Vec<Entr
             }
             Some("tool_use") => {
                 let tool = b["name"].as_str().unwrap_or("Tool").to_string();
-                let (text, truncated) = clip(&describe_input(&tool, &b["input"]));
+                let (text, truncated) =
+                    clip(&describe_input(&tool, &b["input"]).unwrap_or_default());
                 out.push(Entry {
                     tool: Some(tool),
                     tool_use_id: b["id"].as_str().map(str::to_string),
@@ -426,29 +487,6 @@ fn flatten(content: &Value) -> String {
             .join("\n"),
         _ => String::new(),
     }
-}
-
-fn describe_input(tool: &str, input: &Value) -> String {
-    if tool == "Bash" {
-        return input["command"].as_str().unwrap_or("").to_string();
-    }
-    for key in [
-        "file_path",
-        "path",
-        "pattern",
-        "query",
-        "url",
-        "description",
-    ] {
-        if let Some(s) = input[key].as_str() {
-            return s.to_string();
-        }
-    }
-    String::new()
-}
-
-fn parse_ts(s: &str) -> Option<u64> {
-    crate::transcript::parse_iso_ms(s)
 }
 
 // ── base64url, unpadded ────────────────────────────────────────────────────

@@ -22,7 +22,6 @@ export interface TimelineEvent {
    *  and transcript records converge on one entry — which is also what lets
    *  this stream join straight onto a trace entry's `toolUseId`. */
   id: string;
-  kind: "command";
   tool: string;
   command: string | null;
   status: "running" | "success" | "error" | "interrupted";

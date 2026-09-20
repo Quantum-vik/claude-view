@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
+import { usePoll } from "./poll";
 import { invoke } from "@tauri-apps/api/core";
 import Terminal from "./Terminal";
 import type { TimelineEvent } from "./events";
@@ -210,6 +211,9 @@ interface SessionWindowProps {
   port?: string;
   token?: string;
   cwd?: string;
+  /** Embedded panes have no window URL to carry `?watched=1`, so the launcher
+   *  passes the flag it already has from `SessionInfo.watched`. */
+  watched?: boolean;
   embedded?: boolean;
   /** Is this session the pane the user can actually see? In tab mode every
    *  session is mounted at once and the inactive ones are hidden with
@@ -229,7 +233,7 @@ export default function SessionWindow(props: SessionWindowProps = {}) {
   /** A session claude-view did not launch (#40): read from its transcript, with
    *  no process behind it. Read-only by construction — there is no PTY to type
    *  into or resize — exactly as an agent run's window already is. */
-  const watched = params.get("watched") === "1";
+  const watched = props.watched ?? params.get("watched") === "1";
   // A standalone window is always "the visible pane" — only the launcher's tab
   // mode has hidden-but-mounted sessions, and it passes this explicitly.
   const isVisible = props.isVisible ?? true;
@@ -649,20 +653,13 @@ export default function SessionWindow(props: SessionWindowProps = {}) {
   /** Nothing pushes for a watched session — no process to report an exit, no
    *  hooks to report a turn — so the window asks. Same cadence as the roster. */
   const [watchState, setWatchState] = useState<{ state: string; tool?: string } | null>(null);
-  useEffect(() => {
+  const pullLiveness = useCallback(() => {
     if (!watched || !vid) return;
-    let alive = true;
-    const pull = () =>
-      invoke("session_liveness", { viewerId: vid })
-        .then((v) => alive && setWatchState(v as { state: string; tool?: string }))
-        .catch(() => {});
-    void pull();
-    const t = setInterval(pull, 1500);
-    return () => {
-      alive = false;
-      clearInterval(t);
-    };
+    void invoke("session_liveness", { viewerId: vid })
+      .then((v) => setWatchState(v as { state: string; tool?: string }))
+      .catch(() => {});
   }, [watched, vid]);
+  usePoll(pullLiveness, 1500);
 
   // A watched session receives no hooks (#41), so `agentState` stays Unknown
   // for life and the default branch below would label it "Live" — a claim
@@ -970,8 +967,9 @@ export default function SessionWindow(props: SessionWindowProps = {}) {
         })}
 
         {/* Popped-out window only: move this session back into the main app
-            as a tab (closes this window; the PTY keeps running). */}
-        {!props.embedded && vid && (
+            as a tab (closes this window; the PTY keeps running). A watched
+            session has no PTY to keep running, so there is nothing to dock. */}
+        {!props.embedded && !watched && vid && (
           <button
             onClick={() => invoke("dock_session", { viewerId: vid }).catch(() => {})}
             title="Move this session back into the main app as a tab"
