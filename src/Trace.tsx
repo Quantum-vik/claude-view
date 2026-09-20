@@ -33,7 +33,7 @@ import { Button, Stat } from "./ui";
 import type { ChangeSet, CommitSpan } from "./Changes";
 import { useRoster } from "./Agents";
 import type { TimelineEvent } from "./events";
-import { runLabel, shorten, formatDuration, formatRunUsd, type AgentRun } from "./agents";
+import { runLabel, shorten, formatDuration, formatRunUsd, type AgentRun } from "./runs";
 import { formatUsd, type TokenUsage } from "./cost";
 import { CAVEAT, costOfTurn } from "./pricing";
 

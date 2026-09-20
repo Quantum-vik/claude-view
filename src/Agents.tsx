@@ -39,7 +39,7 @@ import {
   type PricedRun,
   type Roster,
   type RunStatus,
-} from "./agents";
+} from "./runs";
 
 const EMPTY: Roster = {
   runs: [],

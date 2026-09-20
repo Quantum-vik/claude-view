@@ -28,7 +28,7 @@ import { useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { T, tint } from "./tokens";
 import { useRoster } from "./Agents";
-import { formatDuration, idleMs, runLabel, shorten, type AgentRun } from "./agents";
+import { formatDuration, idleMs, runLabel, shorten, type AgentRun } from "./runs";
 
 /**
  * How many run chips the strip shows before collapsing the rest into a count.

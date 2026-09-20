@@ -325,7 +325,7 @@ claude-view/
 │  ├─ AgentWindow.tsx       239     one agent run, read-only, its own window
 │  ├─ AgentStrip.tsx        238     ● main / ○ run chips above the split
 │  ├─ TerminalWindow.tsx    191     PTY mirror minus everything Claude-specific
-│  ├─ agents.ts             201     roster pricing + presentation
+│  ├─ runs.ts               201     roster pricing + presentation
 │  ├─ pricing.ts            198     THE price table, with its AS_OF date
 │  ├─ cost.ts               146     live-rollup pricing
 │  ├─ Resizer.tsx           127     pointer-captured drag handle
